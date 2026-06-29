@@ -2,8 +2,9 @@
   "name": "matchiq-backend",
   "version": "1.0.0",
   "type": "module",
+  "packageManager": "pnpm@11.9.0",
   "scripts": {
-    "dev": "node --import file:///D:/github/mathciq/backend/node_modules/.pnpm/tsx@4.22.4/node_modules/tsx/dist/loader.mjs src/index.ts",
+    "dev": "npx tsx src/index.ts",
     "build": "tsc",
     "start": "npx tsx src/index.ts",
     "db:generate": "drizzle-kit generate",
