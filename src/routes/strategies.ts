@@ -98,18 +98,28 @@ strategies.put('/:id', requireAuth, async (c) => {
 strategies.delete('/:id', requireAuth, async (c) => {
   const user = c.get('user');
   const id = c.req.param('id');
+  const name = c.req.query('name');
 
-  const [existing] = await db
+  let [found] = await db
     .select()
     .from(schema.strategies)
     .where(and(eq(schema.strategies.id, id), eq(schema.strategies.userId, user.userId)))
     .limit(1);
 
-  if (!existing) {
+  // If not found by ID and name is provided, try by name
+  if (!found && name) {
+    [found] = await db
+      .select()
+      .from(schema.strategies)
+      .where(and(eq(schema.strategies.name, name), eq(schema.strategies.userId, user.userId)))
+      .limit(1);
+  }
+
+  if (!found) {
     return c.json({ error: 'Strategy not found' }, 404);
   }
 
-  await db.delete(schema.strategies).where(eq(schema.strategies.id, id));
+  await db.delete(schema.strategies).where(eq(schema.strategies.id, found.id));
   return c.json({ success: true });
 });
 
