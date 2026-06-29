@@ -12,8 +12,8 @@ import {
   integer,
   uniqueIndex,
   index,
-  sql,
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 
 // ═══════════════════════════════════════════
 // Users
