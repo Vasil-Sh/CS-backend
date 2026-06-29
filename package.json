@@ -2,7 +2,6 @@
   "name": "matchiq-backend",
   "version": "1.0.0",
   "type": "module",
-  "packageManager": "pnpm@11.9.0",
   "engines": {
     "node": ">=22"
   },
