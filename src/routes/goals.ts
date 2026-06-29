@@ -29,13 +29,16 @@ goals.post('/', requireAuth, async (c) => {
     return c.json({ error: 'Invalid input', details: e.errors }, 400);
   }
 
+  // Map frontend fields to backend schema
+  const target = body.targetAmount ?? body.targetLadderAmount ?? body.targetROI ?? body.targetWinRate ?? body.target ?? 0;
+
   const [goal] = await db
     .insert(schema.goals)
     .values({
       userId: user.userId,
-      type: body.type,
-      target: body.target.toString(),
-      current: body.current.toString(),
+      type: body.type === 'winrate' ? 'winrate' : body.type,
+      target: target.toString(),
+      current: body.current?.toString() || '0',
       deadline: body.deadline || null,
       isCompleted: body.isCompleted || false,
     })

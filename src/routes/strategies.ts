@@ -42,8 +42,8 @@ strategies.post('/', requireAuth, async (c) => {
     .values({
       userId: user.userId,
       name: body.name,
-      isPrimary: body.isPrimary,
-      config: body.config,
+      isPrimary: body.isPrimary ?? false,
+      config: body.config && Object.keys(body.config).length > 0 ? body.config : body,
     })
     .returning();
 

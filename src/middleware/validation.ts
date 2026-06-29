@@ -68,12 +68,30 @@ export const updateBetSchema = createBetSchema.partial();
 // ═══════════════════════════════════════════
 
 export const createGoalSchema = z.object({
-  type: z.enum(['amount', 'ladder', 'roi', 'win_rate']),
+  name: z.string().optional(),
+  type: z.enum(['amount', 'ladder', 'roi', 'winrate', 'win_rate']),
   target: z.coerce.number().min(0),
   current: z.coerce.number().min(0).default(0),
   deadline: z.string().optional(),
   isCompleted: z.boolean().optional(),
-});
+  // Extra frontend fields (accepted but not stored in column)
+  startAmount: z.coerce.number().optional(),
+  targetLadderAmount: z.coerce.number().optional(),
+  targetAmount: z.coerce.number().optional(),
+  targetROI: z.coerce.number().optional(),
+  targetWinRate: z.coerce.number().optional(),
+  betsPerDay: z.coerce.number().optional(),
+  currentBank: z.coerce.number().optional(),
+  currentStep: z.coerce.number().optional(),
+  totalSteps: z.coerce.number().optional(),
+  minOdds: z.coerce.number().optional(),
+  maxOdds: z.coerce.number().optional(),
+  avgOdds: z.coerce.number().optional(),
+  ladderMode: z.string().optional(),
+  isPrimary: z.boolean().optional(),
+  status: z.string().optional(),
+  steps: z.array(z.unknown()).optional(),
+}).passthrough();
 
 export const updateGoalSchema = createGoalSchema.partial();
 
@@ -84,10 +102,10 @@ export const updateGoalSchema = createGoalSchema.partial();
 export const createStrategySchema = z.object({
   name: z.string().min(1).max(200),
   isPrimary: z.boolean().default(false),
-  config: z.record(z.unknown()),
-});
+  config: z.record(z.unknown()).optional().default({}),
+}).passthrough();
 
-export const updateStrategySchema = createStrategySchema.partial();
+export const updateStrategySchema = createStrategySchema.partial().passthrough();
 
 // ═══════════════════════════════════════════
 // Bankroll schemas
