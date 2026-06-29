@@ -70,7 +70,7 @@ export const updateBetSchema = createBetSchema.partial();
 export const createGoalSchema = z.object({
   name: z.string().optional(),
   type: z.enum(['amount', 'ladder', 'roi', 'winrate', 'win_rate']),
-  target: z.coerce.number().min(0),
+  target: z.coerce.number().min(0).optional().default(0),
   current: z.coerce.number().min(0).default(0),
   deadline: z.string().optional(),
   isCompleted: z.boolean().optional(),
