@@ -155,6 +155,43 @@ auth.delete('/users/:id', requireAuth, requireAdmin, async (c) => {
   return c.json({ success: true });
 });
 
+// ── PUT /api/auth/users/:id (admin only) ──
+auth.put('/users/:id', requireAuth, requireAdmin, async (c) => {
+  const id = parseInt(c.req.param('id'), 10);
+  if (isNaN(id)) return c.json({ error: 'Invalid ID' }, 400);
+
+  const body = await c.req.json().catch(() => ({}));
+  const updateData: Record<string, unknown> = {};
+
+  if (body.telegram !== undefined) updateData.telegram = String(body.telegram);
+  if (body.username !== undefined) updateData.username = String(body.username);
+  if (body.password) {
+    updateData.passwordHash = await bcrypt.hash(String(body.password), 10);
+  }
+  if (body.role !== undefined) updateData.role = String(body.role);
+  if (body.priceMonth !== undefined) updateData.priceMonth = String(body.priceMonth);
+  if (body.startDate !== undefined) updateData.startDate = String(body.startDate);
+  if (body.endDate !== undefined) updateData.endDate = String(body.endDate);
+
+  const [updated] = await db
+    .update(schema.users)
+    .set(updateData)
+    .where(eq(schema.users.id, id))
+    .returning();
+
+  if (!updated) return c.json({ error: 'User not found' }, 404);
+
+  return c.json({
+    id: updated.id,
+    username: updated.username,
+    role: updated.role,
+    telegram: updated.telegram,
+    priceMonth: updated.priceMonth,
+    startDate: updated.startDate,
+    endDate: updated.endDate,
+  });
+});
+
 // ── POST /api/auth/refresh ──
 auth.post('/refresh', async (c) => {
   const { refreshToken } = await c.req.json().catch(() => ({}));
