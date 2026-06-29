@@ -90,17 +90,17 @@ goals.delete('/:id', requireAuth, async (c) => {
   const user = c.get('user');
   const id = c.req.param('id');
 
-  const [existing] = await db
+  let [found] = await db
     .select()
     .from(schema.goals)
     .where(and(eq(schema.goals.id, id), eq(schema.goals.userId, user.userId)))
     .limit(1);
 
-  if (!existing) {
+  if (!found) {
     return c.json({ error: 'Goal not found' }, 404);
   }
 
-  await db.delete(schema.goals).where(eq(schema.goals.id, id));
+  await db.delete(schema.goals).where(eq(schema.goals.id, found.id));
   return c.json({ success: true });
 });
 
