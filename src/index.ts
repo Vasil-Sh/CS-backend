@@ -8,6 +8,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { serve } from '@hono/node-server';
 import { authMiddleware } from './middleware/auth';
+import { loggerMiddleware } from './middleware/logger';
 
 import authRoutes from './routes/auth';
 import betRoutes from './routes/bets';
@@ -21,6 +22,7 @@ import riskyTeamRoutes from './routes/riskyTeams';
 const app = new Hono();
 
 // ── Global middleware ──
+app.use('*', loggerMiddleware);
 app.use('*', cors());
 app.use('*', authMiddleware);
 

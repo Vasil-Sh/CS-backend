@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import bcrypt from 'bcryptjs';
 import { eq } from 'drizzle-orm';
 import { db, schema } from '../db/client';
-import { signToken } from '../utils/jwt';
+import { signToken, signRefreshToken, verifyRefreshToken, type JwtPayload } from '../utils/jwt';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import {
   loginSchema,
@@ -52,10 +52,17 @@ auth.post('/login', async (c) => {
     role: user.role as 'admin' | 'user',
   });
 
+  const refreshToken = signRefreshToken({
+    userId: user.id,
+    username: user.username,
+    role: user.role as 'admin' | 'user',
+  });
+
   return c.json({
     success: true,
     isAdmin: user.role === 'admin',
     token,
+    refreshToken,
     user: {
       username: user.username,
       role: user.role,
@@ -146,6 +153,67 @@ auth.delete('/users/:id', requireAuth, requireAdmin, async (c) => {
 
   await db.delete(schema.users).where(eq(schema.users.id, id));
   return c.json({ success: true });
+});
+
+// ── POST /api/auth/refresh ──
+auth.post('/refresh', async (c) => {
+  const { refreshToken } = await c.req.json().catch(() => ({}));
+  if (!refreshToken) {
+    return c.json({ error: 'refreshToken required' }, 400);
+  }
+
+  try {
+    const payload = verifyRefreshToken(refreshToken);
+
+    const [user] = await db
+      .select()
+      .from(schema.users)
+      .where(eq(schema.users.id, payload.userId))
+      .limit(1);
+
+    if (!user) {
+      return c.json({ error: 'User not found' }, 404);
+    }
+
+    const token = signToken({ userId: user.id, username: user.username, role: user.role as 'admin' | 'user' });
+    const newRefresh = signRefreshToken({ userId: user.id, username: user.username, role: user.role as 'admin' | 'user' });
+
+    return c.json({ token, refreshToken: newRefresh });
+  } catch {
+    return c.json({ error: 'Invalid refresh token' }, 401);
+  }
+});
+
+// ── POST /api/auth/register-telegram (public, with Telegram chat ID) ──
+auth.post('/register-telegram', async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const { username, password, chatId } = body;
+
+  if (!username || !password || !chatId) {
+    return c.json({ error: 'username, password, and chatId required' }, 400);
+  }
+
+  const existing = await db
+    .select()
+    .from(schema.users)
+    .where(eq(schema.users.username, username))
+    .limit(1);
+
+  if (existing.length > 0) {
+    return c.json({ error: 'Username already exists' }, 409);
+  }
+
+  const hash = await bcrypt.hash(password, 10);
+  await db.insert(schema.users).values({
+    username,
+    passwordHash: hash,
+    role: 'user',
+    telegram: String(chatId),
+    priceMonth: '0',
+    endDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+  });
+
+  return c.json({ success: true }, 201);
 });
 
 export default auth;
