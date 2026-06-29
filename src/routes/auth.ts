@@ -101,8 +101,8 @@ auth.post('/register', requireAuth, requireAdmin, async (c) => {
       passwordHash,
       role: body.role || 'user',
       telegram: body.telegram || '',
-      priceMonth: body.priceMonth?.toString() || '0',
-      endDate: body.endDate || new Date().toISOString().split('T')[0],
+      priceMonth: String(body.priceMonth || '0'),
+      endDate: toPgDate(body.endDate),
     })
     .returning();
 
@@ -172,8 +172,8 @@ auth.put('/users/:id', requireAuth, requireAdmin, async (c) => {
   }
   if (body.role !== undefined) updateData.role = String(body.role);
   if (body.priceMonth !== undefined) updateData.priceMonth = String(body.priceMonth);
-  if (body.startDate !== undefined) updateData.startDate = String(body.startDate);
-  if (body.endDate !== undefined) updateData.endDate = String(body.endDate);
+  if (body.startDate !== undefined) updateData.startDate = toPgDate(String(body.startDate));
+  if (body.endDate !== undefined) updateData.endDate = toPgDate(String(body.endDate));
 
   const [updated] = await db
     .update(schema.users)
@@ -262,6 +262,16 @@ function generatePassword(): string {
     pwd += chars[Math.floor(Math.random() * chars.length)];
   }
   return pwd;
+}
+
+function toPgDate(date: string | undefined): string {
+  if (!date) return new Date().toISOString().split('T')[0];
+  // Already YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(date)) return date;
+  // DD/MM/YYYY → YYYY-MM-DD
+  const parts = date.split('/');
+  if (parts.length === 3) return `${parts[2]}-${parts[1].padStart(2,'0')}-${parts[0].padStart(2,'0')}`;
+  return date;
 }
 
 export default auth;
