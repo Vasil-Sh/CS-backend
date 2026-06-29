@@ -90,7 +90,9 @@ auth.post('/register', requireAuth, requireAdmin, async (c) => {
     return c.json({ error: 'Username already exists' }, 409);
   }
 
-  const passwordHash = await bcrypt.hash(body.password, 10);
+  // Generate a random password if not provided
+  const plainPassword = body.password || generatePassword();
+  const passwordHash = await bcrypt.hash(plainPassword, 10);
 
   const [user] = await db
     .insert(schema.users)
@@ -104,7 +106,7 @@ auth.post('/register', requireAuth, requireAdmin, async (c) => {
     })
     .returning();
 
-  return c.json({ success: true, userId: user.id }, 201);
+  return c.json({ success: true, userId: user.id, username: user.username, password: plainPassword }, 201);
 });
 
 // ── GET /api/auth/me ──
@@ -252,5 +254,14 @@ auth.post('/register-telegram', async (c) => {
 
   return c.json({ success: true }, 201);
 });
+
+function generatePassword(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  let pwd = '';
+  for (let i = 0; i < 10; i++) {
+    pwd += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return pwd;
+}
 
 export default auth;
