@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "type": "module",
   "packageManager": "pnpm@11.9.0",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "npx tsx src/index.ts",
     "build": "tsc",
