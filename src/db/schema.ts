@@ -114,6 +114,7 @@ export const goals = pgTable(
       .references(() => users.id, { onDelete: 'cascade' }),
 
     type: varchar('type', { length: 50 }).notNull(), // 'amount' | 'ladder' | 'roi' | 'win_rate'
+    name: varchar('name', { length: 200 }).default(''),
     target: numeric('target', { precision: 12, scale: 2 }).notNull(),
     current: numeric('current', { precision: 12, scale: 2 }).default('0'),
     deadline: date('deadline'),

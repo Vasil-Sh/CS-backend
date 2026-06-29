@@ -38,6 +38,7 @@ goals.post('/', requireAuth, async (c) => {
     .values({
       userId: user.userId,
       type: body.type === 'winrate' ? 'winrate' : body.type,
+      name: body.name || '',
       target: resolvedTarget.toString(),
       current: body.current?.toString() || '0',
       deadline: body.deadline || null,
@@ -72,6 +73,7 @@ goals.put('/:id', requireAuth, async (c) => {
 
   const updateData: Record<string, any> = {};
   if (body.type !== undefined) updateData.type = body.type;
+  if (body.name !== undefined) updateData.name = body.name;
   if (body.target !== undefined) updateData.target = body.target.toString();
   if (body.current !== undefined) updateData.current = body.current.toString();
   if (body.deadline !== undefined) updateData.deadline = body.deadline;
