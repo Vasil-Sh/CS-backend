@@ -11,7 +11,7 @@ export const loginSchema = z.object({
 
 export const registerSchema = z.object({
   username: z.string().min(1).max(100),
-  password: z.string().min(4, 'Password must be at least 4 characters').max(255),
+  password: z.string().optional(),
   telegram: z.string().optional(),
   priceMonth: z.coerce.number().optional(),
   endDate: z.string().optional(),
