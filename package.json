@@ -12,8 +12,8 @@
     "start": "npx tsx src/index.ts",
     "db:generate": "drizzle-kit generate",
     "db:push": "drizzle-kit push",
-    "db:seed": "node --import file:///D:/github/mathciq/backend/node_modules/.pnpm/tsx@4.22.4/node_modules/tsx/dist/loader.mjs src/db/seed.ts",
-    "db:import-users": "node --import file:///D:/github/mathciq/backend/node_modules/.pnpm/tsx@4.22.4/node_modules/tsx/dist/loader.mjs src/db/migrateUsers.ts",
+    "db:seed": "npx tsx src/db/seed.ts",
+    "db:import-users": "npx tsx src/db/migrateUsers.ts",
     "db:studio": "drizzle-kit studio",
     "lint": "eslint --quiet ./src",
     "typecheck": "tsc --noEmit"
