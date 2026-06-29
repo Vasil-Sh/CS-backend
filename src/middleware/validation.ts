@@ -13,7 +13,7 @@ export const registerSchema = z.object({
   username: z.string().min(1).max(100),
   password: z.string().optional(),
   telegram: z.string().optional(),
-  priceMonth: z.coerce.number().optional(),
+  priceMonth: z.string().optional(),
   endDate: z.string().optional(),
   role: z.enum(['admin', 'user']).optional(),
 });
