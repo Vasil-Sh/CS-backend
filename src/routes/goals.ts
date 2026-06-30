@@ -53,7 +53,7 @@ goals.post('/', requireAuth, async (c) => {
 // ── PUT /api/goals/:id ──
 goals.put('/:id', requireAuth, async (c) => {
   const user = c.get('user');
-  const id = c.req.param('id');
+  const id = c.req.param('id') || '';
 
   let body;
   try {
@@ -93,7 +93,7 @@ goals.put('/:id', requireAuth, async (c) => {
 // ── DELETE /api/goals/:id ──
 goals.delete('/:id', requireAuth, async (c) => {
   const user = c.get('user');
-  const id = c.req.param('id');
+  const id = c.req.param('id') || '';
 
   let [found] = await db
     .select()

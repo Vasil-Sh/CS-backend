@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import './utils/env'; // Fail-fast env validation
 
 // ═══════════════════════════════════════════
 // MatchIQ Backend API Server
@@ -10,7 +11,10 @@ import { serve } from '@hono/node-server';
 import { authMiddleware } from './middleware/auth';
 import { loggerMiddleware } from './middleware/logger';
 import { rateLimiterMiddleware } from './middleware/rateLimiter';
-import pg from 'pg';
+import { bodyLimit } from './middleware/bodyLimit';
+import { securityHeaders } from './middleware/securityHeaders';
+import { db } from './db/client';
+import { sql } from 'drizzle-orm';
 
 import authRoutes from './routes/auth';
 import betRoutes from './routes/bets';
@@ -25,25 +29,25 @@ import riskyTeamRoutes from './routes/riskyTeams';
 const app = new Hono();
 
 // ── Global middleware ──
+app.use('*', securityHeaders);
 app.use('*', loggerMiddleware);
 app.use('*', cors({ origin: '*', credentials: true }));
 app.use('*', rateLimiterMiddleware);
+app.use('*', bodyLimit(1_000_000)); // 1MB max body
 app.use('*', authMiddleware);
 
-// ── Health check (with DB verification) ──
+// ── Health check (reuses shared pool, no leak) ──
 app.get('/api/health', async (c) => {
-  let db = 'unknown';
+  let dbStatus = 'unknown';
   try {
-    const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
-    const result = await pool.query('SELECT 1');
-    db = result.rows[0]?.['?column?'] === 1 ? 'connected' : 'error';
-    await pool.end();
+    const result = await db.execute(sql`SELECT 1`);
+    dbStatus = 'connected';
   } catch {
-    db = 'disconnected';
+    dbStatus = 'disconnected';
   }
   return c.json({
     status: 'ok',
-    database: db,
+    database: dbStatus,
     uptime: Math.floor(process.uptime()),
     timestamp: new Date().toISOString(),
   });
@@ -78,6 +82,17 @@ app.route('/api/risky-teams', riskyTeamRoutes);
 const port = parseInt(process.env.PORT || '3001', 10);
 
 console.log(`🚀 MatchIQ API server starting on http://localhost:${port}`);
+
+// ── Graceful shutdown ──
+const shutdown = async (signal: string) => {
+  console.log(`\n🛑 Received ${signal}, shutting down gracefully...`);
+  // The Hono serve() returns a Server; we'd close it here.
+  // For now, exit cleanly so Railway restarts with zero downtime.
+  process.exit(0);
+};
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 serve({
   fetch: app.fetch,

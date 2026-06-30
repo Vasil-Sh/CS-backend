@@ -32,7 +32,7 @@ tgGroups.post('/', requireAuth, async (c) => {
 // ── DELETE /api/telegram-groups/:id ──
 tgGroups.delete('/:id', requireAuth, async (c) => {
   const user = c.get('user');
-  const id = c.req.param('id');
+  const id = c.req.param('id') || '';
   const [found] = await db.select().from(schema.telegramGroups)
     .where(and(eq(schema.telegramGroups.id, id), eq(schema.telegramGroups.userId, user.userId)))
     .limit(1);

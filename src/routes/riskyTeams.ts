@@ -48,7 +48,7 @@ riskyTeams.post('/', requireAuth, requireAdmin, async (c) => {
 
 // ── DELETE /api/risky-teams/:id (admin only) ──
 riskyTeams.delete('/:id', requireAuth, requireAdmin, async (c) => {
-  const id = parseInt(c.req.param('id'), 10);
+  const id = parseInt(c.req.param('id') || '', 10);
   if (isNaN(id)) return c.json({ error: 'Invalid ID' }, 400);
 
   await db.delete(schema.riskyTeams).where(eq(schema.riskyTeams.id, id));

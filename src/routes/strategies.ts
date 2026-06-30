@@ -53,7 +53,7 @@ strategies.post('/', requireAuth, async (c) => {
 // ── PUT /api/strategies/:id ──
 strategies.put('/:id', requireAuth, async (c) => {
   const user = c.get('user');
-  const id = c.req.param('id');
+  const id = c.req.param('id') || '';
 
   let body;
   try {
@@ -97,7 +97,7 @@ strategies.put('/:id', requireAuth, async (c) => {
 // ── DELETE /api/strategies/:id ──
 strategies.delete('/:id', requireAuth, async (c) => {
   const user = c.get('user');
-  const id = c.req.param('id');
+  const id = c.req.param('id') || '';
   const name = c.req.query('name');
 
   let [found] = await db

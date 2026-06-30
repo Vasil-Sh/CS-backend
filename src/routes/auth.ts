@@ -58,6 +58,14 @@ auth.post('/login', async (c) => {
     role: user.role as 'admin' | 'user',
   });
 
+  // Set httpOnly cookie for XSS protection (browser will auto-send)
+  const isProd = process.env.NODE_ENV === 'production';
+  c.header(
+    'Set-Cookie',
+    `auth_token=${token}; HttpOnly; ${isProd ? 'Secure; ' : ''}SameSite=Lax; Path=/; Max-Age=${7 * 24 * 60 * 60}`,
+    { append: true }
+  );
+
   return c.json({
     success: true,
     isAdmin: user.role === 'admin',
@@ -69,10 +77,6 @@ auth.post('/login', async (c) => {
       telegram: user.telegram,
     },
   });
-
-  // Also set httpOnly cookie for XSS protection (browser will auto-send)
-  const isProd = process.env.NODE_ENV === 'production';
-  c.res.headers.set('Set-Cookie', `auth_token=${token}; HttpOnly; ${isProd ? 'Secure; ' : ''}SameSite=Lax; Path=/; Max-Age=${7 * 24 * 60 * 60}`);
 });
 
 // ── POST /api/auth/register (admin only) ──
@@ -154,7 +158,7 @@ auth.get('/users', requireAuth, requireAdmin, async (c) => {
 
 // ── DELETE /api/auth/users/:id (admin only) ──
 auth.delete('/users/:id', requireAuth, requireAdmin, async (c) => {
-  const id = parseInt(c.req.param('id'), 10);
+  const id = parseInt(c.req.param('id') || '', 10);
   if (isNaN(id)) return c.json({ error: 'Invalid ID' }, 400);
 
   await db.delete(schema.users).where(eq(schema.users.id, id));
@@ -163,7 +167,7 @@ auth.delete('/users/:id', requireAuth, requireAdmin, async (c) => {
 
 // ── PUT /api/auth/users/:id (admin only) ──
 auth.put('/users/:id', requireAuth, requireAdmin, async (c) => {
-  const id = parseInt(c.req.param('id'), 10);
+  const id = parseInt(c.req.param('id') || '', 10);
   if (isNaN(id)) return c.json({ error: 'Invalid ID' }, 400);
 
   const body = await c.req.json().catch(() => ({}));

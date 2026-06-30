@@ -60,7 +60,7 @@ class DeepSeekService {
       throw new Error(`DeepSeek API error ${response.status}: ${err}`);
     }
 
-    const data = await response.json();
+    const data = await response.json() as { choices?: { message?: { content?: string } }[] };
     const text = data.choices?.[0]?.message?.content || '';
     return this.parseResponse(text);
   }
