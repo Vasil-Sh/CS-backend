@@ -53,47 +53,63 @@ app.get('/api/health', async (c) => {
   });
 });
 
-// ── API Docs (imported as TS — always works, no JSON loader needed) ──
-import openapiSpec from './openapi.generated';
-import { readFileSync } from 'fs';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
+// ── API Docs (try file read → fallback) ──
+import fs from 'fs';
+import path from 'path';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+let _openapiSpec: any = null;
+const cwd = process.cwd();
 
-if (openapiSpec) {
-  app.get('/api/docs.json', (c) => c.json(openapiSpec));
+// Log CWD for Railway debugging
+console.log(`🔍 CWD: ${cwd}`);
+console.log(`🔍 src/openapi.json exists: ${fs.existsSync(path.join(cwd, 'src', 'openapi.json'))}`);
 
-  // Swagger UI (interactive docs)
-  // In production, protected by query param ?key=<ADMIN_PASSWORD>
-  // In dev, open access
+try {
+  _openapiSpec = JSON.parse(fs.readFileSync(path.join(cwd, 'src', 'openapi.json'), 'utf-8'));
+  console.log('📄 openapi.json loaded from CWD');
+} catch (e1: any) {
+  console.warn('⚠️ CWD load failed:', e1.message);
+  try {
+    const __dirname = path.dirname(new URL(import.meta.url).pathname);
+    _openapiSpec = JSON.parse(fs.readFileSync(path.join(__dirname, 'openapi.json'), 'utf-8'));
+    console.log(`📄 openapi.json loaded from __dirname: ${__dirname}`);
+  } catch (e2: any) {
+    console.warn('⚠️ __dirname load failed:', e2.message);
+    _openapiSpec = { openapi: '3.0.3', info: { title: 'MatchIQ API', version: '1.0.0' }, paths: {} };
+    console.warn('⚠️ Using fallback spec');
+  }
+}
+
+// Serve docs.json unconditionally
+app.get('/api/docs.json', (c) => c.json(_openapiSpec));
+
+// Swagger UI
+let _swaggerHtml = '';
+try {
+  _swaggerHtml = fs.readFileSync(path.join(cwd, 'src', 'swagger.html'), 'utf-8');
+} catch {
+  console.warn('⚠️ swagger.html not found');
+}
+
+if (_swaggerHtml) {
   const isDev = process.env.NODE_ENV !== 'production';
   const adminPassword = process.env.ADMIN_PASSWORD || '';
 
-  let swaggerHtml = '';
-  try { swaggerHtml = readFileSync(join(__dirname, 'swagger.html'), 'utf-8'); } catch {}
-
-  if (swaggerHtml) {
-    app.get('/api/docs', (c) => {
-      if (!isDev && adminPassword) {
-        const key = c.req.query('key');
-        if (key !== adminPassword) {
-          return c.json({ error: 'Access denied. Use ?key=<password>' }, 403);
-        }
+  app.get('/api/docs', (c) => {
+    if (!isDev && adminPassword) {
+      const key = c.req.query('key');
+      if (key !== adminPassword) {
+        return c.json({ error: 'Access denied. Use ?key=<password>' }, 403);
       }
-      return c.html(swaggerHtml);
-    });
+    }
+    return c.html(_swaggerHtml);
+  });
 
-    console.log(
-      `📖 API Docs: http://localhost:${process.env.PORT || '3001'}/api/docs` +
-      (!isDev ? `?key=<ADMIN_PASSWORD>` : '')
-    );
-  } else {
-    console.warn('⚠️ swagger.html not found — /api/docs unavailable');
-  }
-} else {
-  console.warn('⚠️ openapi.json import failed — /api/docs.json unavailable');
+  console.log(
+    `📖 API Docs: http://localhost:${process.env.PORT || '3001'}/api/docs${
+      !isDev ? '?key=<ADMIN_PASSWORD>' : ''
+    }`
+  );
 }
 
 // ── Routes ──
@@ -115,8 +131,6 @@ console.log(`🚀 MatchIQ API server starting on http://localhost:${port}`);
 // ── Graceful shutdown ──
 const shutdown = async (signal: string) => {
   console.log(`\n🛑 Received ${signal}, shutting down gracefully...`);
-  // The Hono serve() returns a Server; we'd close it here.
-  // For now, exit cleanly so Railway restarts with zero downtime.
   process.exit(0);
 };
 
