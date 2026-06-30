@@ -52,7 +52,7 @@ bets.post('/', requireAuth, async (c) => {
       exchangeRate: body.exchangeRate?.toString(),
       originalProfit: body.originalProfit?.toString(),
       roi: body.roi?.toString(),
-      goalId: body.goalId,
+      goalId: body.goalId && body.goalId !== 'all' && body.goalId.trim() !== '' ? body.goalId : undefined,
       selection: body.selection || '',
       matchUrl: body.matchUrl || '',
       winProbability: body.winProbability?.toString(),
