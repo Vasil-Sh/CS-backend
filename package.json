@@ -16,8 +16,11 @@
     "db:seed-prod": "npx tsx src/db/seed.ts",
     "db:import-users": "npx tsx src/db/migrateUsers.ts",
     "db:studio": "drizzle-kit studio",
+    "db:migrate": "npx tsx src/db/runMigrations.ts",
     "lint": "eslint --quiet ./src",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.0",
@@ -36,6 +39,7 @@
     "@types/node": "^22.0.0",
     "@types/pg": "^8.11.0",
     "drizzle-kit": "^0.28.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "vitest": "^2.0.0"
   }
 }

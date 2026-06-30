@@ -214,4 +214,87 @@ bets.get('/stats', requireAuth, async (c) => {
   });
 });
 
+// ── PATCH /api/bets/:id (partial update — same logic as PUT) ──
+bets.on('PATCH', '/:id', requireAuth, async (c) => {
+  const user = c.get('user');
+  const id = c.req.param('id');
+
+  let body;
+  try {
+    body = updateBetSchema.parse(await c.req.json());
+  } catch (e: any) {
+    return c.json({ error: 'Invalid input', details: e.errors }, 400);
+  }
+
+  const [existing] = await db
+    .select()
+    .from(schema.bets)
+    .where(and(eq(schema.bets.id, id), eq(schema.bets.userId, user.userId)))
+    .limit(1);
+
+  if (!existing) {
+    return c.json({ error: 'Bet not found' }, 404);
+  }
+
+  const updateData: Record<string, any> = {};
+  if (body.result !== undefined) updateData.result = body.result;
+  if (body.profit !== undefined) updateData.profit = body.profit.toString();
+  if (body.notes !== undefined) updateData.notes = body.notes;
+  if (body.strategy !== undefined) updateData.strategy = body.strategy;
+  if (body.odds !== undefined) updateData.odds = body.odds.toString();
+  if (body.amount !== undefined) updateData.amount = body.amount.toString();
+  if (body.roi !== undefined) updateData.roi = body.roi.toString();
+  if (body.risk !== undefined) updateData.risk = body.risk;
+  if (body.match !== undefined) updateData.match = body.match;
+  if (body.team1 !== undefined) updateData.team1 = body.team1;
+  if (body.team2 !== undefined) updateData.team2 = body.team2;
+  if (body.betType !== undefined) updateData.betType = body.betType;
+  if (body.date !== undefined) updateData.date = body.date;
+  if (body.stake !== undefined) updateData.stake = body.stake?.toString();
+  if (body.format !== undefined) updateData.format = body.format;
+  if (body.game !== undefined) updateData.game = body.game;
+  if (body.currency !== undefined) updateData.currency = body.currency;
+  if (body.originalAmount !== undefined) updateData.originalAmount = body.originalAmount.toString();
+  if (body.exchangeRate !== undefined) updateData.exchangeRate = body.exchangeRate?.toString();
+  if (body.originalProfit !== undefined) updateData.originalProfit = body.originalProfit.toString();
+  if (body.goalId !== undefined) updateData.goalId = body.goalId;
+  if (body.selection !== undefined) updateData.selection = body.selection;
+  if (body.matchUrl !== undefined) updateData.matchUrl = body.matchUrl;
+  if (body.winProbability !== undefined) updateData.winProbability = body.winProbability.toString();
+  if (body.riskyTeams !== undefined) updateData.riskyTeams = body.riskyTeams;
+  if (body.tournament !== undefined) updateData.tournament = body.tournament;
+  if (body.logoTeam1 !== undefined) updateData.logoTeam1 = body.logoTeam1;
+  if (body.logoTeam2 !== undefined) updateData.logoTeam2 = body.logoTeam2;
+  if (body.expressLogos !== undefined) updateData.expressLogos = body.expressLogos;
+
+  const [updated] = await db
+    .update(schema.bets)
+    .set(updateData)
+    .where(eq(schema.bets.id, id))
+    .returning();
+
+  return c.json(updated);
+});
+
+// ── PATCH /api/bets/:id (partial update) ──
+bets.on('PATCH', '/:id', requireAuth, async (c) => {
+  // Same logic as PUT — update only provided fields
+  const user = c.get('user');
+  const id = c.req.param('id');
+  let body: any;
+  try { body = updateBetSchema.parse(await c.req.json()); } catch (e: any) { return c.json({ error: 'Invalid input', details: e.errors }, 400); }
+
+  const [existing] = await db.select().from(schema.bets).where(and(eq(schema.bets.id, id), eq(schema.bets.userId, user.userId))).limit(1);
+  if (!existing) return c.json({ error: 'Bet not found' }, 404);
+
+  const d: Record<string, any> = {};
+  if (body.result !== undefined) d.result = body.result;
+  if (body.profit !== undefined) d.profit = body.profit.toString();
+  if (body.notes !== undefined) d.notes = body.notes;
+  if (body.roi !== undefined) d.roi = body.roi.toString();
+
+  const [updated] = await db.update(schema.bets).set(d).where(eq(schema.bets.id, id)).returning();
+  return c.json(updated);
+});
+
 export default bets;

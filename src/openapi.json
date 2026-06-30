@@ -1,0 +1,57 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "MatchIQ Backend API",
+    "version": "1.0.0",
+    "description": "REST API for MatchIQ CS2/Dota 2 betting analytics platform"
+  },
+  "servers": [{ "url": "https://cs-backend-production-f9e8.up.railway.app/api" }],
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Health check",
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/auth/login": {
+      "post": {
+        "summary": "Login",
+        "requestBody": { "content": { "application/json": { "schema": { "properties": { "username": { "type": "string" }, "password": { "type": "string" } } } } } },
+        "responses": { "200": { "description": "JWT token" } }
+      }
+    },
+    "/bets": {
+      "get": { "summary": "List bets", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Array of bets" } } },
+      "post": { "summary": "Create bet", "security": [{ "bearerAuth": [] }], "responses": { "201": { "description": "Created bet" } } }
+    },
+    "/bets/stats": {
+      "get": { "summary": "Bet statistics", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Aggregated stats" } } }
+    },
+    "/bets/{id}": {
+      "put": { "summary": "Update bet", "security": [{ "bearerAuth": [] }], "parameters": [{ "name": "id", "in": "path", "required": true }], "responses": { "200": { "description": "Updated bet" } } },
+      "patch": { "summary": "Partial update bet", "security": [{ "bearerAuth": [] }], "parameters": [{ "name": "id", "in": "path", "required": true }], "responses": { "200": { "description": "Updated bet" } } },
+      "delete": { "summary": "Delete bet", "security": [{ "bearerAuth": [] }], "parameters": [{ "name": "id", "in": "path", "required": true }], "responses": { "200": { "description": "Deleted" } } }
+    },
+    "/goals": {
+      "get": { "summary": "List goals", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Array of goals" } } },
+      "post": { "summary": "Create goal", "security": [{ "bearerAuth": [] }], "responses": { "201": { "description": "Created goal" } } }
+    },
+    "/strategies": {
+      "get": { "summary": "List strategies", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Array of strategies" } } },
+      "post": { "summary": "Create strategy", "security": [{ "bearerAuth": [] }], "responses": { "201": { "description": "Created strategy" } } }
+    },
+    "/bankroll": {
+      "get": { "summary": "Get bankroll", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Bankroll data" } } },
+      "post": { "summary": "Set bankroll", "security": [{ "bearerAuth": [] }], "responses": { "201": { "description": "Bankroll set" } } }
+    },
+    "/risky-teams": {
+      "get": { "summary": "List risky teams", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Array of teams" } } },
+      "post": { "summary": "Add risky team", "security": [{ "bearerAuth": [] }], "responses": { "201": { "description": "Created" } } }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer", "bearerFormat": "JWT" }
+    }
+  }
+}
