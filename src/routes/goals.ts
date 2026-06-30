@@ -43,6 +43,7 @@ goals.post('/', requireAuth, async (c) => {
       current: body.current?.toString() || '0',
       deadline: body.deadline || null,
       isCompleted: body.isCompleted || false,
+      config: body.config || body,
     })
     .returning();
 
@@ -74,6 +75,7 @@ goals.put('/:id', requireAuth, async (c) => {
   const updateData: Record<string, any> = {};
   if (body.type !== undefined) updateData.type = body.type;
   if (body.name !== undefined) updateData.name = body.name;
+  if (body.config !== undefined) updateData.config = body.config;
   if (body.target !== undefined) updateData.target = body.target.toString();
   if (body.current !== undefined) updateData.current = body.current.toString();
   if (body.deadline !== undefined) updateData.deadline = body.deadline;

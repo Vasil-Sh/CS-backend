@@ -119,6 +119,7 @@ export const goals = pgTable(
     current: numeric('current', { precision: 12, scale: 2 }).default('0'),
     deadline: date('deadline'),
     isCompleted: boolean('is_completed').default(false),
+    config: jsonb('config').default({}),
 
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at')
