@@ -8,12 +8,14 @@ const riskyTeams = new Hono();
 
 // ── GET /api/risky-teams ──
 riskyTeams.get('/', async (c) => {
+  // Global list: all users see all risky teams (no user filter)
   const rows = await db.select().from(schema.riskyTeams).orderBy(schema.riskyTeams.name);
-  return c.json(rows.map((r) => ({ id: r.id, name: r.name, game: r.game, status: r.status, notes: r.notes })));
+  return c.json(rows.map((r) => ({ id: r.id, userId: r.userId, name: r.name, game: r.game, status: r.status, notes: r.notes })));
 });
 
 // ── POST /api/risky-teams (admin only) ──
 riskyTeams.post('/', requireAuth, requireAdmin, async (c) => {
+  const user = c.get('user');
   const body = z.object({
     name: z.string().min(1).max(200),
     game: z.string().max(20).optional().default(''),
@@ -33,7 +35,7 @@ riskyTeams.post('/', requireAuth, requireAdmin, async (c) => {
 
   const [team] = await db
     .insert(schema.riskyTeams)
-    .values({ name: body.name, game: body.game, status: body.status, notes: body.notes })
+    .values({ userId: user.userId, name: body.name, game: body.game, status: body.status, notes: body.notes })
     .returning();
 
   return c.json(team, 201);

@@ -188,13 +188,18 @@ export const riskyTeams = pgTable(
   'risky_teams',
   {
     id: serial('id').primaryKey(),
-    name: varchar('name', { length: 200 }).notNull().unique(),
+    userId: integer('user_id').notNull().default(1).references(() => users.id, { onDelete: 'cascade' }),
+    name: varchar('name', { length: 200 }).notNull(),
     game: varchar('game', { length: 20 }).default(''),
     status: varchar('status', { length: 50 }).default(''),
     notes: text('notes').default(''),
     createdAt: timestamp('created_at').defaultNow().notNull(),
   },
-  (table: any) => [index('risky_teams_name_idx').on(table.name)]
+  (table: any) => [
+    index('risky_teams_name_idx').on(table.name),
+    index('risky_teams_user_idx').on(table.userId),
+    uniqueIndex('risky_teams_user_name_idx').on(table.userId, table.name),
+  ]
 );
 
 // ── Type exports ──
