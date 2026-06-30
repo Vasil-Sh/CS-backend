@@ -25,6 +25,7 @@ import aiRoutes from './routes/ai';
 import telegramRoutes from './routes/telegram';
 import telegramGroupRoutes from './routes/telegramGroups';
 import riskyTeamRoutes from './routes/riskyTeams';
+import adminRoutes from './routes/admin';
 
 const app = new Hono();
 
@@ -105,6 +106,7 @@ app.route('/api/ai', aiRoutes);
 app.route('/api/telegram', telegramRoutes);
 app.route('/api/telegram-groups', telegramGroupRoutes);
 app.route('/api/risky-teams', riskyTeamRoutes);
+app.route('/api', adminRoutes);
 
 // ── Start ──
 const port = parseInt(process.env.PORT || '3001', 10);
