@@ -21,12 +21,17 @@ riskyTeams.get('/', requireAuth, async (c) => {
 // ── POST /api/risky-teams (admin only) ──
 riskyTeams.post('/', requireAuth, requireAdmin, async (c) => {
   const user = c.get('user');
-  const body = z.object({
-    name: z.string().min(1).max(200),
-    game: z.string().max(20).optional().default(''),
-    status: z.string().max(50).optional().default(''),
-    notes: z.string().optional().default(''),
-  }).parse(await c.req.json());
+  let body;
+  try {
+    body = z.object({
+      name: z.string().min(1).max(200),
+      game: z.string().max(20).optional().default(''),
+      status: z.string().max(50).optional().default(''),
+      notes: z.string().optional().default(''),
+    }).parse(await c.req.json());
+  } catch {
+    return c.json({ error: 'Invalid input: name required (1-200 chars), optional game/status/notes' }, 400);
+  }
 
   const [existing] = await db
     .select()

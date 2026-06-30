@@ -18,10 +18,15 @@ tgGroups.get('/', requireAuth, async (c) => {
 // ── POST /api/telegram-groups ──
 tgGroups.post('/', requireAuth, async (c) => {
   const user = c.get('user');
-  const body = z.object({
-    name: z.string().min(1).max(200),
-    link: z.string().max(500).default(''),
-  }).parse(await c.req.json());
+  let body;
+  try {
+    body = z.object({
+      name: z.string().min(1).max(200),
+      link: z.string().max(500).default(''),
+    }).parse(await c.req.json());
+  } catch {
+    return c.json({ error: 'Invalid input: name (1-200 chars) and optional link required' }, 400);
+  }
 
   const [group] = await db.insert(schema.telegramGroups)
     .values({ userId: user.userId, name: body.name, link: body.link })
