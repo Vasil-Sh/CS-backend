@@ -53,41 +53,17 @@ app.get('/api/health', async (c) => {
   });
 });
 
-// ── API Docs (serves openapi.json) ──
-import { readFileSync, existsSync } from 'fs';
-import { join, dirname, resolve } from 'path';
+// ── API Docs (imported directly — works on Railway) ──
+import openapiSpec from './openapi.json' with { type: 'json' };
+import { readFileSync } from 'fs';
+import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Try multiple locations for openapi.json (tsx on Railway may resolve __dirname differently)
-function findFile(filename: string): string | null {
-  const candidates = [
-    join(__dirname, filename),           // src/openapi.json (tsx/tsc)
-    resolve(filename),                    // ./openapi.json from CWD
-    resolve('src', filename),            // ./src/openapi.json from CWD
-    join(process.cwd(), filename),       // CWD + filename
-    join(process.cwd(), 'src', filename),// CWD/src/filename
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate;
-  }
-  // Fallback: return first candidate even if doesn't exist (let read try & log)
-  return candidates[0];
-}
-
-let openapiSpec: object | null = null;
-const openapiPath = findFile('openapi.json');
-try {
-  openapiSpec = JSON.parse(readFileSync(openapiPath!, 'utf-8'));
-  console.log(`📄 openapi.json loaded from: ${openapiPath}`);
-} catch (e: any) {
-  console.warn(`⚠️ openapi.json not loaded (tried ${openapiPath}):`, e.message);
-}
-
 if (openapiSpec) {
-  app.get('/api/docs.json', (c) => c.json(openapiSpec!));
+  app.get('/api/docs.json', (c) => c.json(openapiSpec));
 
   // Swagger UI (interactive docs)
   // In production, protected by query param ?key=<ADMIN_PASSWORD>
@@ -96,11 +72,9 @@ if (openapiSpec) {
   const adminPassword = process.env.ADMIN_PASSWORD || '';
 
   let swaggerHtml = '';
-  const swaggerPath = findFile('swagger.html');
-  try { if (swaggerPath) swaggerHtml = readFileSync(swaggerPath, 'utf-8'); } catch {}
+  try { swaggerHtml = readFileSync(join(__dirname, 'swagger.html'), 'utf-8'); } catch {}
 
   if (swaggerHtml) {
-    console.log(`📖 swagger.html loaded from: ${swaggerPath}`);
     app.get('/api/docs', (c) => {
       if (!isDev && adminPassword) {
         const key = c.req.query('key');
@@ -115,7 +89,11 @@ if (openapiSpec) {
       `📖 API Docs: http://localhost:${process.env.PORT || '3001'}/api/docs` +
       (!isDev ? `?key=<ADMIN_PASSWORD>` : '')
     );
+  } else {
+    console.warn('⚠️ swagger.html not found — /api/docs unavailable');
   }
+} else {
+  console.warn('⚠️ openapi.json import failed — /api/docs.json unavailable');
 }
 
 // ── Routes ──
