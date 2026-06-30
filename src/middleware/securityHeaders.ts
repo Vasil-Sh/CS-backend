@@ -38,8 +38,7 @@ export async function securityHeaders(c: Context, next: Next) {
       "frame-ancestors 'none'"
     );
     c.res.headers.set('X-Frame-Options', 'DENY');
-    c.res.headers.set('Cross-Origin-Opener-Policy', 'same-origin');
-    c.res.headers.set('Cross-Origin-Resource-Policy', 'same-origin');
+    // NOTE: No Cross-Origin-Resource-Policy on API — CORS handles cross-origin
   }
 
   c.res.headers.set('X-DNS-Prefetch-Control', 'off');
