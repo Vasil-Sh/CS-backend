@@ -24,31 +24,31 @@ export const registerSchema = z.object({
 
 export const createBetSchema = z.object({
   match: z.string().min(1).max(500),
-  team1: z.string().max(200).optional(),
-  team2: z.string().max(200).optional(),
+  team1: z.string().max(200).optional().default(''),
+  team2: z.string().max(200).optional().default(''),
   betType: z.string().max(100).default('Ординар'),
-  odds: z.coerce.number().min(1).max(1000),
+  odds: z.coerce.number().min(0).max(1000),
   amount: z.coerce.number().min(0),
   stake: z.coerce.number().optional(),
   date: z.string().optional(),
   result: z.enum(['Win', 'Loss', 'Pending']).default('Pending'),
   profit: z.coerce.number().optional(),
-  strategy: z.string().max(200).optional(),
-  format: z.string().max(20).optional(),
+  strategy: z.string().max(200).optional().default(''),
+  format: z.string().max(20).optional().default(''),
   game: z.string().max(20).default('CS2'),
   currency: z.string().max(10).default('USD'),
   originalAmount: z.coerce.number().optional(),
   exchangeRate: z.coerce.number().optional().nullable(),
   originalProfit: z.coerce.number().optional(),
   roi: z.coerce.number().optional(),
-  goalId: z.string().uuid().optional(),
-  selection: z.string().max(200).optional(),
-  matchUrl: z.string().max(500).optional(),
+  goalId: z.string().optional().default(''),
+  selection: z.string().max(200).optional().default(''),
+  matchUrl: z.string().max(500).optional().default(''),
   winProbability: z.coerce.number().min(0).max(100).optional(),
-  risk: z.string().max(50).optional(),
-  notes: z.string().optional(),
-  riskyTeams: z.array(z.string()).optional(),
-  tournament: z.string().max(200).optional(),
+  risk: z.string().max(50).optional().default(''),
+  notes: z.string().optional().default(''),
+  riskyTeams: z.array(z.string()).optional().default([]),
+  tournament: z.string().max(200).optional().default(''),
   logoTeam1: z.string().nullable().optional(),
   logoTeam2: z.string().nullable().optional(),
   expressLogos: z
@@ -58,8 +58,8 @@ export const createBetSchema = z.object({
         logoTeam2: z.string().nullable().optional(),
       })
     )
-    .optional(),
-});
+    .optional().default([]),
+}).passthrough();
 
 export const updateBetSchema = createBetSchema.partial();
 
