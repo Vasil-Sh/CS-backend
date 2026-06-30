@@ -7,9 +7,15 @@ import { z } from 'zod';
 const riskyTeams = new Hono();
 
 // ── GET /api/risky-teams ──
-riskyTeams.get('/', async (c) => {
-  // Global list: all users see all risky teams (no user filter)
-  const rows = await db.select().from(schema.riskyTeams).orderBy(schema.riskyTeams.name);
+riskyTeams.get('/', requireAuth, async (c) => {
+  const user = c.get('user');
+  // Admin sees all, regular users see only their own
+  if (user.role === 'admin') {
+    const rows = await db.select().from(schema.riskyTeams).orderBy(schema.riskyTeams.name);
+    return c.json(rows.map((r) => ({ id: r.id, userId: r.userId, name: r.name, game: r.game, status: r.status, notes: r.notes })));
+  }
+  // Regular user: only their own teams
+  const rows = await db.select().from(schema.riskyTeams).where(eq(schema.riskyTeams.userId, user.userId)).orderBy(schema.riskyTeams.name);
   return c.json(rows.map((r) => ({ id: r.id, userId: r.userId, name: r.name, game: r.game, status: r.status, notes: r.notes })));
 });
 
