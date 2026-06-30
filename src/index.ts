@@ -61,7 +61,9 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 let openapiSpec: object | null = null;
-try { openapiSpec = JSON.parse(readFileSync(join(__dirname, 'openapi.json'), 'utf-8')); } catch {}
+try { openapiSpec = JSON.parse(readFileSync(join(__dirname, 'openapi.json'), 'utf-8')); } catch (e: any) {
+  console.warn('⚠️ openapi.json not loaded:', e.message);
+}
 
 if (openapiSpec) {
   app.get('/api/docs.json', (c) => c.json(openapiSpec!));
