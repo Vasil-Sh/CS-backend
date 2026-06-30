@@ -65,6 +65,14 @@ try { openapiSpec = JSON.parse(readFileSync(join(__dirname, 'openapi.json'), 'ut
 
 if (openapiSpec) {
   app.get('/api/docs.json', (c) => c.json(openapiSpec!));
+
+  // Swagger UI (interactive docs)
+  let swaggerHtml = '';
+  try { swaggerHtml = readFileSync(join(__dirname, 'swagger.html'), 'utf-8'); } catch {}
+  if (swaggerHtml) {
+    app.get('/api/docs', (c) => c.html(swaggerHtml));
+    console.log(`📖 API Docs: http://localhost:${process.env.PORT || '3001'}/api/docs`);
+  }
 }
 
 // ── Routes ──
