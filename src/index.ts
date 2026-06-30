@@ -53,8 +53,8 @@ app.get('/api/health', async (c) => {
   });
 });
 
-// ── API Docs (imported directly — works on Railway) ──
-import openapiSpec from './openapi.json' with { type: 'json' };
+// ── API Docs (imported as TS — always works, no JSON loader needed) ──
+import openapiSpec from './openapi.generated';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';

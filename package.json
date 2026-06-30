@@ -17,6 +17,7 @@
     "db:import-users": "npx tsx src/db/migrateUsers.ts",
     "db:studio": "drizzle-kit studio",
     "db:migrate": "npx tsx src/db/runMigrations.ts",
+    "gen:openapi": "node -e \"const s=JSON.parse(require('fs').readFileSync('src/openapi.json','utf8'));const out='// Generated from openapi.json\\nconst spec = '+JSON.stringify(s,null,2)+' as const;\\nexport default spec;\\n';require('fs').writeFileSync('src/openapi.generated.ts',out);console.log('openapi.generated.ts updated')\"",
     "lint": "eslint --quiet ./src",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
