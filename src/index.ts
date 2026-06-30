@@ -67,11 +67,29 @@ if (openapiSpec) {
   app.get('/api/docs.json', (c) => c.json(openapiSpec!));
 
   // Swagger UI (interactive docs)
+  // In production, protected by query param ?key=<ADMIN_PASSWORD>
+  // In dev, open access
+  const isDev = process.env.NODE_ENV !== 'production';
+  const adminPassword = process.env.ADMIN_PASSWORD || '';
+
   let swaggerHtml = '';
   try { swaggerHtml = readFileSync(join(__dirname, 'swagger.html'), 'utf-8'); } catch {}
+
   if (swaggerHtml) {
-    app.get('/api/docs', (c) => c.html(swaggerHtml));
-    console.log(`📖 API Docs: http://localhost:${process.env.PORT || '3001'}/api/docs`);
+    app.get('/api/docs', (c) => {
+      if (!isDev && adminPassword) {
+        const key = c.req.query('key');
+        if (key !== adminPassword) {
+          return c.json({ error: 'Access denied. Use ?key=<password>' }, 403);
+        }
+      }
+      return c.html(swaggerHtml);
+    });
+
+    console.log(
+      `📖 API Docs: http://localhost:${process.env.PORT || '3001'}/api/docs` +
+      (!isDev ? `?key=<ADMIN_PASSWORD>` : '')
+    );
   }
 }
 
