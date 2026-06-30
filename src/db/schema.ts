@@ -189,6 +189,9 @@ export const riskyTeams = pgTable(
   {
     id: serial('id').primaryKey(),
     name: varchar('name', { length: 200 }).notNull().unique(),
+    game: varchar('game', { length: 20 }).default(''),
+    status: varchar('status', { length: 50 }).default(''),
+    notes: text('notes').default(''),
     createdAt: timestamp('created_at').defaultNow().notNull(),
   },
   (table: any) => [index('risky_teams_name_idx').on(table.name)]
