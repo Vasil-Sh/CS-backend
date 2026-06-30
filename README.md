@@ -6,28 +6,33 @@ API-сервер для [MatchIQ](https://github.com/Vasil-Sh/CS) — платф
 
 | Шар | Технологія |
 |-----|-----------|
-| Runtime | **Node.js** + **TypeScript** |
-| Framework | **Hono** (легкий, швидкий) |
-| БД | **PostgreSQL** (Docker) |
+| Runtime | **Node.js 22** + **TypeScript** |
+| Framework | **Hono 4** |
+| БД | **PostgreSQL 16** |
 | ORM | **Drizzle ORM** |
-| Auth | **bcrypt** + **JWT** |
+| Auth | **bcrypt** + **JWT** (access + refresh) |
 | Валідація | **Zod** |
-| AI | **DeepSeek API** (проксі) |
-| Деплой | **Railway** |
+| Кешування | **In-memory** (TTL, Redis-ready) |
+| Rate limiting | **100 req/min per IP** |
+| CI/CD | **GitHub Actions** + **Railway** |
+| Документація | **OpenAPI 3.0** (`/api/docs.json`) |
 
 ## API
 
 | Метод | Шлях | Доступ | Опис |
 |-------|------|--------|------|
-| `GET` | `/api/health` | Публічний | Health check |
-| `POST` | `/api/auth/login` | Публічний | Логін → JWT |
-| `POST` | `/api/auth/register` | Admin | Створення користувача |
+| `GET` | `/api/health` | Публічний | Health check + БД статус |
+| `GET` | `/api/docs.json` | Публічний | OpenAPI 3.0 схема |
+| `POST` | `/api/auth/login` | Публічний | Логін → JWT + httpOnly cookie |
+| `POST` | `/api/auth/refresh` | Публічний | Оновити access-токен |
+| `POST` | `/api/auth/register` | Admin | Створити користувача |
+| `PUT` | `/api/auth/users/:id` | Admin | Оновити юзера |
+| `DELETE` | `/api/auth/users/:id` | Admin | Видалити юзера |
 | `GET` | `/api/auth/me` | User | Поточний профіль |
 | `GET` | `/api/auth/users` | Admin | Список усіх юзерів |
-| `DELETE` | `/api/auth/users/:id` | Admin | Видалити юзера |
 | `GET/POST` | `/api/bets` | User | CRUD ставок |
-| `PUT/DELETE` | `/api/bets/:id` | User | Оновити/видалити ставку |
-| `GET` | `/api/bets/stats` | User | Статистика ставок |
+| `PUT/PATCH/DELETE` | `/api/bets/:id` | User | Оновити/частково/видалити |
+| `GET` | `/api/bets/stats` | User | Агрегована статистика |
 | `GET/POST` | `/api/goals` | User | CRUD цілей |
 | `PUT/DELETE` | `/api/goals/:id` | User | Оновити/видалити ціль |
 | `GET/POST` | `/api/bankroll` | User | Банкрол |
@@ -37,8 +42,23 @@ API-сервер для [MatchIQ](https://github.com/Vasil-Sh/CS) — платф
 | `POST` | `/api/ai/recommend` | User | AI рекомендація (DeepSeek) |
 | `POST` | `/api/ai/advice` | User | AI порада по банку |
 | `POST` | `/api/telegram/webhook` | Публічний | Telegram Bot вебхук |
-| `GET/POST` | `/api/risky-teams` | Admin | CRUD ризикованих команд |
-| `DELETE` | `/api/risky-teams/:id` | Admin | Видалити команду |
+| `GET/POST/DELETE` | `/api/telegram-groups` | User | Telegram групи (CRUD) |
+| `GET/POST` | `/api/risky-teams` | User | CRUD ризикованих команд |
+| `DELETE` | `/api/risky-teams/:id` | User | Видалити команду |
+
+## Production Features
+
+- ✅ **Rate limiting** — 100 req/min per IP, health + login exempt
+- ✅ **httpOnly cookie** — JWT у HttpOnly/Secure cookie (XSS-захист)
+- ✅ **In-memory cache** — 15s для /bets, 30s для /stats
+- ✅ **DB health check** — `/api/health` перевіряє PostgreSQL
+- ✅ **Structured logging** — JSON логи з IP, стектрейсом, тривалістю
+- ✅ **Safe migrations** — `pnpm db:migrate` з трекінгом у `drizzle_migrations`
+- ✅ **GitHub Actions CI** — typecheck + тести з PostgreSQL при push/PR
+- ✅ **OpenAPI docs** — `/api/docs.json` (Swagger 3.0)
+- ✅ **PATCH support** — часткове оновлення ставок
+- ✅ **Refresh tokens** — 15m access + 30d refresh
+- ✅ **Per-user data isolation** — risky teams, telegram groups, goals, strategies
 
 ## Локальний запуск
 
@@ -69,43 +89,52 @@ pnpm dev
 
 ## Змінні оточення
 
-| Змінна | Опис |
-|--------|------|
-| `PORT` | Порт сервера (default: `3001`) |
-| `DATABASE_URL` | PostgreSQL connection string |
-| `JWT_SECRET` | Секрет для JWT-токенів |
-| `JWT_EXPIRES_IN` | Термін дії токена (default: `7d`) |
-| `DEEPSEEK_API_KEY` | API-ключ DeepSeek для AI-рекомендацій |
-| `TELEGRAM_BOT_TOKEN` | Токен Telegram бота |
-| `TELEGRAM_ADMIN_CHAT_ID` | Chat ID адміна для сповіщень |
-| `CS_API_URL` | URL API матчів CS2/Dota 2 |
+| Змінна | Опис | Default |
+|--------|------|---------|
+| `PORT` | Порт сервера | `3001` |
+| `NODE_ENV` | Режим (`development`/`production`) | `production` |
+| `DATABASE_URL` | PostgreSQL connection string | — |
+| `JWT_SECRET` | Секрет для JWT access-токенів | — |
+| `JWT_EXPIRES_IN` | Термін дії access-токена | `15m` |
+| `JWT_REFRESH_SECRET` | Секрет для refresh-токенів | — |
+| `JWT_REFRESH_EXPIRES_IN` | Термін дії refresh-токена | `30d` |
+| `ADMIN_PASSWORD` | Пароль для `pnpm db:seed` | `admin123` |
+| `DEEPSEEK_API_KEY` | API-ключ DeepSeek | — |
+| `TELEGRAM_BOT_TOKEN` | Токен Telegram бота | — |
+| `TELEGRAM_ADMIN_CHAT_ID` | Chat ID адміна | — |
+| `CS_API_URL` | URL API матчів | — |
 
 ## Структура
 
 ```
 src/
-├── index.ts              # Entry point
+├── index.ts              # Entry point + middleware setup
+├── openapi.json          # OpenAPI 3.0 специфікація
 ├── db/
 │   ├── client.ts         # PostgreSQL connection
-│   ├── schema.ts         # Drizzle ORM схема (6 таблиць)
-│   ├── migrate.ts        # Міграції
+│   ├── schema.ts         # Drizzle ORM схема (7 таблиць)
 │   ├── seed.ts           # Створення адмін-юзера
+│   ├── runMigrations.ts  # Безпечний мігратор
 │   └── migrateUsers.ts   # Імпорт з Google Sheets
 ├── middleware/
-│   ├── auth.ts           # JWT-верифікація
+│   ├── auth.ts           # JWT (Bearer + httpOnly cookie)
+│   ├── logger.ts         # Структуроване логування
+│   ├── rateLimiter.ts    # Rate limiting (100 req/min)
 │   └── validation.ts     # Zod-схеми
 ├── routes/
 │   ├── auth.ts           # /api/auth/*
-│   ├── bets.ts           # /api/bets/*
+│   ├── bets.ts           # /api/bets/* (з PATCH)
 │   ├── goals.ts          # /api/goals/*
 │   ├── bankroll.ts       # /api/bankroll/*
 │   ├── strategies.ts     # /api/strategies/*
 │   ├── ai.ts             # /api/ai/*
-│   ├── telegram.ts       # /api/telegram/*
+│   ├── telegram.ts       # /api/telegram/webhook
+│   ├── telegramGroups.ts # /api/telegram-groups/*
 │   └── riskyTeams.ts     # /api/risky-teams/*
 ├── services/
 │   ├── deepseek.ts       # DeepSeek API клієнт
 │   └── telegramBot.ts    # Telegram Bot парсер
 └── utils/
-    └── jwt.ts            # signToken / verifyToken
+    ├── jwt.ts            # signToken / verifyToken / refresh
+    └── cache.ts          # In-memory cache (Redis-ready)
 ```
