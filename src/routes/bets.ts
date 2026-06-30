@@ -6,10 +6,10 @@ import { createBetSchema, updateBetSchema } from '../middleware/validation';
 
 const bets = new Hono();
 
-/** Normalize goalId: empty/'all'/timestamps → null */
+/** Normalize goalId: empty/'all'/whitespace → null, anything else is valid */
 function cleanGoalId(id?: string): string | null {
   if (!id || id === 'all' || !id.trim()) return null;
-  return /^\d{10,}$/.test(id) ? null : id;
+  return id;
 }
 
 // ── GET /api/bets ──
