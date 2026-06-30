@@ -35,7 +35,6 @@ export function getEnv(): Env {
   envCache = envSchema.parse(process.env); // all optional/defaulted → always succeeds
   return envCache;
 }
-}
 
-// Validate on import (fail-fast)
+// Validate on import (warn-only)
 getEnv();
