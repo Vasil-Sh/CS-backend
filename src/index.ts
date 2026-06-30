@@ -54,15 +54,36 @@ app.get('/api/health', async (c) => {
 });
 
 // ── API Docs (serves openapi.json) ──
-import { readFileSync } from 'fs';
-import { join, dirname } from 'path';
+import { readFileSync, existsSync } from 'fs';
+import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// Try multiple locations for openapi.json (tsx on Railway may resolve __dirname differently)
+function findFile(filename: string): string | null {
+  const candidates = [
+    join(__dirname, filename),           // src/openapi.json (tsx/tsc)
+    resolve(filename),                    // ./openapi.json from CWD
+    resolve('src', filename),            // ./src/openapi.json from CWD
+    join(process.cwd(), filename),       // CWD + filename
+    join(process.cwd(), 'src', filename),// CWD/src/filename
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  // Fallback: return first candidate even if doesn't exist (let read try & log)
+  return candidates[0];
+}
+
 let openapiSpec: object | null = null;
-try { openapiSpec = JSON.parse(readFileSync(join(__dirname, 'openapi.json'), 'utf-8')); } catch (e: any) {
-  console.warn('⚠️ openapi.json not loaded:', e.message);
+const openapiPath = findFile('openapi.json');
+try {
+  openapiSpec = JSON.parse(readFileSync(openapiPath!, 'utf-8'));
+  console.log(`📄 openapi.json loaded from: ${openapiPath}`);
+} catch (e: any) {
+  console.warn(`⚠️ openapi.json not loaded (tried ${openapiPath}):`, e.message);
 }
 
 if (openapiSpec) {
@@ -75,9 +96,11 @@ if (openapiSpec) {
   const adminPassword = process.env.ADMIN_PASSWORD || '';
 
   let swaggerHtml = '';
-  try { swaggerHtml = readFileSync(join(__dirname, 'swagger.html'), 'utf-8'); } catch {}
+  const swaggerPath = findFile('swagger.html');
+  try { if (swaggerPath) swaggerHtml = readFileSync(swaggerPath, 'utf-8'); } catch {}
 
   if (swaggerHtml) {
+    console.log(`📖 swagger.html loaded from: ${swaggerPath}`);
     app.get('/api/docs', (c) => {
       if (!isDev && adminPassword) {
         const key = c.req.query('key');
