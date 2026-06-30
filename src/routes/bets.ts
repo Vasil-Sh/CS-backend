@@ -3,10 +3,17 @@ import { eq, desc, and, sql } from 'drizzle-orm';
 import { db, schema } from '../db/client';
 import { requireAuth } from '../middleware/auth';
 import { createBetSchema, updateBetSchema } from '../middleware/validation';
+import { cache } from '../utils/cache';
 
 const bets = new Hono();
 
-/** Normalize goalId: empty/'all'/whitespace → null, anything else is valid */
+/** Invalidate all cached bet data for a user */
+function invalidateCache(userId: number) {
+  cache.del(`bets:${userId}`);
+  cache.del(`stats:${userId}`);
+}
+
+/** Normalize goalId: empty/'all'/whitespace → null */
 function cleanGoalId(id?: string): string | null {
   if (!id || id === 'all' || !id.trim()) return null;
   return id;
@@ -15,6 +22,10 @@ function cleanGoalId(id?: string): string | null {
 // ── GET /api/bets ──
 bets.get('/', requireAuth, async (c) => {
   const user = c.get('user');
+  const cacheKey = `bets:${user.userId}`;
+
+  const cached = cache.get<any[]>(cacheKey);
+  if (cached) return c.json(cached);
 
   const rows = await db
     .select()
@@ -22,12 +33,14 @@ bets.get('/', requireAuth, async (c) => {
     .where(eq(schema.bets.userId, user.userId))
     .orderBy(desc(schema.bets.date), desc(schema.bets.createdAt));
 
+  cache.set(cacheKey, rows, 15_000); // 15 second TTL
   return c.json(rows);
 });
 
 // ── POST /api/bets ──
 bets.post('/', requireAuth, async (c) => {
   const user = c.get('user');
+  invalidateCache(user.userId);
 
   let body;
   try {
@@ -78,6 +91,7 @@ bets.post('/', requireAuth, async (c) => {
 // ── PUT /api/bets/:id ──
 bets.put('/:id', requireAuth, async (c) => {
   const user = c.get('user');
+  invalidateCache(user.userId);
   const id = c.req.param('id');
 
   let body;
@@ -295,6 +309,68 @@ bets.on('PATCH', '/:id', requireAuth, async (c) => {
 
   const [updated] = await db.update(schema.bets).set(d).where(eq(schema.bets.id, id)).returning();
   return c.json(updated);
+});
+
+// ── GET /api/bets/stats ──
+bets.get('/stats', requireAuth, async (c) => {
+  const user = c.get('user');
+  const cacheKey = `stats:${user.userId}`;
+
+  const cached = cache.get<any>(cacheKey);
+  if (cached) return c.json(cached);
+
+  const all = await db
+    .select()
+    .from(schema.bets)
+    .where(eq(schema.bets.userId, user.userId));
+
+  const totalBets = all.length;
+  const wins = all.filter((b) => b.result === 'Win').length;
+  const winRate = totalBets > 0 ? (wins / totalBets) * 100 : 0;
+
+  const totalProfit = all
+    .filter((b) => b.result !== 'Pending')
+    .reduce((sum, b) => sum + parseFloat(b.profit || '0'), 0);
+
+  const totalRoi =
+    all
+      .filter((b) => b.result !== 'Pending')
+      .reduce((sum, b) => sum + parseFloat(b.roi || '0'), 0) /
+    (totalBets || 1);
+
+  const monthMap = new Map<string, number>();
+  all
+    .filter((b) => b.result !== 'Pending')
+    .forEach((b) => {
+      const month = (b.date as string).substring(0, 7);
+      monthMap.set(month, (monthMap.get(month) || 0) + parseFloat(b.profit || '0'));
+    });
+  const profitByMonth = Array.from(monthMap.entries())
+    .map(([month, profit]) => ({ month, profit }))
+    .sort((a, b) => a.month.localeCompare(b.month));
+
+  const strategyMap = new Map<string, number>();
+  all
+    .filter((b) => b.result !== 'Pending')
+    .forEach((b) => {
+      const s = b.strategy || 'Без стратегії';
+      strategyMap.set(s, (strategyMap.get(s) || 0) + parseFloat(b.profit || '0'));
+    });
+  const profitByStrategy = Array.from(strategyMap.entries()).map(
+    ([strategy, profit]) => ({ strategy, profit })
+  );
+
+  const result = {
+    totalBets,
+    winRate: Math.round(winRate * 100) / 100,
+    totalProfit,
+    averageROI: Math.round(totalRoi * 100) / 100,
+    profitByMonth,
+    profitByStrategy,
+  };
+
+  cache.set(cacheKey, result, 30_000); // 30 second TTL for stats
+  return c.json(result);
 });
 
 export default bets;
