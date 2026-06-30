@@ -6,6 +6,12 @@ import { createBetSchema, updateBetSchema } from '../middleware/validation';
 
 const bets = new Hono();
 
+/** Normalize goalId: empty/'all'/timestamps → null */
+function cleanGoalId(id?: string): string | null {
+  if (!id || id === 'all' || !id.trim()) return null;
+  return /^\d{10,}$/.test(id) ? null : id;
+}
+
 // ── GET /api/bets ──
 bets.get('/', requireAuth, async (c) => {
   const user = c.get('user');
@@ -52,10 +58,10 @@ bets.post('/', requireAuth, async (c) => {
       exchangeRate: body.exchangeRate?.toString(),
       originalProfit: body.originalProfit?.toString(),
       roi: body.roi?.toString(),
-      goalId: body.goalId && body.goalId !== 'all' && body.goalId.trim() !== '' ? body.goalId : undefined,
+      goalId: cleanGoalId(body.goalId),
       selection: body.selection || '',
       matchUrl: body.matchUrl || '',
-      winProbability: body.winProbability?.toString(),
+      winProbability: body.winProbability?.toString() || undefined,
       risk: body.risk || '',
       notes: body.notes || '',
       riskyTeams: body.riskyTeams || [],

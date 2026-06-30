@@ -72,7 +72,7 @@ export const bets = pgTable(
     originalProfit: numeric('original_profit', { precision: 12, scale: 2 }),
     roi: numeric('roi', { precision: 8, scale: 2 }),
 
-    goalId: uuid('goal_id'),
+    goalId: varchar('goal_id', { length: 100 }),
     selection: varchar('selection', { length: 200 }).default(''),
     matchUrl: varchar('match_url', { length: 500 }).default(''),
     winProbability: numeric('win_probability', { precision: 5, scale: 2 }),
