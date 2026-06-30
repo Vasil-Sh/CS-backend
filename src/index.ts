@@ -53,42 +53,25 @@ app.get('/api/health', async (c) => {
   });
 });
 
-// ── API Docs (try file read → fallback) ──
+// ── API Docs (embedded TS — no file I/O) ──
+import openapiSpec from './openapiEmbedded';
+
+app.get('/api/docs.json', (c) => c.json(openapiSpec));
+
+// Swagger UI
 import fs from 'fs';
 import path from 'path';
 
-let _openapiSpec: any = null;
-const cwd = process.cwd();
-
-// Log CWD for Railway debugging
-console.log(`🔍 CWD: ${cwd}`);
-console.log(`🔍 src/openapi.json exists: ${fs.existsSync(path.join(cwd, 'src', 'openapi.json'))}`);
-
-try {
-  _openapiSpec = JSON.parse(fs.readFileSync(path.join(cwd, 'src', 'openapi.json'), 'utf-8'));
-  console.log('📄 openapi.json loaded from CWD');
-} catch (e1: any) {
-  console.warn('⚠️ CWD load failed:', e1.message);
-  try {
-    const __dirname = path.dirname(new URL(import.meta.url).pathname);
-    _openapiSpec = JSON.parse(fs.readFileSync(path.join(__dirname, 'openapi.json'), 'utf-8'));
-    console.log(`📄 openapi.json loaded from __dirname: ${__dirname}`);
-  } catch (e2: any) {
-    console.warn('⚠️ __dirname load failed:', e2.message);
-    _openapiSpec = { openapi: '3.0.3', info: { title: 'MatchIQ API', version: '1.0.0' }, paths: {} };
-    console.warn('⚠️ Using fallback spec');
-  }
-}
-
-// Serve docs.json unconditionally
-app.get('/api/docs.json', (c) => c.json(_openapiSpec));
-
-// Swagger UI
 let _swaggerHtml = '';
 try {
-  _swaggerHtml = fs.readFileSync(path.join(cwd, 'src', 'swagger.html'), 'utf-8');
+  _swaggerHtml = fs.readFileSync(path.join(process.cwd(), 'src', 'swagger.html'), 'utf-8');
 } catch {
-  console.warn('⚠️ swagger.html not found');
+  try {
+    const __dirname = path.dirname(new URL(import.meta.url).pathname);
+    _swaggerHtml = fs.readFileSync(path.join(__dirname, 'swagger.html'), 'utf-8');
+  } catch {
+    console.warn('⚠️ swagger.html not found');
+  }
 }
 
 if (_swaggerHtml) {
