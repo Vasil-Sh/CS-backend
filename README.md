@@ -15,48 +15,70 @@ API-сервер для [MatchIQ](https://github.com/Vasil-Sh/CS) — платф
 | Кешування | **In-memory** (TTL, Redis-ready) |
 | Rate limiting | **100 req/min per IP** |
 | CI/CD | **GitHub Actions** + **Railway** |
-| Документація | **OpenAPI 3.0** (`/api/docs.json`) |
+| Документація | **OpenAPI 3.0** + **Swagger UI** (`/api/docs`) |
+
+## Швидкий старт
+
+```bash
+pnpm install
+cp .env.example .env
+docker compose up -d
+pnpm db:push
+pnpm db:seed
+pnpm dev
+```
+
+Сервер на `http://localhost:3001`, Swagger UI на `http://localhost:3001/api/docs`.
 
 ## API
 
-| Метод | Шлях | Доступ | Опис |
-|-------|------|--------|------|
-| `GET` | `/api/health` | Публічний | Health check + БД статус |
-| `GET` | `/api/docs.json` | Публічний | OpenAPI 3.0 схема |
-| `POST` | `/api/auth/login` | Публічний | Логін → JWT + httpOnly cookie |
-| `POST` | `/api/auth/refresh` | Публічний | Оновити access-токен |
-| `POST` | `/api/auth/register` | Admin | Створити користувача |
-| `PUT` | `/api/auth/users/:id` | Admin | Оновити юзера |
-| `DELETE` | `/api/auth/users/:id` | Admin | Видалити юзера |
-| `GET` | `/api/auth/me` | User | Поточний профіль |
-| `GET` | `/api/auth/users` | Admin | Список усіх юзерів |
-| `GET/POST` | `/api/bets` | User | CRUD ставок |
-| `PUT/PATCH/DELETE` | `/api/bets/:id` | User | Оновити/частково/видалити |
-| `GET` | `/api/bets/stats` | User | Агрегована статистика |
-| `GET/POST` | `/api/goals` | User | CRUD цілей |
-| `PUT/DELETE` | `/api/goals/:id` | User | Оновити/видалити ціль |
-| `GET/POST` | `/api/bankroll` | User | Банкрол |
-| `POST` | `/api/bankroll/adjust` | User | Корекція банкролу |
-| `GET/POST` | `/api/strategies` | User | CRUD стратегій |
-| `PUT/DELETE` | `/api/strategies/:id` | User | Оновити/видалити стратегію |
-| `POST` | `/api/ai/recommend` | User | AI рекомендація (DeepSeek) |
-| `POST` | `/api/ai/advice` | User | AI порада по банку |
-| `POST` | `/api/telegram/webhook` | Публічний | Telegram Bot вебхук |
-| `GET/POST/DELETE` | `/api/telegram-groups` | User | Telegram групи (CRUD) |
-| `GET/POST` | `/api/risky-teams` | User | CRUD ризикованих команд |
-| `DELETE` | `/api/risky-teams/:id` | User | Видалити команду |
+### 🔓 Публічні (без авторизації)
+| Метод | Шлях | Опис |
+|-------|------|------|
+| `GET` | `/api/health` | Health check + статус БД |
+| `GET` | `/api/docs.json` | OpenAPI 3.0 JSON-спекуляція |
+| `GET` | `/api/docs?key=<ADMIN_PASSWORD>` | **Swagger UI** (у production захищений паролем) |
+| `POST` | `/api/auth/login` | Логін → JWT + httpOnly cookie |
+| `POST` | `/api/telegram/webhook` | Telegram Bot вебхук |
 
-## Production Features
+### 🔐 Потрібен JWT (кнопка Authorize 🔒 у Swagger)
+| Метод | Шлях | Опис |
+|-------|------|------|
+| `POST` | `/auth/register` | Admin: створити користувача |
+| `PUT/DELETE` | `/auth/users/:id` | Admin: змінити/видалити юзера |
+| `GET` | `/auth/me` | Поточний профіль |
+| `GET` | `/auth/users` | Admin: список усіх юзерів |
+| `GET/POST` | `/bets?page=1&limit=50` | Пагінований список / створити ставку |
+| `PUT/PATCH/DELETE` | `/bets/:id` | Оновити / частково (PATCH) / видалити |
+| `GET` | `/bets/stats` | SQL-агрегована статистика (ROI, по місяцях, по стратегіях) |
+| `GET/POST` | `/goals` | CRUD цілей |
+| `PUT/DELETE` | `/goals/:id` | Оновити/видалити ціль |
+| `GET/POST` | `/bankroll` | Банкрол |
+| `POST` | `/bankroll/adjust` | Корекція банкролу (±) |
+| `GET/POST` | `/strategies` | CRUD стратегій (Kelly, fractional тощо) |
+| `PUT/DELETE` | `/strategies/:id` | Оновити/видалити стратегію |
+| `POST` | `/ai/recommend` | DeepSeek AI — рекомендація по матчу CS2 |
+| `POST` | `/ai/advice` | Порада по стану банкролу |
+| `GET/POST/DELETE` | `/telegram-groups` | Telegram-групи (CRUD) |
+| `GET/POST` | `/risky-teams` | Ризиковані команди |
+| `DELETE` | `/risky-teams/:id` | Admin: видалити команду зі списку |
 
+## Безпека (v1.23.x)
+
+- ✅ **Body size limit** — 1MB max (захист від DDOS)
+- ✅ **Security headers** — CSP, HSTS, X-Content-Type, X-Frame-Options, Permissions-Policy
+- ✅ **Swagger protection** — `/api/docs` захищений `?key=<ADMIN_PASSWORD>` у production
+- ✅ **env fail-safe** — усі змінні optional, не крашать сервер при відсутності
 - ✅ **Rate limiting** — 100 req/min per IP, health + login exempt
 - ✅ **httpOnly cookie** — JWT у HttpOnly/Secure cookie (XSS-захист)
-- ✅ **In-memory cache** — 15s для /bets, 30s для /stats
-- ✅ **DB health check** — `/api/health` перевіряє PostgreSQL
-- ✅ **Structured logging** — JSON логи з IP, стектрейсом, тривалістю
+- ✅ **In-memory cache** — 15s для /bets
+- ✅ **DB health check** — `/api/health` перевіряє PostgreSQL через shared pool
+- ✅ **Structured JSON-логування** — IP, стектрейс, тривалість
+- ✅ **Graceful shutdown** — SIGTERM/SIGINT → чистий вихід
 - ✅ **Safe migrations** — `pnpm db:migrate` з трекінгом у `drizzle_migrations`
-- ✅ **GitHub Actions CI** — typecheck + тести з PostgreSQL при push/PR
-- ✅ **OpenAPI docs** — `/api/docs.json` (Swagger 3.0)
-- ✅ **PATCH support** — часткове оновлення ставок
+- ✅ **Pagination** — `GET /bets?page=1&limit=50` з `meta.totalPages`
+- ✅ **SQL aggregation** — `/bets/stats` обчислюється на рівні БД (не в пам'яті)
+- ✅ **Dynamic field mapper** — PUT/PATCH без 30+ if-чеків
 - ✅ **Refresh tokens** — 15m access + 30d refresh
 - ✅ **Per-user data isolation** — risky teams, telegram groups, goals, strategies
 
@@ -87,17 +109,49 @@ pnpm dev
 
 Сервер на `http://localhost:3001`.
 
-## Змінні оточення
+## Змінні оточення (усі optional, є fallback)
 
 | Змінна | Опис | Default |
 |--------|------|---------|
-| `PORT` | Порт сервера | `3001` |
-| `NODE_ENV` | Режим (`development`/`production`) | `production` |
+| `PORT` | Порт | `3001` |
+| `NODE_ENV` | `development`/`production` | `production` |
 | `DATABASE_URL` | PostgreSQL connection string | — |
-| `JWT_SECRET` | Секрет для JWT access-токенів | — |
-| `JWT_EXPIRES_IN` | Термін дії access-токена | `15m` |
-| `JWT_REFRESH_SECRET` | Секрет для refresh-токенів | — |
-| `JWT_REFRESH_EXPIRES_IN` | Термін дії refresh-токена | `30d` |
+| `JWT_SECRET` | Секрет для JWT | fallback: `dev-secret-…` |
+| `JWT_EXPIRES_IN` | Access token TTL | `15m` |
+| `JWT_REFRESH_SECRET` | Refresh token secret | fallback |
+| `JWT_REFRESH_EXPIRES_IN` | Refresh token TTL | `30d` |
+| `ADMIN_PASSWORD` | Пароль для Swagger UI (`?key=…`) | — |
+| `DEEPSEEK_API_KEY` | DeepSeek AI key | — |
+| `TELEGRAM_BOT_TOKEN` | Telegram бот | — |
+| `TELEGRAM_ADMIN_CHAT_ID` | Admin chat ID | — |
+| `CS_API_URL` | CS2 match API | `https://api.cstest.pp.ua` |
+
+## Swagger UI
+
+Вбудований Swagger UI (`/api/docs`) з повною OpenAPI 3.0 схемою (24 endpoints, приклади запитів, схеми даних).
+
+### Production:
+```
+https://cs-backend-production-f9e8.up.railway.app/api/docs?key=<ADMIN_PASSWORD>
+```
+
+### Dev:
+```
+http://localhost:3001/api/docs
+```
+
+### Оновлення OpenAPI схеми:
+```bash
+node scripts/gen-openapi.cjs   # згенерувати openapi.generated.ts
+node scripts/embed-spec.cjs    # вшити спеку в код
+```
+
+## Деплой (Railway)
+
+Автоматичний деплой з гілки `main`. Перевірка:
+```
+https://cs-backend-production-f9e8.up.railway.app/api/health
+```
 | `ADMIN_PASSWORD` | Пароль для `pnpm db:seed` | `admin123` |
 | `DEEPSEEK_API_KEY` | API-ключ DeepSeek | — |
 | `TELEGRAM_BOT_TOKEN` | Токен Telegram бота | — |
