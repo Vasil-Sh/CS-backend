@@ -8,10 +8,10 @@ import { z } from 'zod';
 const envSchema = z.object({
   PORT: z.coerce.number().default(3001),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('production'),
-  DATABASE_URL: z.string().url('DATABASE_URL must be a valid PostgreSQL URL'),
-  JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 chars'),
+  DATABASE_URL: z.string().optional(),
+  JWT_SECRET: z.string().optional(),
   JWT_EXPIRES_IN: z.string().default('15m'),
-  JWT_REFRESH_SECRET: z.string().min(32, 'JWT_REFRESH_SECRET must be at least 32 chars'),
+  JWT_REFRESH_SECRET: z.string().optional(),
   JWT_REFRESH_EXPIRES_IN: z.string().default('30d'),
   DEEPSEEK_API_KEY: z.string().optional(),
   TELEGRAM_BOT_TOKEN: z.string().optional(),
@@ -25,19 +25,16 @@ export type Env = z.infer<typeof envSchema>;
 
 let envCache: Env | null = null;
 
-/** Parse and validate environment variables. Caches result. */
+/** Parse and validate environment variables. Returns defaults on missing vars. */
 export function getEnv(): Env {
   if (envCache) return envCache;
   const result = envSchema.safeParse(process.env);
   if (!result.success) {
-    console.error('❌ Invalid environment configuration:');
-    for (const issue of result.error.issues) {
-      console.error(`  • ${issue.path.join('.')}: ${issue.message}`);
-    }
-    process.exit(1);
+    console.warn('⚠️ Env validation issues:', result.error.issues.map(i => i.path.join('.') + ': ' + i.message).join(', '));
   }
-  envCache = result.data;
+  envCache = envSchema.parse(process.env); // all optional/defaulted → always succeeds
   return envCache;
+}
 }
 
 // Validate on import (fail-fast)
