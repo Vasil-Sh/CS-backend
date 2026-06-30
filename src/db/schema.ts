@@ -202,6 +202,24 @@ export const riskyTeams = pgTable(
   ]
 );
 
+// ═══════════════════════════════════════════
+// Telegram Groups (per-user)
+// ═══════════════════════════════════════════
+
+export const telegramGroups = pgTable(
+  'telegram_groups',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    name: varchar('name', { length: 200 }).notNull(),
+    link: varchar('link', { length: 500 }).default(''),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table: any) => [index('tg_groups_user_idx').on(table.userId)]
+);
+
 // ── Type exports ──
 
 export type User = typeof users.$inferSelect;

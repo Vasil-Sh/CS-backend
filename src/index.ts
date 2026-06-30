@@ -17,6 +17,7 @@ import bankrollRoutes from './routes/bankroll';
 import strategyRoutes from './routes/strategies';
 import aiRoutes from './routes/ai';
 import telegramRoutes from './routes/telegram';
+import telegramGroupRoutes from './routes/telegramGroups';
 import riskyTeamRoutes from './routes/riskyTeams';
 
 const app = new Hono();
@@ -37,6 +38,7 @@ app.route('/api/bankroll', bankrollRoutes);
 app.route('/api/strategies', strategyRoutes);
 app.route('/api/ai', aiRoutes);
 app.route('/api/telegram', telegramRoutes);
+app.route('/api/telegram-groups', telegramGroupRoutes);
 app.route('/api/risky-teams', riskyTeamRoutes);
 
 // ── Start ──
