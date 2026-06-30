@@ -13,6 +13,7 @@ import { loggerMiddleware } from './middleware/logger';
 import { rateLimiterMiddleware } from './middleware/rateLimiter';
 import { bodyLimit } from './middleware/bodyLimit';
 import { securityHeaders } from './middleware/securityHeaders';
+import { numericNormalizer } from './middleware/numericNormalizer';
 import { db } from './db/client';
 import { sql } from 'drizzle-orm';
 
@@ -36,6 +37,24 @@ app.use('*', cors({ origin: '*', credentials: true }));
 app.use('*', rateLimiterMiddleware);
 app.use('*', bodyLimit(1_000_000)); // 1MB max body
 app.use('*', authMiddleware);
+
+// ── Convert ALL string numbers to real numbers in JSON responses ──
+app.use('*', async (c, next) => {
+  await next();
+  const ct = c.res.headers.get('Content-Type') || '';
+  if (!ct.includes('application/json')) return;
+  const original = c.res.clone();
+  try {
+    const body = await original.json();
+    const normalized = numericNormalizer(body);
+    c.res = new Response(JSON.stringify(normalized), {
+      status: c.res.status,
+      headers: c.res.headers,
+    });
+  } catch {
+    // pass through
+  }
+});
 
 // ── Health check (reuses shared pool, no leak) ──
 app.get('/api/health', async (c) => {
