@@ -9,6 +9,8 @@ import { cors } from 'hono/cors';
 import { serve } from '@hono/node-server';
 import { authMiddleware } from './middleware/auth';
 import { loggerMiddleware } from './middleware/logger';
+import { rateLimiterMiddleware } from './middleware/rateLimiter';
+import pg from 'pg';
 
 import authRoutes from './routes/auth';
 import betRoutes from './routes/bets';
@@ -24,11 +26,28 @@ const app = new Hono();
 
 // ── Global middleware ──
 app.use('*', loggerMiddleware);
-app.use('*', cors());
+app.use('*', cors({ origin: '*', credentials: true }));
+app.use('*', rateLimiterMiddleware);
 app.use('*', authMiddleware);
 
-// ── Health check ──
-app.get('/api/health', (c) => c.json({ status: 'ok', timestamp: new Date().toISOString() }));
+// ── Health check (with DB verification) ──
+app.get('/api/health', async (c) => {
+  let db = 'unknown';
+  try {
+    const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
+    const result = await pool.query('SELECT 1');
+    db = result.rows[0]?.['?column?'] === 1 ? 'connected' : 'error';
+    await pool.end();
+  } catch {
+    db = 'disconnected';
+  }
+  return c.json({
+    status: 'ok',
+    database: db,
+    uptime: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+  });
+});
 
 // ── Routes ──
 app.route('/api/auth', authRoutes);

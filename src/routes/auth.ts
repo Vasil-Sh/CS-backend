@@ -69,6 +69,10 @@ auth.post('/login', async (c) => {
       telegram: user.telegram,
     },
   });
+
+  // Also set httpOnly cookie for XSS protection (browser will auto-send)
+  const isProd = process.env.NODE_ENV === 'production';
+  c.res.headers.set('Set-Cookie', `auth_token=${token}; HttpOnly; ${isProd ? 'Secure; ' : ''}SameSite=Lax; Path=/; Max-Age=${7 * 24 * 60 * 60}`);
 });
 
 // ── POST /api/auth/register (admin only) ──

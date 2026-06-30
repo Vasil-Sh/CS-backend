@@ -3,7 +3,8 @@ import bcrypt from 'bcryptjs';
 import { db, schema } from './client';
 
 async function seed() {
-  const passwordHash = await bcrypt.hash('admin123', 10);
+  const adminPass = process.env.ADMIN_PASSWORD || 'admin123';
+  const passwordHash = await bcrypt.hash(adminPass, 10);
 
   const [user] = await db
     .insert(schema.users)
@@ -19,7 +20,7 @@ async function seed() {
     .returning();
 
   if (user) {
-    console.log('✅ Admin user created: admin / admin123');
+    console.log(`✅ Admin user created: admin / ${adminPass}`);
   } else {
     console.log('⚠️ Admin user already exists');
   }
@@ -28,6 +29,6 @@ async function seed() {
 }
 
 seed().catch((e) => {
-  console.error(e);
+  console.error('Seed failed:', e.message);
   process.exit(1);
 });
