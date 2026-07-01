@@ -8,8 +8,8 @@ import type { Context } from 'hono';
  *   List:    { data: T[], meta: { page, limit, total } }
  */
 
-export function ok<T>(c: Context, data: T, status = 200) {
-  return c.json({ data }, status as any);
+export function ok<T>(c: Context, data: T, status: 200 | 201 = 200) {
+  return c.json({ data }, status);
 }
 
 export function created<T>(c: Context, data: T) {

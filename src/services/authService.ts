@@ -68,7 +68,16 @@ export class AuthService {
   }
 
   async listUsers() {
-    return db.select().from(schema.users).orderBy(schema.users.username);
+    return db.select({
+      id: schema.users.id,
+      username: schema.users.username,
+      role: schema.users.role,
+      telegram: schema.users.telegram,
+      priceMonth: schema.users.priceMonth,
+      startDate: schema.users.startDate,
+      endDate: schema.users.endDate,
+      createdAt: schema.users.createdAt,
+    }).from(schema.users).orderBy(schema.users.username);
   }
 
   async deleteUser(id: number) {
