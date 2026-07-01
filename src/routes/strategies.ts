@@ -1,125 +1,33 @@
 import { Hono } from 'hono';
-import { eq, and } from 'drizzle-orm';
-import { db, schema } from '../db/client';
 import { requireAuth } from '../middleware/auth';
 import { createStrategySchema, updateStrategySchema } from '../middleware/validation';
+import { strategyService } from '../services/strategyService';
 
 const strategies = new Hono();
 
-// ── GET /api/strategies ──
 strategies.get('/', requireAuth, async (c) => {
-  const user = c.get('user');
-
-  const rows = await db
-    .select()
-    .from(schema.strategies)
-    .where(eq(schema.strategies.userId, user.userId));
-
+  const rows = await strategyService.list(c.get('user').userId);
   return c.json(rows);
 });
 
-// ── POST /api/strategies ──
 strategies.post('/', requireAuth, async (c) => {
-  const user = c.get('user');
-
   let body;
-  try {
-    body = createStrategySchema.parse(await c.req.json());
-  } catch (e: any) {
-    return c.json({ error: 'Invalid input', details: e.errors }, 400);
-  }
-
-  // If setting as primary, unset other primaries
-  if (body.isPrimary) {
-    await db
-      .update(schema.strategies)
-      .set({ isPrimary: false })
-      .where(eq(schema.strategies.userId, user.userId));
-  }
-
-  const [strategy] = await db
-    .insert(schema.strategies)
-    .values({
-      userId: user.userId,
-      name: body.name,
-      isPrimary: body.isPrimary ?? false,
-      config: body.config && Object.keys(body.config).length > 0 ? body.config : body,
-    })
-    .returning();
-
-  return c.json(strategy, 201);
+  try { body = createStrategySchema.parse(await c.req.json()); } catch (e: any) { return c.json({ error: 'Invalid input', details: e.errors }, 400); }
+  const s = await strategyService.create(c.get('user').userId, body);
+  return c.json(s, 201);
 });
 
-// ── PUT /api/strategies/:id ──
 strategies.put('/:id', requireAuth, async (c) => {
-  const user = c.get('user');
-  const id = c.req.param('id') || '';
-
   let body;
-  try {
-    body = updateStrategySchema.parse(await c.req.json());
-  } catch (e: any) {
-    return c.json({ error: 'Invalid input', details: e.errors }, 400);
-  }
-
-  const [existing] = await db
-    .select()
-    .from(schema.strategies)
-    .where(and(eq(schema.strategies.id, id), eq(schema.strategies.userId, user.userId)))
-    .limit(1);
-
-  if (!existing) {
-    return c.json({ error: 'Strategy not found' }, 404);
-  }
-
-  // If setting as primary, unset other primaries
-  if (body.isPrimary) {
-    await db
-      .update(schema.strategies)
-      .set({ isPrimary: false })
-      .where(eq(schema.strategies.userId, user.userId));
-  }
-
-  const updateData: Record<string, any> = {};
-  if (body.name !== undefined) updateData.name = body.name;
-  if (body.isPrimary !== undefined) updateData.isPrimary = body.isPrimary;
-  if (body.config !== undefined) updateData.config = body.config;
-
-  const [updated] = await db
-    .update(schema.strategies)
-    .set(updateData)
-    .where(eq(schema.strategies.id, id))
-    .returning();
-
+  try { body = updateStrategySchema.parse(await c.req.json()); } catch (e: any) { return c.json({ error: 'Invalid input', details: e.errors }, 400); }
+  const updated = await strategyService.update(c.req.param('id') || '', c.get('user').userId, body);
+  if (!updated) return c.json({ error: 'Strategy not found' }, 404);
   return c.json(updated);
 });
 
-// ── DELETE /api/strategies/:id ──
 strategies.delete('/:id', requireAuth, async (c) => {
-  const user = c.get('user');
-  const id = c.req.param('id') || '';
-  const name = c.req.query('name');
-
-  let [found] = await db
-    .select()
-    .from(schema.strategies)
-    .where(and(eq(schema.strategies.id, id), eq(schema.strategies.userId, user.userId)))
-    .limit(1);
-
-  // If not found by ID and name is provided, try by name
-  if (!found && name) {
-    [found] = await db
-      .select()
-      .from(schema.strategies)
-      .where(and(eq(schema.strategies.name, name), eq(schema.strategies.userId, user.userId)))
-      .limit(1);
-  }
-
-  if (!found) {
-    return c.json({ error: 'Strategy not found' }, 404);
-  }
-
-  await db.delete(schema.strategies).where(eq(schema.strategies.id, found.id));
+  const deleted = await strategyService.remove(c.req.param('id') || '', c.get('user').userId, c.req.query('name'));
+  if (!deleted) return c.json({ error: 'Strategy not found' }, 404);
   return c.json({ success: true });
 });
 
