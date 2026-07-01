@@ -36,7 +36,7 @@ export const users = pgTable(
       .$onUpdate(() => new Date())
       .notNull(),
   },
-  (table: any) => [uniqueIndex('users_username_idx').on(table.username)]
+  (table) => [uniqueIndex('users_username_idx').on(table.username)]
 );
 
 // ═══════════════════════════════════════════
@@ -94,7 +94,7 @@ export const bets = pgTable(
       .$onUpdate(() => new Date())
       .notNull(),
   },
-  (table: any) => [
+  (table) => [
     index('bets_user_id_idx').on(table.userId),
     index('bets_date_idx').on(table.date),
     index('bets_result_idx').on(table.result),
@@ -127,7 +127,7 @@ export const goals = pgTable(
       .$onUpdate(() => new Date())
       .notNull(),
   },
-  (table: any) => [index('goals_user_id_idx').on(table.userId)]
+  (table) => [index('goals_user_id_idx').on(table.userId)]
 );
 
 // ═══════════════════════════════════════════
@@ -152,7 +152,7 @@ export const strategies = pgTable(
       .$onUpdate(() => new Date())
       .notNull(),
   },
-  (table: any) => [index('strategies_user_id_idx').on(table.userId)]
+  (table) => [index('strategies_user_id_idx').on(table.userId)]
 );
 
 // ═══════════════════════════════════════════
@@ -177,7 +177,7 @@ export const bankroll = pgTable(
       .$onUpdate(() => new Date())
       .notNull(),
   },
-  (table: any) => [index('bankroll_user_id_idx').on(table.userId)]
+  (table) => [index('bankroll_user_id_idx').on(table.userId)]
 );
 
 // ═══════════════════════════════════════════
@@ -195,7 +195,7 @@ export const riskyTeams = pgTable(
     notes: text('notes').default(''),
     createdAt: timestamp('created_at').defaultNow().notNull(),
   },
-  (table: any) => [
+  (table) => [
     index('risky_teams_name_idx').on(table.name),
     index('risky_teams_user_idx').on(table.userId),
     uniqueIndex('risky_teams_user_name_idx').on(table.userId, table.name),
@@ -217,7 +217,7 @@ export const telegramGroups = pgTable(
     link: varchar('link', { length: 500 }).default(''),
     createdAt: timestamp('created_at').defaultNow().notNull(),
   },
-  (table: any) => [index('tg_groups_user_idx').on(table.userId)]
+  (table) => [index('tg_groups_user_idx').on(table.userId)]
 );
 
 // ── Type exports ──
