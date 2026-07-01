@@ -6,14 +6,17 @@ const requestCounts = new Map<string, { count: number; resetAt: number }>();
 const MAX_REQUESTS = 100;
 const WINDOW_MS = 60 * 1000; // 1 minute
 
+// Per-user rate limit: 300 requests/min for authenticated users
+const USER_MAX_REQUESTS = 300;
+
 /**
- * Rate limiting middleware: 100 requests per minute per IP.
+ * Rate limiting middleware: 100 req/min per IP, + 300 req/min per user.
  * Free tier (health, login) is exempt.
  */
 export async function rateLimiterMiddleware(c: Context, next: Next) {
   // Skip rate limiting for public health + login
   const path = c.req.path;
-  if (path === '/api/health' || path === '/api/auth/login') {
+  if (path === '/api/health' || path === '/api/auth/login' || path === '/api/auth/refresh') {
     return next();
   }
 
@@ -35,6 +38,22 @@ export async function rateLimiterMiddleware(c: Context, next: Next) {
 
   if (entry.count > MAX_REQUESTS) {
     return c.json({ error: 'Too many requests. Try again later.' }, 429);
+  }
+
+  // Per-user rate limiting (only for authenticated users)
+  const user = c.get('user') as { userId?: number } | undefined;
+  if (user?.userId) {
+    const userKey = `rate:user:${user.userId}`;
+    let userEntry = requestCounts.get(userKey);
+    if (!userEntry || now > userEntry.resetAt) {
+      userEntry = { count: 0, resetAt: now + WINDOW_MS };
+      requestCounts.set(userKey, userEntry);
+    }
+    userEntry.count++;
+
+    if (userEntry.count > USER_MAX_REQUESTS) {
+      return c.json({ error: 'Too many requests. Try again later.' }, 429);
+    }
   }
 
   await next();
