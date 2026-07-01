@@ -4,7 +4,7 @@ import * as schema from './schema';
 
 const { Pool } = pg;
 
-const pool = new Pool({
+export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   max: 20,
   idleTimeoutMillis: 30_000,

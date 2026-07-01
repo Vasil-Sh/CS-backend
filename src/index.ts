@@ -14,7 +14,7 @@ import { rateLimiterMiddleware } from './middleware/rateLimiter';
 import { bodyLimit } from './middleware/bodyLimit';
 import { securityHeaders } from './middleware/securityHeaders';
 import { numericNormalizer } from './middleware/numericNormalizer';
-import { db } from './db/client';
+import { db, pool } from './db/client';
 import { sql } from 'drizzle-orm';
 
 import authRoutes from './routes/auth';
@@ -159,6 +159,12 @@ console.log(`🚀 MatchIQ API server starting on http://localhost:${port}`);
 // ── Graceful shutdown ──
 const shutdown = async (signal: string) => {
   console.log(`\n🛑 Received ${signal}, shutting down gracefully...`);
+  try {
+    await pool.end();
+    console.log('✅ Database pool closed');
+  } catch (err) {
+    console.error('❌ Error closing DB pool:', err);
+  }
   process.exit(0);
 };
 
