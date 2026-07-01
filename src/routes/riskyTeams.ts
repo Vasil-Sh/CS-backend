@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from '../middleware/auth';
-import { z } from 'zod';
+import { riskyTeamSchema } from '../middleware/validation';
 import { riskyTeamService } from '../services/riskyTeamService';
 
 const riskyTeams = new Hono();
@@ -12,7 +12,7 @@ riskyTeams.get('/', requireAuth, async (c) => {
 
 riskyTeams.post('/', requireAuth, requireAdmin, async (c) => {
   let body;
-  try { body = z.object({ name: z.string().min(1).max(200), game: z.string().max(20).optional().default(''), status: z.string().max(50).optional().default(''), notes: z.string().optional().default('') }).parse(await c.req.json()); }
+  try { body = riskyTeamSchema.parse(await c.req.json()); }
   catch { return c.json({ error: 'Invalid input: name required (1-200 chars), optional game/status/notes' }, 400); }
   const team = await riskyTeamService.create(c.get('user').userId, body);
   if (!team) return c.json({ error: 'Team already in list' }, 409);

@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from '../middleware/auth';
-import { loginSchema, registerSchema } from '../middleware/validation';
+import { loginSchema, registerSchema, updateUserSchema } from '../middleware/validation';
 import { authService } from '../services/authService';
 import { verifyRefreshToken, signToken, signRefreshToken } from '../utils/jwt';
 
@@ -62,7 +62,8 @@ auth.delete('/users/:id', requireAuth, requireAdmin, async (c) => {
 auth.put('/users/:id', requireAuth, requireAdmin, async (c) => {
   const id = parseInt(c.req.param('id') || '', 10);
   if (isNaN(id)) return c.json({ error: 'Invalid ID' }, 400);
-  const body = await c.req.json().catch(() => ({}));
+  let body;
+  try { body = updateUserSchema.parse(await c.req.json()); } catch { return c.json({ error: 'Invalid input' }, 400); }
   const updated = await authService.updateUser(id, body);
   if (!updated) return c.json({ error: 'User not found' }, 404);
   return c.json({ id: updated.id, username: updated.username, role: updated.role, telegram: updated.telegram, priceMonth: updated.priceMonth, startDate: updated.startDate, endDate: updated.endDate });

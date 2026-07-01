@@ -6,6 +6,7 @@ import { eq, desc, and, sql } from 'drizzle-orm';
 import { db, schema } from '../db/client';
 import { cache } from '../utils/cache';
 import type { BetStats, BetPagination } from './types';
+import type { CreateBetInput, UpdateBetInput } from '../middleware/validation';
 
 export class BetService {
   /** Invalidate all cached bet data for a user */
@@ -41,7 +42,7 @@ export class BetService {
   }
 
   /** Create a bet */
-  async createBet(userId: number, body: Record<string, any>) {
+  async createBet(userId: number, body: CreateBetInput) {
     this.invalidateCache(userId);
 
     const data = this.buildBetData(userId, body);
@@ -60,7 +61,7 @@ export class BetService {
   }
 
   /** Update a bet */
-  async updateBet(id: string, userId: number, body: Record<string, any>) {
+  async updateBet(id: string, userId: number, body: UpdateBetInput) {
     this.invalidateCache(userId);
 
     const existing = await this.getOwnedBet(id, userId);
@@ -107,7 +108,7 @@ export class BetService {
 
   // ── Private helpers ──
 
-  private buildBetData(userId: number, body: Record<string, any>): Record<string, any> {
+  private buildBetData(userId: number, body: CreateBetInput): Record<string, unknown> {
     return {
       userId,
       match: body.match,
@@ -142,7 +143,7 @@ export class BetService {
     };
   }
 
-  private buildUpdateData(body: Record<string, any>): Record<string, any> {
+  private buildUpdateData(body: UpdateBetInput): Record<string, unknown> {
     const NUMERIC = new Set(['profit','odds','amount','roi','stake','originalAmount','exchangeRate','originalProfit','winProbability']);
     const PASSTHROUGH = new Set(['result','notes','strategy','risk','match','team1','team2','betType','date','format','game','currency','goalId','selection','matchUrl','riskyTeams','tournament','logoTeam1','logoTeam2','expressLogos']);
     const data: Record<string, any> = {};

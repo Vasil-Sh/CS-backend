@@ -120,6 +120,57 @@ export const adjustBankrollSchema = z.object({
 });
 
 // ═══════════════════════════════════════════
+// User update schema
+// ═══════════════════════════════════════════
+
+export const updateUserSchema = z.object({
+  username: z.string().max(100).optional(),
+  password: z.string().max(255).optional(),
+  telegram: z.string().max(100).optional(),
+  role: z.enum(['admin', 'user']).optional(),
+  priceMonth: z.coerce.number().optional(),
+  startDate: z.string().optional(),
+  endDate: z.string().optional(),
+});
+
+// ═══════════════════════════════════════════
+// Telegram group + risky team schemas (extracted from routes)
+// ═══════════════════════════════════════════
+
+export const telegramGroupSchema = z.object({
+  name: z.string().min(1).max(200),
+  link: z.string().max(500).default(''),
+});
+
+export const riskyTeamSchema = z.object({
+  name: z.string().min(1).max(200),
+  game: z.string().max(20).optional().default(''),
+  status: z.string().max(50).optional().default(''),
+  notes: z.string().optional().default(''),
+});
+
+// ═══════════════════════════════════════════
+// AI schemas
+// ═══════════════════════════════════════════
+
+export const aiRecommendSchema = z.object({
+  team1: z.string().min(1),
+  team2: z.string().min(1),
+  format: z.string().default('Bo3'),
+  tier: z.string().default('TIER2'),
+  odds: z.object({ team1: z.number().optional(), team2: z.number().optional() }).optional(),
+});
+
+export const aiAdviceSchema = z.object({
+  state: z.enum(['growing', 'stable', 'dipping', 'falling']),
+  percentOfPeak: z.number(),
+  currentBank: z.number(),
+  allTimeHigh: z.number(),
+  bets: z.number(),
+  profit: z.number(),
+});
+
+// ═══════════════════════════════════════════
 // Type exports
 // ═══════════════════════════════════════════
 

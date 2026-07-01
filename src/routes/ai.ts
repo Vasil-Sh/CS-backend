@@ -1,22 +1,9 @@
 import { Hono } from 'hono';
-import { z } from 'zod';
 import { requireAuth } from '../middleware/auth';
+import { aiRecommendSchema, aiAdviceSchema } from '../middleware/validation';
 import { deepSeekService } from '../services/deepseek';
 
 const ai = new Hono();
-
-const recommendationSchema = z.object({
-  team1: z.string().min(1),
-  team2: z.string().min(1),
-  format: z.string().default('Bo3'),
-  tier: z.string().default('TIER2'),
-  odds: z
-    .object({
-      team1: z.number().optional(),
-      team2: z.number().optional(),
-    })
-    .optional(),
-});
 
 // ── POST /api/ai/recommend ──
 ai.post('/recommend', requireAuth, async (c) => {
@@ -26,7 +13,7 @@ ai.post('/recommend', requireAuth, async (c) => {
 
   let body;
   try {
-    body = recommendationSchema.parse(await c.req.json());
+    body = aiRecommendSchema.parse(await c.req.json());
   } catch (e: any) {
     return c.json({ error: 'Invalid input', details: e.errors }, 400);
   }
@@ -40,19 +27,9 @@ ai.post('/recommend', requireAuth, async (c) => {
   }
 });
 
-// ── POST /api/ai/advice (balance advice — rule-based, no AI call needed) ──
-const adviceSchema = z.object({
-  state: z.enum(['growing', 'stable', 'dipping', 'falling']),
-  percentOfPeak: z.number(),
-  currentBank: z.number(),
-  allTimeHigh: z.number(),
-  bets: z.number(),
-  profit: z.number(),
-});
-
 ai.post('/advice', requireAuth, async (c) => {
   let body;
-  try { body = adviceSchema.parse(await c.req.json()); }
+  try { body = aiAdviceSchema.parse(await c.req.json()); }
   catch (e: any) { return c.json({ error: 'Invalid input', details: e.errors }, 400); }
 
   const tips: Record<string, string[]> = {

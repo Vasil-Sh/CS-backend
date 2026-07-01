@@ -12,11 +12,11 @@ export interface JwtPayload {
 }
 
 export function signToken(payload: JwtPayload): string {
-  return jwt.sign(payload as object, SECRET, { expiresIn: EXPIRES_IN } as any);
+  return jwt.sign(payload as object, SECRET, { expiresIn: EXPIRES_IN } as jwt.SignOptions);
 }
 
 export function signRefreshToken(payload: JwtPayload): string {
-  return jwt.sign({ ...payload, type: 'refresh' } as object, REFRESH_SECRET, { expiresIn: REFRESH_EXPIRES_IN } as any);
+  return jwt.sign({ ...payload, type: 'refresh' } as object, REFRESH_SECRET, { expiresIn: REFRESH_EXPIRES_IN } as jwt.SignOptions);
 }
 
 export function verifyToken(token: string): JwtPayload {
