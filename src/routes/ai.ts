@@ -40,7 +40,7 @@ ai.post('/recommend', requireAuth, async (c) => {
   }
 });
 
-// ── POST /api/ai/advice (balance advice) ──
+// ── POST /api/ai/advice (balance advice — rule-based, no AI call needed) ──
 const adviceSchema = z.object({
   state: z.enum(['growing', 'stable', 'dipping', 'falling']),
   percentOfPeak: z.number(),
@@ -52,11 +52,8 @@ const adviceSchema = z.object({
 
 ai.post('/advice', requireAuth, async (c) => {
   let body;
-  try {
-    body = adviceSchema.parse(await c.req.json());
-  } catch (e: any) {
-    return c.json({ error: 'Invalid input', details: e.errors }, 400);
-  }
+  try { body = adviceSchema.parse(await c.req.json()); }
+  catch (e: any) { return c.json({ error: 'Invalid input', details: e.errors }, 400); }
 
   const tips: Record<string, string[]> = {
     growing: [
@@ -77,9 +74,7 @@ ai.post('/advice', requireAuth, async (c) => {
     ],
   };
 
-  const options = tips[body.state] || tips.stable;
-  const advice = options[Math.floor(Math.random() * options.length)];
-
+  const advice = tips[body.state]?.[Math.floor(Math.random() * tips[body.state].length)] || tips.stable[0];
   return c.json({ advice });
 });
 

@@ -3,13 +3,13 @@ import { z } from 'zod';
 
 /**
  * Centralized environment variable validation.
- * Fails fast on startup if critical vars are missing or invalid.
+ * Critical vars (DATABASE_URL, JWT_SECRET) are required in production.
  */
 const envSchema = z.object({
   PORT: z.coerce.number().default(3001),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('production'),
-  DATABASE_URL: z.string().optional(),
-  JWT_SECRET: z.string().optional(),
+  DATABASE_URL: z.string().min(1, 'DATABASE_URL is required for PostgreSQL connection'),
+  JWT_SECRET: z.string().min(1, 'JWT_SECRET is required (use a random 64-char string)'),
   JWT_EXPIRES_IN: z.string().default('15m'),
   JWT_REFRESH_SECRET: z.string().optional(),
   JWT_REFRESH_EXPIRES_IN: z.string().default('30d'),

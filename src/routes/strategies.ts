@@ -6,8 +6,12 @@ import { strategyService } from '../services/strategyService';
 const strategies = new Hono();
 
 strategies.get('/', requireAuth, async (c) => {
-  const rows = await strategyService.list(c.get('user').userId);
-  return c.json(rows);
+  const page = parseInt(c.req.query('page') || '0', 10);
+  const all = await strategyService.list(c.get('user').userId);
+  if (!page || page < 1) return c.json(all); // backward compat: plain array
+  const limit = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '50', 10) || 50));
+  const rows = all.slice((page - 1) * limit, page * limit);
+  return c.json({ data: rows, meta: { page, limit, total: all.length, totalPages: Math.ceil(all.length / limit) } });
 });
 
 strategies.post('/', requireAuth, async (c) => {
