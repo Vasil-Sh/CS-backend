@@ -13,7 +13,7 @@ bankroll.get('/', requireAuth, async (c) => {
 bankroll.post('/', requireAuth, async (c) => {
   let body;
   try { body = setBankrollSchema.parse(await c.req.json()); } catch (e: any) { return c.json({ error: 'Invalid input', details: e.errors }, 400); }
-  const result = await bankrollBackendService.setInitialBank(c.get('user').userId, body.initialBank);
+  const result = await bankrollBackendService.setInitialBank(c.get('user').userId, body.initialBank, body.initialBankUSD, body.exchangeRate);
   return c.json(result, 201);
 });
 

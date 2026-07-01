@@ -169,6 +169,8 @@ export const bankroll = pgTable(
       .references(() => users.id, { onDelete: 'cascade' }),
 
     initialBank: numeric('initial_bank', { precision: 12, scale: 2 }).notNull().default('0'),
+    initialBankUSD: numeric('initial_bank_usd', { precision: 12, scale: 2 }).notNull().default('0'),
+    exchangeRate: numeric('exchange_rate', { precision: 8, scale: 2 }).notNull().default('0'),
     manualAdjustments: numeric('manual_adjustments', { precision: 12, scale: 2 }).default('0'),
 
     createdAt: timestamp('created_at').defaultNow().notNull(),

@@ -113,6 +113,8 @@ export const updateStrategySchema = createStrategySchema.partial().passthrough()
 
 export const setBankrollSchema = z.object({
   initialBank: z.coerce.number().min(0),
+  initialBankUSD: z.coerce.number().min(0).optional(),
+  exchangeRate: z.coerce.number().min(0).optional(),
 });
 
 export const adjustBankrollSchema = z.object({

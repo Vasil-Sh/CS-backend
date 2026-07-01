@@ -24,17 +24,21 @@ export class BankrollBackendService {
     return row || null;
   }
 
-  async setInitialBank(userId: number, amount: number) {
+  async setInitialBank(userId: number, amount: number, initialBankUSD?: number, exchangeRate?: number) {
+    const values: Record<string, string> = { initialBank: amount.toString() };
+    if (initialBankUSD !== undefined) values.initialBankUSD = initialBankUSD.toString();
+    if (exchangeRate !== undefined) values.exchangeRate = exchangeRate.toString();
+
     const existing = await this.get(userId);
     if (existing) {
       const [updated] = await db.update(schema.bankroll)
-        .set({ initialBank: amount.toString() })
+        .set(values)
         .where(eq(schema.bankroll.userId, userId))
         .returning();
       return updated;
     }
     const [created] = await db.insert(schema.bankroll)
-      .values({ userId, initialBank: amount.toString(), manualAdjustments: '0' })
+      .values({ userId, ...values, manualAdjustments: '0' })
       .returning();
     return created;
   }
@@ -65,11 +69,13 @@ export class BankrollBackendService {
 
     const totalProfit = Number(totals?.totalProfit || 0);
     const initialBank = parseFloat(row.initialBank || '0');
+    const initialBankUSD = parseFloat(row.initialBankUSD || '0');
+    const exchangeRate = parseFloat(row.exchangeRate || '0');
     const manualAdjustments = parseFloat(row.manualAdjustments || '0');
     const currentBank = initialBank + totalProfit + manualAdjustments;
     const roi = initialBank > 0 ? (totalProfit / initialBank) * 100 : 0;
 
-    return { initialBank, manualAdjustments, currentBank, totalProfit, roi: Math.round(roi * 100) / 100 };
+    return { initialBank, initialBankUSD, exchangeRate, manualAdjustments, currentBank, totalProfit, roi: Math.round(roi * 100) / 100 };
   }
 }
 
