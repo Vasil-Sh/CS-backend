@@ -15,7 +15,9 @@ API-сервер для [MatchIQ](https://github.com/Vasil-Sh/CS) — платф
 | Кешування | **In-memory** (TTL, Redis-ready) |
 | Rate limiting | **100 req/min per IP** |
 | CI/CD | **GitHub Actions** + **Railway** |
+| Тести | **Vitest** — 135 unit + інтеграційних (17 файлів) |
 | Документація | **OpenAPI 3.0** + **Swagger UI** (`/api/docs`) |
+| Версіонування | **API /v1** (з backward compat `/api/*`) |
 
 ## Швидкий старт
 
@@ -62,9 +64,35 @@ pnpm dev
 | `GET/POST/DELETE` | `/telegram-groups` | Telegram-групи (CRUD) |
 | `GET/POST` | `/risky-teams` | Ризиковані команди |
 | `DELETE` | `/risky-teams/:id` | Admin: видалити команду зі списку |
+| `POST` | `/admin/reset` | Видалити всі дані користувача (ставки, цілі, стратегії тощо) |
+
+> Всі ендпоінти також доступні з префіксом `/api/v1/*` (наприклад, `/api/v1/bets`). Старі шляхи `/api/*` продовжують працювати для зворотної сумісності.
+
+## Архітектура (v1.23.80)
+
+```
+src/
+├── routes/      # Тонкий HTTP-шар (тільки валідація + виклик сервісу)
+├── services/    # Бізнес-логіка (8 сервісів)
+│   ├── authService.ts
+│   ├── betService.ts
+│   ├── goalService.ts
+│   ├── strategyService.ts
+│   ├── bankrollBackendService.ts
+│   ├── telegramGroupService.ts
+│   ├── deepseek.ts
+│   └── telegramBot.ts
+├── middleware/   # auth, rateLimiter, securityHeaders, bodyLimit, validation, numericNormalizer
+├── db/           # Drizzle ORM schema + PostgreSQL client
+├── utils/        # JWT, cache, response helpers, env validation
+└── test/         # Test helpers
+```
 
 ## Безпека (v1.23.x)
 
+- ✅ **API v1 версіонування** — `/api/v1/*` з backward compat
+- ✅ **Services layer** — бізнес-логіка винесена з routes (тестовано окремо)
+- ✅ **135 тестів** — unit (middleware, utils, services) + інтеграційні (routes)
 - ✅ **Body size limit** — 1MB max (захист від DDOS)
 - ✅ **Security headers** — CSP, HSTS, X-Content-Type, X-Frame-Options, Permissions-Policy
 - ✅ **Swagger protection** — `/api/docs` захищений `?key=<ADMIN_PASSWORD>` у production
@@ -152,11 +180,13 @@ node scripts/embed-spec.cjs    # вшити спеку в код
 ```
 https://cs-backend-production-f9e8.up.railway.app/api/health
 ```
-| `ADMIN_PASSWORD` | Пароль для `pnpm db:seed` | `admin123` |
-| `DEEPSEEK_API_KEY` | API-ключ DeepSeek | — |
-| `TELEGRAM_BOT_TOKEN` | Токен Telegram бота | — |
-| `TELEGRAM_ADMIN_CHAT_ID` | Chat ID адміна | — |
-| `CS_API_URL` | URL API матчів | — |
+
+## Тести
+
+```bash
+pnpm test          # запустити всі тести (135, 17 файлів)
+pnpm test:watch    # watch-режим
+```
 
 ## Структура
 
@@ -174,21 +204,34 @@ src/
 │   ├── auth.ts           # JWT (Bearer + httpOnly cookie)
 │   ├── logger.ts         # Структуроване логування
 │   ├── rateLimiter.ts    # Rate limiting (100 req/min)
+│   ├── securityHeaders.ts # Helmet-like security headers
+│   ├── bodyLimit.ts      # 1MB body size limit
+│   ├── numericNormalizer.ts # Postgres NUMERIC → JS number
 │   └── validation.ts     # Zod-схеми
 ├── routes/
+│   ├── admin.ts          # /api/admin/reset
+│   ├── ai.ts             # /api/ai/*
 │   ├── auth.ts           # /api/auth/*
+│   ├── bankroll.ts       # /api/bankroll/*
 │   ├── bets.ts           # /api/bets/* (з PATCH)
 │   ├── goals.ts          # /api/goals/*
-│   ├── bankroll.ts       # /api/bankroll/*
+│   ├── riskyTeams.ts     # /api/risky-teams/*
 │   ├── strategies.ts     # /api/strategies/*
-│   ├── ai.ts             # /api/ai/*
 │   ├── telegram.ts       # /api/telegram/webhook
-│   ├── telegramGroups.ts # /api/telegram-groups/*
-│   └── riskyTeams.ts     # /api/risky-teams/*
+│   └── telegramGroups.ts # /api/telegram-groups/*
 ├── services/
-│   ├── deepseek.ts       # DeepSeek API клієнт
-│   └── telegramBot.ts    # Telegram Bot парсер
+│   ├── authService.ts         # Логін, реєстрація, CRUD юзерів
+│   ├── bankrollBackendService.ts # Банкрол (get/set/adjust/stats)
+│   ├── betService.ts          # Ставки (CRUD + stats + cache)
+│   ├── deepseek.ts            # DeepSeek AI клієнт
+│   ├── goalService.ts         # Цілі (CRUD)
+│   ├── strategyService.ts     # Стратегії (CRUD + primary)
+│   ├── telegramBot.ts         # Telegram Bot парсер
+│   └── telegramGroupService.ts # Telegram групи (CRUD)
+├── test/
+│   └── helpers.ts       # Test utilities + mock helpers
 └── utils/
     ├── jwt.ts            # signToken / verifyToken / refresh
-    └── cache.ts          # In-memory cache (Redis-ready)
-```
+    ├── cache.ts          # In-memory cache (Redis-ready)
+    ├── response.ts       # ok(), err(), paginated() helpers
+    └── env.ts            # Zod env validation
