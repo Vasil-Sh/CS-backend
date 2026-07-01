@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { loginSchema, registerSchema } from '../middleware/validation';
 import { authService } from '../services/authService';
+import { verifyRefreshToken, signToken, signRefreshToken } from '../utils/jwt';
 
 const auth = new Hono();
 
@@ -13,6 +14,23 @@ auth.post('/login', async (c) => {
   const isProd = process.env.NODE_ENV === 'production';
   c.header('Set-Cookie', `auth_token=${result.token}; HttpOnly; ${isProd ? 'Secure; ' : ''}SameSite=Lax; Path=/; Max-Age=${7 * 24 * 60 * 60}`, { append: true });
   return c.json({ success: true, isAdmin: result.isAdmin, token: result.token, refreshToken: result.refreshToken, user: result.user });
+});
+
+// ── POST /api/auth/refresh ──
+auth.post('/refresh', async (c) => {
+  let body: { refreshToken?: string };
+  try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid input' }, 400); }
+  if (!body.refreshToken) return c.json({ error: 'Refresh token required' }, 400);
+  try {
+    const payload = verifyRefreshToken(body.refreshToken);
+    const user = await authService.getMe(payload.userId);
+    if (!user) return c.json({ error: 'User not found' }, 401);
+    const token = signToken({ userId: user.id, username: user.username, role: user.role as 'admin' | 'user' });
+    const refreshToken = signRefreshToken({ userId: user.id, username: user.username, role: user.role as 'admin' | 'user' });
+    const isProd = process.env.NODE_ENV === 'production';
+    c.header('Set-Cookie', `auth_token=${token}; HttpOnly; ${isProd ? 'Secure; ' : ''}SameSite=Lax; Path=/; Max-Age=${7 * 24 * 60 * 60}`, { append: true });
+    return c.json({ token, refreshToken });
+  } catch { return c.json({ error: 'Invalid or expired refresh token' }, 401); }
 });
 
 auth.post('/register', requireAuth, requireAdmin, async (c) => {

@@ -2,7 +2,7 @@
 // Bankroll Service (backend) — extracted from routes/bankroll.ts
 // ═══════════════════════════════════════════
 
-import { eq } from 'drizzle-orm';
+import { eq, ne, sql } from 'drizzle-orm';
 import { db, schema } from '../db/client';
 
 export class BankrollBackendService {
@@ -54,8 +54,16 @@ export class BankrollBackendService {
     const row = await this.get(userId);
     if (!row) return { initialBank: 0, manualAdjustments: 0, currentBank: 0, totalProfit: 0, roi: 0 };
 
-    const bets = await db.select().from(schema.bets).where(eq(schema.bets.userId, userId));
-    const totalProfit = bets.filter(b => b.result !== 'Pending').reduce((sum, b) => sum + parseFloat(b.profit || '0'), 0);
+    // SQL aggregation — O(1) memory, no matter how many bets
+    const [totals] = await db
+      .select({
+        totalProfit: sql<number>`coalesce(sum(profit::numeric), 0)::float`,
+      })
+      .from(schema.bets)
+      .where(ne(schema.bets.result, 'Pending'))
+      .where(eq(schema.bets.userId, userId));
+
+    const totalProfit = Number(totals?.totalProfit || 0);
     const initialBank = parseFloat(row.initialBank || '0');
     const manualAdjustments = parseFloat(row.manualAdjustments || '0');
     const currentBank = initialBank + totalProfit + manualAdjustments;

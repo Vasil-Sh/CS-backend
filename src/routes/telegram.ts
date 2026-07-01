@@ -7,6 +7,13 @@ const telegram = new Hono();
 // This replaces the Google Apps Script webhook.
 // Set webhook: POST https://api.telegram.org/bot<TOKEN>/setWebhook?url=<YOUR_SERVER>/api/telegram/webhook
 telegram.post('/webhook', async (c) => {
+  // Validate Telegram secret token (optional — only checked if configured)
+  const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
+  if (secret) {
+    const token = c.req.header('X-Telegram-Bot-Api-Secret-Token');
+    if (token !== secret) return c.json({ error: 'Unauthorized' }, 401);
+  }
+
   if (!telegramBotService.isConfigured()) {
     return c.json({ error: 'TELEGRAM_BOT_TOKEN not configured' }, 503);
   }

@@ -33,7 +33,16 @@ const app = new Hono();
 // ── Global middleware ──
 app.use('*', securityHeaders);
 app.use('*', loggerMiddleware);
-app.use('*', cors({ origin: '*', credentials: true }));
+app.use('*', cors({
+  origin: (origin) => {
+    const allowed = ['http://localhost:5173', 'http://localhost:3001',
+      'https://matchiq.pro', 'https://www.matchiq.pro',
+      'https://matchiq.vercel.app', 'https://cs-backend-production-f9e8.up.railway.app'];
+    if (!origin || allowed.includes(origin)) return origin || allowed[0];
+    return allowed[0]; // don't expose origin in 403 — just default
+  },
+  credentials: true,
+}));
 app.use('*', rateLimiterMiddleware);
 app.use('*', bodyLimit(1_000_000)); // 1MB max body
 app.use('*', authMiddleware);

@@ -1,62 +1,28 @@
 import { Hono } from 'hono';
-import { eq } from 'drizzle-orm';
-import { db, schema } from '../db/client';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { z } from 'zod';
+import { riskyTeamService } from '../services/riskyTeamService';
 
 const riskyTeams = new Hono();
 
-// ── GET /api/risky-teams ──
 riskyTeams.get('/', requireAuth, async (c) => {
-  const user = c.get('user');
-  // Everyone sees only their own risky teams — admin included
-  const rows = await db
-    .select()
-    .from(schema.riskyTeams)
-    .where(eq(schema.riskyTeams.userId, user.userId))
-    .orderBy(schema.riskyTeams.name);
-  return c.json(rows.map((r) => ({ id: r.id, userId: r.userId, name: r.name, game: r.game, status: r.status, notes: r.notes })));
+  const rows = await riskyTeamService.list(c.get('user').userId);
+  return c.json(rows.map(r => ({ id: r.id, userId: r.userId, name: r.name, game: r.game, status: r.status, notes: r.notes })));
 });
 
-// ── POST /api/risky-teams (admin only) ──
 riskyTeams.post('/', requireAuth, requireAdmin, async (c) => {
-  const user = c.get('user');
   let body;
-  try {
-    body = z.object({
-      name: z.string().min(1).max(200),
-      game: z.string().max(20).optional().default(''),
-      status: z.string().max(50).optional().default(''),
-      notes: z.string().optional().default(''),
-    }).parse(await c.req.json());
-  } catch {
-    return c.json({ error: 'Invalid input: name required (1-200 chars), optional game/status/notes' }, 400);
-  }
-
-  const [existing] = await db
-    .select()
-    .from(schema.riskyTeams)
-    .where(eq(schema.riskyTeams.name, body.name))
-    .limit(1);
-
-  if (existing) {
-    return c.json({ error: 'Team already in list' }, 409);
-  }
-
-  const [team] = await db
-    .insert(schema.riskyTeams)
-    .values({ userId: user.userId, name: body.name, game: body.game, status: body.status, notes: body.notes })
-    .returning();
-
+  try { body = z.object({ name: z.string().min(1).max(200), game: z.string().max(20).optional().default(''), status: z.string().max(50).optional().default(''), notes: z.string().optional().default('') }).parse(await c.req.json()); }
+  catch { return c.json({ error: 'Invalid input: name required (1-200 chars), optional game/status/notes' }, 400); }
+  const team = await riskyTeamService.create(c.get('user').userId, body);
+  if (!team) return c.json({ error: 'Team already in list' }, 409);
   return c.json(team, 201);
 });
 
-// ── DELETE /api/risky-teams/:id (admin only) ──
 riskyTeams.delete('/:id', requireAuth, requireAdmin, async (c) => {
   const id = parseInt(c.req.param('id') || '', 10);
   if (isNaN(id)) return c.json({ error: 'Invalid ID' }, 400);
-
-  await db.delete(schema.riskyTeams).where(eq(schema.riskyTeams.id, id));
+  await riskyTeamService.remove(id);
   return c.json({ success: true });
 });
 
