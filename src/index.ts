@@ -115,7 +115,22 @@ if (_swaggerHtml) {
   );
 }
 
-// ── Routes ──
+// ── API v1 routes ──
+const v1 = new Hono();
+v1.route('/auth', authRoutes);
+v1.route('/bets', betRoutes);
+v1.route('/goals', goalRoutes);
+v1.route('/bankroll', bankrollRoutes);
+v1.route('/strategies', strategyRoutes);
+v1.route('/ai', aiRoutes);
+v1.route('/telegram', telegramRoutes);
+v1.route('/telegram-groups', telegramGroupRoutes);
+v1.route('/risky-teams', riskyTeamRoutes);
+v1.route('', adminRoutes);
+
+app.route('/api/v1', v1);
+
+// ── Legacy routes (backward compat) ──
 app.route('/api/auth', authRoutes);
 app.route('/api/bets', betRoutes);
 app.route('/api/goals', goalRoutes);
