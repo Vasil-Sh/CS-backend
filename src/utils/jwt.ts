@@ -2,7 +2,7 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 
 const SECRET = process.env.JWT_SECRET || (() => { throw new Error('JWT_SECRET must be set'); })();
-const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || (() => { throw new Error('JWT_REFRESH_SECRET must be set'); })();
+const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || '';
 const EXPIRES_IN = process.env.JWT_EXPIRES_IN || '15m';
 const REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || '30d';
 
@@ -17,6 +17,7 @@ export function signToken(payload: JwtPayload): string {
 }
 
 export function signRefreshToken(payload: JwtPayload): string {
+  if (!REFRESH_SECRET) throw new Error('JWT_REFRESH_SECRET must be set');
   return jwt.sign({ ...payload, type: 'refresh' } as object, REFRESH_SECRET, { expiresIn: REFRESH_EXPIRES_IN } as jwt.SignOptions);
 }
 
