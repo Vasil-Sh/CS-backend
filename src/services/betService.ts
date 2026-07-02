@@ -11,7 +11,7 @@ import type { CreateBetInput, UpdateBetInput } from '../middleware/validation';
 export class BetService {
   /** Invalidate all cached bet data for a user */
   invalidateCache(userId: number): void {
-    cache.del(`bets:${userId}`);
+    cache.delByPrefix(`bets:${userId}`);
     cache.del(`stats:${userId}`);
   }
 
@@ -23,6 +23,10 @@ export class BetService {
 
   /** Get paginated bets for a user */
   async getBets(userId: number, page: number, limit: number): Promise<BetPagination> {
+    const cacheKey = `bets:${userId}:${page}:${limit}`;
+    const cached = cache.get<BetPagination>(cacheKey);
+    if (cached) return cached;
+
     const offset = (page - 1) * limit;
 
     const [{ count }] = await db
@@ -38,7 +42,9 @@ export class BetService {
       .limit(limit)
       .offset(offset);
 
-    return { rows, total: count, page, limit };
+    const result = { rows, total: count, page, limit };
+    cache.set(cacheKey, result, 15_000); // 15s TTL
+    return result;
   }
 
   /** Create a bet */
