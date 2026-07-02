@@ -4,11 +4,14 @@ import * as schema from './schema';
 
 const { Pool } = pg;
 
+const isProduction = process.env.NODE_ENV === 'production';
+
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   max: 20,
   idleTimeoutMillis: 30_000,
-  connectionTimeoutMillis: 5_000,
+  connectionTimeoutMillis: isProduction ? 10_000 : 5_000,
+  ssl: isProduction ? { rejectUnauthorized: false } : undefined,
 });
 
 pool.on('error', (err) => {

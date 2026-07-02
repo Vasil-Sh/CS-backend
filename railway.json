@@ -5,7 +5,7 @@
     "buildCommand": "pnpm install --frozen-lockfile"
   },
   "deploy": {
-    "startCommand": "pnpm start",
+    "startCommand": "pnpm db:migrate-constraints && pnpm start",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 3
   }

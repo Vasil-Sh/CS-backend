@@ -98,6 +98,8 @@ export const bets = pgTable(
     index('bets_user_id_idx').on(table.userId),
     index('bets_date_idx').on(table.date),
     index('bets_result_idx').on(table.result),
+    index('bets_user_result_idx').on(table.userId, table.result),
+    index('bets_goal_id_idx').on(table.goalId),
   ]
 );
 
@@ -196,6 +198,10 @@ export const riskyTeams = pgTable(
     status: varchar('status', { length: 50 }).default(''),
     notes: text('notes').default(''),
     createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at')
+      .defaultNow()
+      .$onUpdate(() => new Date())
+      .notNull(),
   },
   (table) => [
     index('risky_teams_name_idx').on(table.name),
@@ -218,6 +224,10 @@ export const telegramGroups = pgTable(
     name: varchar('name', { length: 200 }).notNull(),
     link: varchar('link', { length: 500 }).default(''),
     createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at')
+      .defaultNow()
+      .$onUpdate(() => new Date())
+      .notNull(),
   },
   (table) => [index('tg_groups_user_idx').on(table.userId)]
 );

@@ -89,6 +89,7 @@ async function redisCheck(key: string, max: number, windowMs: number): Promise<R
 
 // ── In-memory fallback ──
 
+const MAX_MEMORY_ENTRIES = 10_000;
 const memoryStore = new Map<string, { count: number; resetAt: number }>();
 
 async function memoryCheck(key: string, max: number, windowMs: number): Promise<RateLimitResult> {
@@ -97,6 +98,11 @@ async function memoryCheck(key: string, max: number, windowMs: number): Promise<
 
   if (!entry || now > entry.resetAt) {
     entry = { count: 0, resetAt: now + windowMs };
+    // Evict oldest entry if at capacity
+    if (memoryStore.size >= MAX_MEMORY_ENTRIES) {
+      const oldestKey = memoryStore.keys().next().value;
+      if (oldestKey) memoryStore.delete(oldestKey);
+    }
     memoryStore.set(key, entry);
   }
 
