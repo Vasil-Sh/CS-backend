@@ -7,6 +7,7 @@ import './utils/env'; // Fail-fast env validation
 
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import { compress } from 'hono/compress';
 import { serve } from '@hono/node-server';
 import { authMiddleware } from './middleware/auth';
 import { loggerMiddleware } from './middleware/logger';
@@ -31,15 +32,14 @@ import adminRoutes from './routes/admin';
 const app = new Hono();
 
 // ── Global middleware ──
+app.use('*', compress());
 app.use('*', securityHeaders);
 app.use('*', loggerMiddleware);
 app.use('*', cors({
   origin: (origin) => {
-    const allowed = ['http://localhost:5173', 'http://localhost:3001',
-      'https://matchiq.pro', 'https://www.matchiq.pro',
-      'https://matchiq.vercel.app', 'https://cs-backend-production-f9e8.up.railway.app'];
-    if (!origin || allowed.includes(origin)) return origin || allowed[0];
-    return allowed[0]; // don't expose origin in 403 — just default
+    const allowed = (process.env.CORS_ORIGINS || 'http://localhost:5173,http://localhost:3001,https://matchiq.pro,https://www.matchiq.pro,https://matchiq.vercel.app,https://cs-backend-production-f9e8.up.railway.app').split(',');
+    if (!origin || allowed.some(a => origin.startsWith(a))) return origin || allowed[0];
+    return null;
   },
   credentials: true,
 }));
@@ -150,6 +150,17 @@ app.route('/api/telegram', telegramRoutes);
 app.route('/api/telegram-groups', telegramGroupRoutes);
 app.route('/api/risky-teams', riskyTeamRoutes);
 app.route('/api', adminRoutes);
+
+// ── Global error handler ──
+app.onError((err, c) => {
+  console.error('[Error]', err.message);
+  return c.json({ error: 'Internal server error' }, 500);
+});
+
+// ── 404 handler ──
+app.notFound((c) => {
+  return c.json({ error: `Not found: ${c.req.method} ${c.req.path}` }, 404);
+});
 
 // ── Start ──
 const port = parseInt(process.env.PORT || '3001', 10);

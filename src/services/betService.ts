@@ -95,6 +95,9 @@ export class BetService {
 
   /** Get aggregated stats for user */
   async getStats(userId: number): Promise<BetStats> {
+    const cached = cache.get<BetStats>(`stats:${userId}`);
+    if (cached) return cached;
+
     const [totals] = await db
       .select({
         totalBets: sql<number>`count(*)::int`,
@@ -109,6 +112,7 @@ export class BetService {
       .from(schema.bets)
       .where(eq(schema.bets.userId, userId));
 
+    cache.set(`stats:${userId}`, totals, 30_000);
     return totals;
   }
 

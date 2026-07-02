@@ -53,6 +53,7 @@ class DeepSeekService {
         temperature: 0.3,
         max_tokens: 800,
       }),
+      signal: AbortSignal.timeout(15_000), // 15s timeout
     });
 
     if (!response.ok) {

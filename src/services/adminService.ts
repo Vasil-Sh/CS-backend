@@ -2,20 +2,35 @@
 // Admin Service — self-service data reset
 // ═══════════════════════════════════════════
 
-import { eq } from 'drizzle-orm';
-import { db, schema } from '../db/client';
+import { db, schema, pool } from '../db/client';
 
 export class AdminService {
-  /** Delete ALL user data (bets, goals, strategies, groups, bankroll, risky teams) */
+  /** Delete ALL user data atomically in one transaction */
   async resetUserData(userId: number) {
-    const counts = { bets: 0, goals: 0, strategies: 0, groups: 0, bankroll: false, riskyTeams: 0 };
-    counts.bets = (await db.delete(schema.bets).where(eq(schema.bets.userId, userId))).rowCount || 0;
-    counts.goals = (await db.delete(schema.goals).where(eq(schema.goals.userId, userId))).rowCount || 0;
-    counts.strategies = (await db.delete(schema.strategies).where(eq(schema.strategies.userId, userId))).rowCount || 0;
-    counts.groups = (await db.delete(schema.telegramGroups).where(eq(schema.telegramGroups.userId, userId))).rowCount || 0;
-    counts.bankroll = ((await db.delete(schema.bankroll).where(eq(schema.bankroll.userId, userId))).rowCount || 0) > 0;
-    counts.riskyTeams = (await db.delete(schema.riskyTeams).where(eq(schema.riskyTeams.userId, userId))).rowCount || 0;
-    return counts;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const counts = { bets: 0, goals: 0, strategies: 0, groups: 0, bankroll: false, riskyTeams: 0 };
+      const r1 = await client.query(`DELETE FROM bets WHERE user_id = $1`, [userId]);
+      counts.bets = r1.rowCount || 0;
+      const r2 = await client.query(`DELETE FROM goals WHERE user_id = $1`, [userId]);
+      counts.goals = r2.rowCount || 0;
+      const r3 = await client.query(`DELETE FROM strategies WHERE user_id = $1`, [userId]);
+      counts.strategies = r3.rowCount || 0;
+      const r4 = await client.query(`DELETE FROM telegram_groups WHERE user_id = $1`, [userId]);
+      counts.groups = r4.rowCount || 0;
+      const r5 = await client.query(`DELETE FROM bankroll WHERE user_id = $1`, [userId]);
+      counts.bankroll = (r5.rowCount || 0) > 0;
+      const r6 = await client.query(`DELETE FROM risky_teams WHERE user_id = $1`, [userId]);
+      counts.riskyTeams = r6.rowCount || 0;
+      await client.query('COMMIT');
+      return counts;
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
   }
 }
 

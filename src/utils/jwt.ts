@@ -1,7 +1,8 @@
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 
-const SECRET = process.env.JWT_SECRET || (process.env.NODE_ENV === 'production' ? (() => { throw new Error('JWT_SECRET must be set in production'); })() : 'dev-secret-change-in-production');
-const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || SECRET + '-refresh';
+const SECRET = process.env.JWT_SECRET || (() => { throw new Error('JWT_SECRET must be set'); })();
+const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || (() => { throw new Error('JWT_REFRESH_SECRET must be set'); })();
 const EXPIRES_IN = process.env.JWT_EXPIRES_IN || '15m';
 const REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || '30d';
 
@@ -20,9 +21,14 @@ export function signRefreshToken(payload: JwtPayload): string {
 }
 
 export function verifyToken(token: string): JwtPayload {
-  return jwt.verify(token, SECRET) as JwtPayload;
+  const decoded = jwt.verify(token, SECRET) as JwtPayload & { type?: string };
+  // Access tokens must NOT have type='refresh'
+  if (decoded.type === 'refresh') throw new Error('Invalid token type');
+  return decoded;
 }
 
 export function verifyRefreshToken(token: string): JwtPayload {
-  return jwt.verify(token, REFRESH_SECRET) as JwtPayload;
+  const decoded = jwt.verify(token, REFRESH_SECRET) as JwtPayload & { type?: string };
+  if (decoded.type !== 'refresh') throw new Error('Invalid refresh token');
+  return decoded;
 }

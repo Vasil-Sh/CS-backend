@@ -6,7 +6,7 @@ import { z } from 'zod';
 
 export const loginSchema = z.object({
   username: z.string().min(1, 'Username is required').max(100),
-  password: z.string().min(1, 'Password is required').max(255),
+  password: z.string().min(4, 'Password must be at least 4 characters').max(255),
 });
 
 export const registerSchema = z.object({

@@ -3,6 +3,7 @@
 // ═══════════════════════════════════════════
 
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import { eq } from 'drizzle-orm';
 import { db, schema } from '../db/client';
 import { signToken, signRefreshToken } from '../utils/jwt';
@@ -59,7 +60,12 @@ export class AuthService {
       endDate: toPgDate(data.endDate),
     }).returning();
 
-    return { userId: user.id, username: user.username, password: plainPassword };
+    return { userId: user.id, username: user.username };
+  }
+
+  /** Public register result — no password exposure */
+  getRegisterResponse(id: number, username: string) {
+    return { userId: id, username };
   }
 
   async getMe(userId: number) {
@@ -87,7 +93,12 @@ export class AuthService {
   async updateUser(id: number, data: Record<string, unknown>) {
     const updateData: Record<string, unknown> = {};
     if (data.telegram !== undefined) updateData.telegram = data.telegram;
-    if (data.username !== undefined) updateData.username = data.username;
+    if (data.username !== undefined) {
+      // Check uniqueness
+      const [existing] = await db.select({ id: schema.users.id }).from(schema.users).where(eq(schema.users.username, String(data.username))).limit(1);
+      if (existing && existing.id !== id) return null;
+      updateData.username = data.username;
+    }
     if (data.password) updateData.passwordHash = await bcrypt.hash(String(data.password), 10);
     if (data.role !== undefined) updateData.role = data.role;
     if (data.priceMonth !== undefined) updateData.priceMonth = data.priceMonth;
@@ -100,7 +111,7 @@ export class AuthService {
 }
 
 function generatePassword(): string {
-  return Math.random().toString(36).slice(-8) + Math.random().toString(36).slice(-4);
+  return crypto.randomBytes(12).toString('base64url').slice(0, 16);
 }
 
 function toPgDate(dateStr?: string): string | undefined {

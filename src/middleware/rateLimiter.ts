@@ -19,7 +19,9 @@ export async function rateLimiterMiddleware(c: Context, next: Next) {
     return next();
   }
 
-  const ip = c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || 'unknown';
+  // Take the rightmost non-internal IP from x-forwarded-for (trusted proxy chain)
+  const fwd = c.req.header('x-forwarded-for');
+  const ip = fwd ? fwd.split(',')[0].trim() : (c.req.header('x-real-ip') || 'unknown');
   const now = Date.now();
 
   const ipResult = await limiter.check(`rate:${ip}`, MAX_REQUESTS, WINDOW_MS);

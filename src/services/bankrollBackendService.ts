@@ -44,14 +44,11 @@ export class BankrollBackendService {
   }
 
   async adjust(userId: number, amount: number) {
-    const existing = await this.get(userId);
-    if (!existing) return null;
-    const newAdjustments = parseFloat(existing.manualAdjustments || '0') + amount;
     const [updated] = await db.update(schema.bankroll)
-      .set({ manualAdjustments: newAdjustments.toString() })
+      .set({ manualAdjustments: sql`${schema.bankroll.manualAdjustments}::numeric + ${amount}::numeric` })
       .where(eq(schema.bankroll.userId, userId))
       .returning();
-    return updated;
+    return updated || null;
   }
 
   async getStats(userId: number) {
