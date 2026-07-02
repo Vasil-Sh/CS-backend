@@ -46,7 +46,7 @@ export class BetService {
     this.invalidateCache(userId);
 
     const data = this.buildBetData(userId, body);
-    const [bet] = await db.insert(schema.bets).values(data).returning();
+    const [bet] = await db.insert(schema.bets).values(data as any).returning();
     return bet;
   }
 

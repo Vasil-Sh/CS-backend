@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Hono } from 'hono';
 import { testClient } from 'hono/testing';
-import betRoutes from './routes/bets';
+import betRoutes from './bets';
 
 // Create a minimal Hono app for route testing
 function createTestApp() {

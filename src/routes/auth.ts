@@ -10,7 +10,7 @@ auth.post('/login', async (c) => {
   let body;
   try { body = loginSchema.parse(await c.req.json()); } catch { return c.json({ error: 'Invalid input: username and password required' }, 400); }
   const result = await authService.login(body.username, body.password);
-  if (!result.success) return c.json({ success: false, error: result.error }, result.status);
+  if (!result.success) return c.json({ success: false, error: result.error }, result.status as any);
   const isProd = process.env.NODE_ENV === 'production';
   c.header('Set-Cookie', `auth_token=${result.token}; HttpOnly; ${isProd ? 'Secure; ' : ''}SameSite=Lax; Path=/; Max-Age=${7 * 24 * 60 * 60}`, { append: true });
   return c.json({ success: true, isAdmin: result.isAdmin, token: result.token, refreshToken: result.refreshToken, user: result.user });

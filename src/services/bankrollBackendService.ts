@@ -2,7 +2,7 @@
 // Bankroll Service (backend) — extracted from routes/bankroll.ts
 // ═══════════════════════════════════════════
 
-import { eq, ne, sql } from 'drizzle-orm';
+import { eq, ne, and, sql } from 'drizzle-orm';
 import { db, schema } from '../db/client';
 
 export class BankrollBackendService {
@@ -64,8 +64,7 @@ export class BankrollBackendService {
         totalProfit: sql<number>`coalesce(sum(profit::numeric), 0)::float`,
       })
       .from(schema.bets)
-      .where(ne(schema.bets.result, 'Pending'))
-      .where(eq(schema.bets.userId, userId));
+      .where(and(ne(schema.bets.result, 'Pending'), eq(schema.bets.userId, userId)));
 
     const totalProfit = Number(totals?.totalProfit || 0);
     const initialBank = parseFloat(row.initialBank || '0');
