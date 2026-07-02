@@ -19,6 +19,8 @@ const envSchema = z.object({
   ADMIN_PASSWORD: z.string().optional(),
   CS_API_URL: z.string().default('https://api.cstest.pp.ua'),
   GOOGLE_SHEETS_API_KEY: z.string().optional(),
+  REDIS_URL: z.string().optional(),
+  TELEGRAM_WEBHOOK_SECRET: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
