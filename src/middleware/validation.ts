@@ -36,7 +36,7 @@ export const createBetSchema = z.object({
   strategy: z.string().max(200).optional().default(''),
   format: z.string().max(20).optional().default(''),
   game: z.string().max(20).default('CS2'),
-  currency: z.string().max(10).default('USD'),
+  currency: z.string().max(10).default('UAH'),
   originalAmount: z.coerce.number().optional(),
   exchangeRate: z.coerce.number().optional().nullable(),
   originalProfit: z.coerce.number().optional(),
