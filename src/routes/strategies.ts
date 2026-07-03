@@ -35,4 +35,11 @@ strategies.delete('/:id', requireAuth, async (c) => {
   return c.json({ success: true });
 });
 
+// PUT /api/strategies/:id/primary — set this strategy as primary (unsets others)
+strategies.put('/:id/primary', requireAuth, async (c) => {
+  const ok = await strategyService.setPrimary(c.req.param('id') || '', c.get('user').userId);
+  if (!ok) return c.json({ error: 'Strategy not found' }, 404);
+  return c.json({ success: true });
+});
+
 export default strategies;

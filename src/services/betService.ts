@@ -134,7 +134,7 @@ export class BetService {
       strategy: body.strategy || '',
       format: body.format || '',
       game: body.game || 'CS2',
-      currency: body.currency || 'USD',
+      currency: body.currency || 'UAH',
       originalAmount: body.originalAmount?.toString(),
       exchangeRate: body.exchangeRate?.toString(),
       originalProfit: body.originalProfit?.toString(),

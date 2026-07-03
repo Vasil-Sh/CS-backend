@@ -26,6 +26,9 @@ import strategyRoutes from './routes/strategies';
 import aiRoutes from './routes/ai';
 import telegramRoutes from './routes/telegram';
 import telegramGroupRoutes from './routes/telegramGroups';
+import telegramBetsRoutes from './routes/telegramBets';
+import matchRatingsRoutes from './routes/matchRatings';
+import userPrefsRoutes from './routes/userPrefs';
 import riskyTeamRoutes from './routes/riskyTeams';
 import adminRoutes from './routes/admin';
 
@@ -137,22 +140,16 @@ v1.route('/strategies', strategyRoutes);
 v1.route('/ai', aiRoutes);
 v1.route('/telegram', telegramRoutes);
 v1.route('/telegram-groups', telegramGroupRoutes);
+v1.route('/telegram-bets', telegramBetsRoutes);
+v1.route('/match-ratings', matchRatingsRoutes);
+v1.route('/user', userPrefsRoutes);
 v1.route('/risky-teams', riskyTeamRoutes);
 v1.route('', adminRoutes);
 
 app.route('/api/v1', v1);
 
-// ── Legacy routes (backward compat) ──
-app.route('/api/auth', authRoutes);
-app.route('/api/bets', betRoutes);
-app.route('/api/goals', goalRoutes);
-app.route('/api/bankroll', bankrollRoutes);
-app.route('/api/strategies', strategyRoutes);
-app.route('/api/ai', aiRoutes);
-app.route('/api/telegram', telegramRoutes);
-app.route('/api/telegram-groups', telegramGroupRoutes);
-app.route('/api/risky-teams', riskyTeamRoutes);
-app.route('/api', adminRoutes);
+// ── Also mount at /api for backward compat (frontend uses /api/*) ──
+app.route('/api', v1);
 
 // ── Global error handler ──
 app.onError((err, c) => {

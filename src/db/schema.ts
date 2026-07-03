@@ -30,6 +30,8 @@ export const users = pgTable(
     priceMonth: numeric('price_month', { precision: 10, scale: 2 }).default('0'),
     startDate: date('start_date').default(sql`CURRENT_DATE`),
     endDate: date('end_date').default(sql`CURRENT_DATE`),
+    maxStakePercent: integer('max_stake_percent').default(7),
+    preferences: jsonb('preferences').$type<{ theme?: string; lang?: string }>().default({}),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at')
       .defaultNow()
@@ -65,7 +67,7 @@ export const bets = pgTable(
     strategy: varchar('strategy', { length: 200 }).default(''),
     format: varchar('format', { length: 20 }).default(''),
     game: varchar('game', { length: 20 }).default('CS2'),
-    currency: varchar('currency', { length: 10 }).default('USD'),
+    currency: varchar('currency', { length: 10 }).default('UAH'),
 
     originalAmount: numeric('original_amount', { precision: 12, scale: 2 }),
     exchangeRate: numeric('exchange_rate', { precision: 10, scale: 4 }),
@@ -230,6 +232,52 @@ export const telegramGroups = pgTable(
       .notNull(),
   },
   (table) => [index('tg_groups_user_idx').on(table.userId)]
+);
+
+// ═══════════════════════════════════════════
+// Telegram Bets (received via Telegram bot)
+// ═══════════════════════════════════════════
+
+export const telegramBets = pgTable(
+  'telegram_bets',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    betData: jsonb('bet_data').$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at')
+      .defaultNow()
+      .$onUpdate(() => new Date())
+      .notNull(),
+  },
+  (table) => [index('tg_bets_user_idx').on(table.userId)]
+);
+
+// ═══════════════════════════════════════════
+// Match Ratings (user like/dislike on matches)
+// ═══════════════════════════════════════════
+
+export const matchRatings = pgTable(
+  'match_ratings',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    matchId: varchar('match_id', { length: 500 }).notNull(),
+    rating: varchar('rating', { length: 20 }).notNull(), // 'like' | 'dislike'
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at')
+      .defaultNow()
+      .$onUpdate(() => new Date())
+      .notNull(),
+  },
+  (table) => [
+    index('match_ratings_user_idx').on(table.userId),
+    uniqueIndex('match_ratings_user_match_idx').on(table.userId, table.matchId),
+  ]
 );
 
 // ── Type exports ──

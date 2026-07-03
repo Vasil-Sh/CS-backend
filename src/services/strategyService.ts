@@ -51,6 +51,19 @@ export class StrategyService {
     await db.delete(schema.strategies).where(eq(schema.strategies.id, found.id));
     return true;
   }
+
+  async setPrimary(id: string, userId: number): Promise<boolean> {
+    const [found] = await db.select().from(schema.strategies)
+      .where(and(eq(schema.strategies.id, id), eq(schema.strategies.userId, userId)))
+      .limit(1);
+    if (!found) return false;
+    // Unset all other primaries, then set this one
+    await db.update(schema.strategies).set({ isPrimary: false })
+      .where(eq(schema.strategies.userId, userId));
+    await db.update(schema.strategies).set({ isPrimary: true, updatedAt: new Date() })
+      .where(eq(schema.strategies.id, id));
+    return true;
+  }
 }
 
 export const strategyService = new StrategyService();
