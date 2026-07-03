@@ -280,6 +280,25 @@ export const matchRatings = pgTable(
   ]
 );
 
+// ═══════════════════════════════════════════
+// Tilt Blocks (per-user loss streak protection)
+// ═══════════════════════════════════════════
+
+export const tiltBlocks = pgTable(
+  'tilt_blocks',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    until: timestamp('until').notNull(),
+    reason: varchar('reason', { length: 200 }).default(''),
+    strategyName: varchar('strategy_name', { length: 200 }).default(''),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [index('tilt_blocks_user_idx').on(table.userId)]
+);
+
 // ── Type exports ──
 
 export type User = typeof users.$inferSelect;
@@ -293,3 +312,4 @@ export type NewStrategy = typeof strategies.$inferInsert;
 export type BankrollEntry = typeof bankroll.$inferSelect;
 export type NewBankrollEntry = typeof bankroll.$inferInsert;
 export type RiskyTeam = typeof riskyTeams.$inferSelect;
+export type TiltBlock = typeof tiltBlocks.$inferSelect;
