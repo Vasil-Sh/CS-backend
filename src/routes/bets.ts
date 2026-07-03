@@ -51,11 +51,18 @@ bets.get('/stats', requireAuth, async (c) => {
   const totals = await betService.getStats(user.userId);
   const { totalBets, wins, totalProfit, totalRoi } = totals;
   const winRate = totalBets > 0 ? (wins / totalBets) * 100 : 0;
+
+  // Fetch profit by month and by strategy
+  const profitByMonth = await betService.getProfitByMonth(user.userId);
+  const profitByStrategy = await betService.getProfitByStrategy(user.userId);
+
   return c.json({
     totalBets,
     winRate: Math.round(winRate * 100) / 100,
     totalProfit: Number(totalProfit),
     averageROI: Math.round(Number(totalRoi) * 100) / 100,
+    profitByMonth,
+    profitByStrategy,
   });
 });
 

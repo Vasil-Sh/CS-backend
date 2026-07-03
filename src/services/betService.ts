@@ -116,6 +116,37 @@ export class BetService {
     return totals;
   }
 
+  /** Get profit aggregated by month (YYYY-MM format) */
+  async getProfitByMonth(userId: number): Promise<{ month: string; profit: number }[]> {
+    const rows = await db
+      .select({
+        month: sql<string>`to_char(${schema.bets.date}, 'YYYY-MM')`,
+        profit: sql<number>`coalesce(sum(
+          case when ${schema.bets.result} != 'Pending' then ${schema.bets.profit} else 0 end
+        ), 0)::float`,
+      })
+      .from(schema.bets)
+      .where(eq(schema.bets.userId, userId))
+      .groupBy(sql`to_char(${schema.bets.date}, 'YYYY-MM')`)
+      .orderBy(sql`to_char(${schema.bets.date}, 'YYYY-MM')`);
+    return rows.map(r => ({ month: r.month as string, profit: Number(r.profit) }));
+  }
+
+  /** Get profit aggregated by strategy name */
+  async getProfitByStrategy(userId: number): Promise<{ strategy: string; profit: number }[]> {
+    const rows = await db
+      .select({
+        strategy: sql<string>`coalesce(${schema.bets.strategy}, 'Без стратегії')`,
+        profit: sql<number>`coalesce(sum(
+          case when ${schema.bets.result} != 'Pending' then ${schema.bets.profit} else 0 end
+        ), 0)::float`,
+      })
+      .from(schema.bets)
+      .where(eq(schema.bets.userId, userId))
+      .groupBy(schema.bets.strategy);
+    return rows.map(r => ({ strategy: r.strategy as string, profit: Number(r.profit) }));
+  }
+
   // ── Private helpers ──
 
   private buildBetData(userId: number, body: CreateBetInput): Record<string, unknown> {
