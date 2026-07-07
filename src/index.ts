@@ -41,7 +41,7 @@ app.use('*', securityHeaders);
 app.use('*', loggerMiddleware);
 app.use('*', cors({
   origin: (origin) => {
-    const allowed = (process.env.CORS_ORIGINS || 'http://localhost:5173,http://localhost:3001,https://matchiq.pro,https://www.matchiq.pro,https://matchiq.vercel.app,https://cs-backend-production-f9e8.up.railway.app').split(',');
+    const allowed = (process.env.CORS_ORIGINS || 'http://localhost:5173,http://localhost:5174,http://localhost:5175,http://localhost:3001,https://matchiq.pro,https://www.matchiq.pro,https://matchiq.vercel.app,https://cs-backend-production-f9e8.up.railway.app').split(',');
     if (!origin) return allowed[0];
     // Allow all vercel.app subdomains (Vercel creates per-deployment preview URLs)
     if (origin.endsWith('.vercel.app')) return origin;
