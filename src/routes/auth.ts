@@ -7,13 +7,18 @@ import { verifyRefreshToken, signToken, signRefreshToken } from '../utils/jwt';
 const auth = new Hono();
 
 auth.post('/login', async (c) => {
-  let body;
-  try { body = loginSchema.parse(await c.req.json()); } catch { return c.json({ error: 'Invalid input: username and password required' }, 400); }
-  const result = await authService.login(body.username, body.password);
-  if (!result.success) return c.json({ success: false, error: result.error }, result.status as any);
-  const isProd = process.env.NODE_ENV === 'production';
-  c.header('Set-Cookie', `auth_token=${result.token}; HttpOnly; ${isProd ? 'Secure; ' : ''}SameSite=Lax; Path=/; Max-Age=${7 * 24 * 60 * 60}`, { append: true });
-  return c.json({ success: true, isAdmin: result.isAdmin, token: result.token, refreshToken: result.refreshToken, user: result.user });
+  try {
+    let body;
+    try { body = loginSchema.parse(await c.req.json()); } catch { return c.json({ error: 'Invalid input: username and password required' }, 400); }
+    const result = await authService.login(body.username, body.password);
+    if (!result.success) return c.json({ success: false, error: result.error }, result.status as any);
+    const isProd = process.env.NODE_ENV === 'production';
+    c.header('Set-Cookie', `auth_token=${result.token}; HttpOnly; ${isProd ? 'Secure; ' : ''}SameSite=Lax; Path=/; Max-Age=${7 * 24 * 60 * 60}`, { append: true });
+    return c.json({ success: true, isAdmin: result.isAdmin, token: result.token, refreshToken: result.refreshToken, user: result.user });
+  } catch (err: any) {
+    console.error('[Auth/Login] Unexpected error:', err.message, err.stack);
+    return c.json({ error: 'Login failed: ' + (err.message || 'unknown error') }, 500);
+  }
 });
 
 // ── POST /api/auth/refresh ──
@@ -36,9 +41,9 @@ auth.post('/refresh', async (c) => {
 auth.post('/register', requireAuth, requireAdmin, async (c) => {
   let body;
   try { body = registerSchema.parse(await c.req.json()); } catch { return c.json({ error: 'Invalid input' }, 400); }
-  const user = await authService.register(body);
-  if (!user) return c.json({ error: 'Username already exists' }, 409);
-  return c.json({ success: true, userId: user.userId, username: user.username }, 201);
+  const result = await authService.register(body);
+  if (!result) return c.json({ error: 'Username already exists' }, 409);
+  return c.json({ success: true, userId: result.userId, username: result.username, password: result.password }, 201);
 });
 
 auth.get('/me', requireAuth, async (c) => {

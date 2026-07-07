@@ -60,7 +60,7 @@ export class AuthService {
       endDate: toPgDate(data.endDate),
     }).returning();
 
-    return { userId: user.id, username: user.username };
+    return { userId: user.id, username: user.username, password: plainPassword };
   }
 
   /** Public register result — no password exposure */
