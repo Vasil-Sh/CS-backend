@@ -94,7 +94,6 @@ export class AuthService {
     const updateData: Record<string, unknown> = {};
     if (data.telegram !== undefined) updateData.telegram = data.telegram;
     if (data.username !== undefined) {
-      // Check uniqueness
       const [existing] = await db.select({ id: schema.users.id }).from(schema.users).where(eq(schema.users.username, String(data.username))).limit(1);
       if (existing && existing.id !== id) return null;
       updateData.username = data.username;
@@ -107,6 +106,14 @@ export class AuthService {
 
     const [updated] = await db.update(schema.users).set(updateData).where(eq(schema.users.id, id)).returning();
     return updated || null;
+  }
+
+  async resetPassword(id: number) {
+    const newPassword = generatePassword();
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    const [updated] = await db.update(schema.users).set({ passwordHash }).where(eq(schema.users.id, id)).returning();
+    if (!updated) return null;
+    return { username: updated.username, password: newPassword };
   }
 }
 

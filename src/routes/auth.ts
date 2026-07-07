@@ -74,4 +74,13 @@ auth.put('/users/:id', requireAuth, requireAdmin, async (c) => {
   return c.json({ id: updated.id, username: updated.username, role: updated.role, telegram: updated.telegram, priceMonth: updated.priceMonth, startDate: updated.startDate, endDate: updated.endDate });
 });
 
+// ── POST /api/auth/users/:id/reset-password ──
+auth.post('/users/:id/reset-password', requireAuth, requireAdmin, async (c) => {
+  const id = parseInt(c.req.param('id') || '', 10);
+  if (isNaN(id)) return c.json({ error: 'Invalid ID' }, 400);
+  const result = await authService.resetPassword(id);
+  if (!result) return c.json({ error: 'User not found' }, 404);
+  return c.json({ username: result.username, password: result.password });
+});
+
 export default auth;
