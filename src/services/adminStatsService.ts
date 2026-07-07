@@ -20,7 +20,7 @@ export class AdminStatsService {
       const [newMonthRow] = await db.select({ count: count() }).from(users).where(gte(users.createdAt, sql`${firstOfMonthStr}::date`));
 
       const [mrrRow] = await db.select({ total: sum(users.priceMonth) }).from(users).where(gte(users.endDate, sql`CURRENT_DATE`));
-      const [totalRevenueRow] = await db.select({ total: sum(users.priceMonth) }).from(users);
+      const [totalRevenueRow] = await db.select({ total: sum(users.priceMonth) }).from(users).where(eq(users.role, 'user'));
 
       const revenueResult = await client.query(
         `WITH months AS (
@@ -33,7 +33,7 @@ export class AdminStatsService {
          SELECT to_char(m.month_start, 'YYYY-MM') as month,
                 COALESCE(SUM(u.price_month)::int, 0) as revenue
          FROM months m
-         LEFT JOIN users u ON u.end_date >= m.month_start
+         LEFT JOIN users u ON u.end_date >= m.month_start AND u.role = 'user'
          GROUP BY m.month_start ORDER BY m.month_start`
       );
 
