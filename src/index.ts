@@ -32,6 +32,7 @@ import tiltBlocksRoutes from './routes/tiltBlocks';
 import userPrefsRoutes from './routes/userPrefs';
 import riskyTeamRoutes from './routes/riskyTeams';
 import adminRoutes from './routes/admin';
+import adminStatsRoutes from './routes/adminStats';
 
 const app = new Hono();
 
@@ -147,6 +148,7 @@ v1.route('/tilt-blocks', tiltBlocksRoutes);
 v1.route('/user', userPrefsRoutes);
 v1.route('/risky-teams', riskyTeamRoutes);
 v1.route('', adminRoutes);
+v1.route('', adminStatsRoutes);
 
 app.route('/api/v1', v1);
 
