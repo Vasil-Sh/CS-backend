@@ -1,6 +1,9 @@
 // ═══════════════════════════════════════════
 // DeepSeek AI proxy service (server-side)
+// Falls back to Google Gemini Flash (free tier) if DeepSeek key is missing.
 // ═══════════════════════════════════════════
+
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
 interface MatchData {
   team1: string;
@@ -28,15 +31,25 @@ class DeepSeekService {
   }
 
   isConfigured(): boolean {
-    return !!this.apiKey && this.apiKey.length > 10;
+    return (
+      (!!this.apiKey && this.apiKey.length > 10) ||
+      !!(process.env.GEMINI_API_KEY)
+    );
   }
 
   async getMatchRecommendation(matchData: MatchData): Promise<AIRecommendation> {
-    if (!this.isConfigured()) {
-      throw new Error('DEEPSEEK_API_KEY not configured');
+    // Prefer DeepSeek if key exists, otherwise fall back to Gemini Flash (free tier)
+    if (this.apiKey && this.apiKey.length > 10) {
+      return this.callDeepSeek(matchData);
     }
+    if (process.env.GEMINI_API_KEY) {
+      return this.callGemini(matchData);
+    }
+    throw new Error('No AI API key configured (set DEEPSEEK_API_KEY or GEMINI_API_KEY)');
+  }
 
-    const prompt = this.buildPrompt(matchData);
+  async callDeepSeek(matchData: MatchData): Promise<AIRecommendation> {
+    const prompt = this.buildPrompt(matchData, 'CS2');
 
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
@@ -47,13 +60,13 @@ class DeepSeekService {
       body: JSON.stringify({
         model: this.model,
         messages: [
-          { role: 'system', content: 'Ти експерт з аналізу матчів CS2. Відповідай тільки у вказаному форматі.' },
+          { role: 'system', content: 'Ти експерт з аналізу матчів. Відповідай тільки у вказаному форматі.' },
           { role: 'user', content: prompt },
         ],
         temperature: 0.3,
         max_tokens: 800,
       }),
-      signal: AbortSignal.timeout(15_000), // 15s timeout
+      signal: AbortSignal.timeout(15_000),
     });
 
     if (!response.ok) {
@@ -66,10 +79,30 @@ class DeepSeekService {
     return this.parseResponse(text);
   }
 
-  private buildPrompt(matchData: MatchData): string {
+  /** Free Gemini Flash 2.0 fallback — works without DeepSeek key */
+  async callGemini(matchData: MatchData): Promise<AIRecommendation> {
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+
+    const prompt = this.buildPrompt(matchData, 'esports');
+    const result = await Promise.race([
+      model.generateContent({
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.3, maxOutputTokens: 400 },
+      }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Gemini API timeout')), 15_000),
+      ),
+    ]);
+
+    const text = (result as any).response.text();
+    return this.parseResponse(text);
+  }
+
+  private buildPrompt(matchData: MatchData, game: string): string {
     const { team1, team2, format, tier, odds } = matchData;
 
-    let prompt = `Ти експерт з аналізу матчів CS2 (Counter-Strike 2). Проаналізуй наступний матч і дай свою рекомендацію для ставки.\n\nМатч: ${team1} vs ${team2}\nФормат: ${format}\nРівень: ${tier}`;
+    let prompt = `Ти експерт з аналізу матчів ${game === 'CS2' ? 'CS2' : 'кіберспорту'}. Проаналізуй наступний матч і дай свою рекомендацію для ставки.\n\nМатч: ${team1} vs ${team2}\nФормат: ${format}\nРівень: ${tier}`;
 
     if (odds?.team1 && odds?.team2) {
       prompt += `\nКоефіцієнти: ${team1} - ${odds.team1}, ${team2} - ${odds.team2}`;
