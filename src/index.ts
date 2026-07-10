@@ -33,6 +33,7 @@ import userPrefsRoutes from './routes/userPrefs';
 import riskyTeamRoutes from './routes/riskyTeams';
 import adminRoutes from './routes/admin';
 import adminStatsRoutes from './routes/adminStats';
+import dota2MatchesRoutes from './routes/dota2Matches';
 
 const app = new Hono();
 
@@ -147,6 +148,7 @@ v1.route('/match-ratings', matchRatingsRoutes);
 v1.route('/tilt-blocks', tiltBlocksRoutes);
 v1.route('/user', userPrefsRoutes);
 v1.route('/risky-teams', riskyTeamRoutes);
+v1.route('/dota2-matches', dota2MatchesRoutes);
 v1.route('', adminRoutes);
 v1.route('', adminStatsRoutes);
 

@@ -1,0 +1,336 @@
+/**
+ * Tips.GG Dota 2 Match Scraper
+ *
+ * Fetches the tips.gg Dota 2 match listing page, extracts JSON-LD
+ * structured data and score info, returns typed match objects.
+ *
+ * Works without login — tips.gg serves public data in <script type="application/ld+json">.
+ */
+
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
+
+const TIPSGG_BASE = 'https://tips.gg';
+
+export interface TipsGgMatch {
+  id: string;
+  date: string;
+  link: string;
+  type: string; // e.g. "BO2"
+  score1: number | null;
+  score2: number | null;
+  nameTeam1: string;
+  nameTeam2: string;
+  logoTeam1: string | null;
+  logoTeam2: string | null;
+  tournament: string;
+  stage: string;
+  status: 'upcoming' | 'live' | 'finished';
+  tipsCount: number;
+  performer: string | null; // predicted winner
+  startDate: string; // ISO 8601
+}
+
+interface JsonLdSportsEvent {
+  '@type': 'SportsEvent';
+  name: string;
+  description: string;
+  startDate: string;
+  endDate?: string;
+  url: string;
+  sport: string;
+  eventStatus: string;
+  competitor: Array<{
+    '@type': 'SportsTeam';
+    name: string;
+    url: string;
+    logo: string;
+  }>;
+  performer?: {
+    '@type': 'SportsTeam';
+    name: string;
+  };
+  organizer?: {
+    '@type': 'SportsOrganization';
+    name: string;
+  };
+}
+
+function parseIsoDate(dateStr: string): string {
+  try {
+    // "2026-07-10T12:04:58+0300" → "2026-07-10"
+    return dateStr.split('T')[0];
+  } catch {
+    return '';
+  }
+}
+
+function parseMatchType(desc: string): string {
+  const m = desc.match(/BO(\d+)/i);
+  return m ? `BO${m[1]}` : 'BO3';
+}
+
+function parseStage(desc: string): string {
+  // "BO2 Match. Group A. France. Dota 2 Premier."
+  const parts = desc.split('.').map(s => s.trim());
+  const stagePart = parts.find(p => /group|playoff|final|stage/i.test(p));
+  return stagePart || '';
+}
+
+function parseEventStatus(statusUrl: string): 'upcoming' | 'live' | 'finished' {
+  if (statusUrl.includes('EventScheduled')) return 'upcoming';
+  if (statusUrl.includes('EventRescheduled')) return 'upcoming';
+  if (statusUrl.includes('EventPostponed')) return 'upcoming';
+  if (statusUrl.includes('EventCancelled')) return 'finished';
+  return 'upcoming';
+}
+
+/**
+ * Extract scores from the raw HTML text near each match URL.
+ * Scans for patterns like "team1 0 team2 1" or "0 : 1".
+ */
+function extractScoresFromHtml(
+  html: string,
+  matchUrl: string,
+): { score1: number | null; score2: number | null; status: 'upcoming' | 'live' | 'finished' } {
+  // Find the section of HTML around this match URL
+  const urlSlug = matchUrl.replace(/\/$/, '').split('/').pop() || '';
+  const escapedSlug = urlSlug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  // Look for the match block — find the URL, then look for score nearby
+  const urlIndex = html.indexOf(matchUrl);
+  if (urlIndex === -1) {
+    return { score1: null, score2: null, status: 'upcoming' };
+  }
+
+  // Get surrounding HTML chunk (~2000 chars around the URL)
+  const chunkStart = Math.max(0, urlIndex - 1000);
+  const chunkEnd = Math.min(html.length, urlIndex + 1000);
+  const chunk = html.substring(chunkStart, chunkEnd);
+
+  // Pattern 1: Score displayed as "0" and "1" next to team names
+  // We look for digit patterns near the match URL that could be scores
+  // In tips.gg, live/finished scores appear as separate numbers near the teams
+
+  // Pattern: ">0<" and ">1<" near the match (score elements)
+  const scorePattern = />(\d+)<\/[^>]*>\s*(?:<\/(?:span|div|p)>\s*)*$/m;
+  const scoresInChunk = [...chunk.matchAll(/>(\d+)</g)].map(m => parseInt(m[1]));
+
+  // The first two single-digit numbers found after the team names are likely scores
+  const scoreNumbers = scoresInChunk.filter(n => n >= 0 && n <= 99);
+
+  // Heuristic: if we find 2+ numbers that look like scores
+  if (scoreNumbers.length >= 2) {
+    // Check if the match seems live or finished
+    // Look for "LIVE" indicator
+    const hasLive = /LIVE/i.test(chunk);
+    const hasFinished = /FT|Finished/i.test(chunk);
+
+    return {
+      score1: scoreNumbers[0],
+      score2: scoreNumbers[1],
+      status: hasFinished ? 'finished' : hasLive ? 'live' : 'upcoming',
+    };
+  }
+
+  return { score1: null, score2: null, status: 'upcoming' };
+}
+
+/**
+ * Extract tips count from HTML near the match URL.
+ */
+function extractTipsCount(html: string, matchUrl: string): number {
+  const urlIndex = html.indexOf(matchUrl);
+  if (urlIndex === -1) return 0;
+
+  const chunk = html.substring(Math.max(0, urlIndex - 500), urlIndex + 500);
+
+  // Pattern: "7 tips" or similar
+  const tipsMatch = chunk.match(/(\d+)\s+tips?/i);
+  return tipsMatch ? parseInt(tipsMatch[1]) : 0;
+}
+
+/**
+ * Fetch and parse the Dota 2 match listing from tips.gg for a given date.
+ * @param dateStr - date in DD-MM-YYYY format, defaults to today
+ */
+export async function fetchDota2Matches(dateStr?: string): Promise<TipsGgMatch[]> {
+  const today = dateStr || formatDateDdMmYyyy(new Date());
+  // Use date-specific page which doesn't have Cloudflare protection
+  const url = `${TIPSGG_BASE}/dota2/matches/${today}/`;
+
+  const html = await fetchHtml(url);
+
+  // Extract all JSON-LD blocks
+  const jsonLdMatches = extractJsonLd(html);
+
+  // Parse each JSON-LD into a match object
+  const matches: TipsGgMatch[] = [];
+
+  for (const ld of jsonLdMatches) {
+    try {
+      const competitor1 = ld.competitor?.[0];
+      const competitor2 = ld.competitor?.[1];
+      if (!competitor1 || !competitor2) continue;
+
+      const description = ld.description || '';
+      const matchUrl = ld.url.startsWith('/') ? `${TIPSGG_BASE}${ld.url}` : ld.url;
+      const dateKey = parseIsoDate(ld.startDate);
+
+      // Extract scores from HTML
+      const { score1, score2, status } = extractScoresFromHtml(html, ld.url);
+
+      // Extract tips count
+      const tipsCount = extractTipsCount(html, ld.url);
+
+      // Try to extract logo from team page URL (tips.gg uses poster pages, not direct images)
+      // We derive a predictable logo URL pattern from the team slug
+      const logo1 = deriveLogoUrl(competitor1.url);
+      const logo2 = deriveLogoUrl(competitor2.url);
+
+      const match: TipsGgMatch = {
+        // Unique ID from slug: "rune-eaters-vs-gamerlegion"
+        id: slugFromUrl(ld.url),
+        date: dateKey,
+        link: ld.url,
+        type: parseMatchType(description),
+        score1,
+        score2,
+        nameTeam1: competitor1.name,
+        nameTeam2: competitor2.name,
+        logoTeam1: logo1,
+        logoTeam2: logo2,
+        tournament: ld.organizer?.name || '',
+        stage: parseStage(description),
+        status: status !== 'upcoming' ? status : parseEventStatus(ld.eventStatus),
+        tipsCount,
+        performer: ld.performer?.name || null,
+        startDate: ld.startDate,
+      };
+
+      matches.push(match);
+    } catch {
+      // Skip malformed JSON-LD blocks
+    }
+  }
+
+  return matches;
+}
+
+/**
+ * Fetch a single match page for detailed info.
+ */
+export async function fetchDota2MatchDetail(matchUrl: string): Promise<TipsGgMatch | null> {
+  const fullUrl = matchUrl.startsWith('http') ? matchUrl : `${TIPSGG_BASE}${matchUrl}`;
+
+  const html = await fetchHtml(fullUrl);
+  const jsonLdMatches = extractJsonLd(html);
+
+  if (jsonLdMatches.length === 0) return null;
+
+  const ld = jsonLdMatches[0];
+  const competitor1 = ld.competitor?.[0];
+  const competitor2 = ld.competitor?.[1];
+  if (!competitor1 || !competitor2) return null;
+
+  const description = ld.description || '';
+  const dateKey = parseIsoDate(ld.startDate);
+  const { score1, score2, status } = extractScoresFromHtml(html, ld.url);
+
+  return {
+    id: slugFromUrl(ld.url),
+    date: dateKey,
+    link: ld.url,
+    type: parseMatchType(description),
+    score1,
+    score2,
+    nameTeam1: competitor1.name,
+    nameTeam2: competitor2.name,
+    logoTeam1: deriveLogoUrl(competitor1.url),
+    logoTeam2: deriveLogoUrl(competitor2.url),
+    tournament: ld.organizer?.name || '',
+    stage: parseStage(description),
+    status: status !== 'upcoming' ? status : parseEventStatus(ld.eventStatus),
+    tipsCount: 0,
+    performer: ld.performer?.name || null,
+    startDate: ld.startDate,
+  };
+}
+
+// ── Helpers ──
+
+function extractJsonLd(html: string): JsonLdSportsEvent[] {
+  const results: JsonLdSportsEvent[] = [];
+  const regex = /<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(html)) !== null) {
+    try {
+      const data = JSON.parse(match[1]);
+      if (data && data['@type'] === 'SportsEvent' && data.sport === 'Dota 2') {
+        results.push(data as JsonLdSportsEvent);
+      }
+    } catch {
+      // Skip invalid JSON
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Convert team page URL to a predictable logo URL.
+ * tips.gg stores logos at: https://files.tips.gg/static/image/teams/{slug}.png
+ */
+function deriveLogoUrl(teamUrl: string): string | null {
+  try {
+    // "https://tips.gg/team/rune-eaters-dota2/" → "rune-eaters-dota2"
+    const slug = teamUrl.replace(/\/$/, '').split('/').pop();
+    if (!slug) return null;
+    return `https://files.tips.gg/static/image/teams/${slug}.png`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract unique slug from match URL.
+ * "/matches/dota2/10-07-2026/rune-eaters-vs-gamerlegion/10-00/" → "rune-eaters-vs-gamerlegion"
+ */
+function slugFromUrl(url: string): string {
+  const parts = url.replace(/\/$/, '').split('/');
+  // URL format: /matches/dota2/DD-MM-YYYY/SLUG/HH-MM/
+  // The slug is at index parts.length - 2
+  return parts[parts.length - 2] || parts[parts.length - 1] || url;
+}
+
+function formatDateDdMmYyyy(d: Date): string {
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yyyy = d.getFullYear();
+  return `${dd}-${mm}-${yyyy}`;
+}
+
+// ── HTTP fetch via curl (bypasses Cloudflare TLS fingerprinting) ──
+
+const CURL_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
+
+async function fetchHtml(url: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync('curl', [
+      '-s', '-L', // silent, follow redirects
+      '--max-time', '15',
+      '-H', `User-Agent: ${CURL_UA}`,
+      '-H', 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      '-H', 'Accept-Language: en-US,en;q=0.9,uk;q=0.8',
+      url,
+    ], { maxBuffer: 5 * 1024 * 1024, timeout: 20000 });
+    return stdout;
+  } catch (err: any) {
+    // curl exits with non-zero on HTTP errors; stderr may be empty on 403
+    if (err.stdout && err.stdout.length > 100) return err.stdout;
+    throw new Error(`curl failed for ${url}: ${err.message}`);
+  }
+}
