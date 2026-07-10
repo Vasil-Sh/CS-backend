@@ -24,16 +24,14 @@ function cacheSet(key: string, data: unknown): void {
   cache.set(key, { data, ts: Date.now() });
 }
 
-// GET /api/dota2/matches — today's and upcoming matches
+// GET /api/dota2/matches — today's + tomorrow's matches
 dota2Matches.get('/', async (c) => {
-  const dateParam = c.req.query('date'); // optional DD-MM-YYYY
-
-  const cacheKey = `matches_${dateParam || 'today'}`;
+  const cacheKey = 'matches_today_tomorrow';
   const cached = cacheGet<TipsGgMatch[]>(cacheKey);
   if (cached) return c.json(cached);
 
   try {
-    const matches = await fetchDota2Matches(dateParam || undefined);
+    const matches = await fetchDota2Matches();
     cacheSet(cacheKey, matches);
     return c.json(matches);
   } catch (err) {

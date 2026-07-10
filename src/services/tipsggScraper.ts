@@ -157,23 +157,11 @@ function extractTipsCount(html: string, matchUrl: string): number {
 }
 
 /**
- * Fetch and parse the Dota 2 match listing from tips.gg for a given date.
- * @param dateStr - date in DD-MM-YYYY format, defaults to today
+ * Parse match listing HTML into TipsGgMatch array.
  */
-export async function fetchDota2Matches(dateStr?: string): Promise<TipsGgMatch[]> {
-  const today = dateStr || formatDateDdMmYyyy(new Date());
-  // Use date-specific page which doesn't have Cloudflare protection
-  const url = `${TIPSGG_BASE}/dota2/matches/${today}/`;
-
-  const html = await fetchHtml(url);
-
-  // Build team → logo map from actual <img> tags in HTML
+async function parseMatchesFromHtml(html: string): Promise<TipsGgMatch[]> {
   const logoMap = buildLogoMap(html);
-
-  // Extract all JSON-LD blocks
   const jsonLdMatches = extractJsonLd(html);
-
-  // Parse each JSON-LD into a match object
   const matches: TipsGgMatch[] = [];
 
   for (const ld of jsonLdMatches) {
@@ -183,27 +171,18 @@ export async function fetchDota2Matches(dateStr?: string): Promise<TipsGgMatch[]
       if (!competitor1 || !competitor2) continue;
 
       const description = ld.description || '';
-      const matchUrl = ld.url.startsWith('/') ? `${TIPSGG_BASE}${ld.url}` : ld.url;
       const dateKey = parseIsoDate(ld.startDate);
 
-      // Extract scores from HTML
       const { score1, score2, status } = extractScoresFromHtml(html, ld.url);
-
-      // Extract tips count
       const tipsCount = extractTipsCount(html, ld.url);
-
-      // Get logos from HTML <img> tags (accurate, handles CDN naming variations)
       const logo1 = getTeamLogo(competitor1.name, competitor1.url, logoMap);
       const logo2 = getTeamLogo(competitor2.name, competitor2.url, logoMap);
 
-      // Calculate prediction percentages from performer
       const pred1 = ld.performer?.name === competitor1.name ? 55
         : ld.performer?.name === competitor2.name ? 45
         : 50;
-      const pred2 = 100 - pred1;
 
-      const match: TipsGgMatch = {
-        // Unique ID from slug: "rune-eaters-vs-gamerlegion"
+      matches.push({
         id: slugFromUrl(ld.url),
         date: dateKey,
         link: ld.url,
@@ -221,21 +200,51 @@ export async function fetchDota2Matches(dateStr?: string): Promise<TipsGgMatch[]
         performer: ld.performer?.name || null,
         startDate: ld.startDate,
         pred1,
-        pred2,
+        pred2: 100 - pred1,
         coeff1: null,
         coeff2: null,
-      };
-
-      matches.push(match);
+      });
     } catch {
-      // Skip malformed JSON-LD blocks
+      // Skip malformed
     }
   }
 
-  // Batch-fetch predictions pages for real bookmaker coefficients
-  await enrichCoefficients(matches);
-
   return matches;
+}
+
+/**
+ * Fetch and parse today's + tomorrow's Dota 2 matches from tips.gg.
+ */
+export async function fetchDota2Matches(): Promise<TipsGgMatch[]> {
+  const today = formatDateDdMmYyyy(new Date());
+  const tomorrow = formatDateDdMmYyyy(new Date(Date.now() + 86400000));
+
+  const [todayHtml, tomorrowHtml] = await Promise.allSettled([
+    fetchHtml(`${TIPSGG_BASE}/dota2/matches/${today}/`),
+    fetchHtml(`${TIPSGG_BASE}/dota2/matches/${tomorrow}/`),
+  ]);
+
+  const todayMatches = todayHtml.status === 'fulfilled'
+    ? await parseMatchesFromHtml(todayHtml.value)
+    : [];
+  const tomorrowMatches = tomorrowHtml.status === 'fulfilled'
+    ? await parseMatchesFromHtml(tomorrowHtml.value)
+    : [];
+
+  // Merge & dedup by id
+  const seen = new Set<string>();
+  const all: TipsGgMatch[] = [];
+  for (const m of [...todayMatches, ...tomorrowMatches]) {
+    if (!seen.has(m.id)) {
+      seen.add(m.id);
+      all.push(m);
+    }
+  }
+
+  // Batch-fetch predictions pages for real coefficients
+  await enrichCoefficients(all);
+
+  return all;
 }
 
 /**
@@ -396,7 +405,7 @@ const LOGO_OVERRIDES: Record<string, string> = {
   'nigma-galaxy-dota2': 'nigma-galaxy-dota2-dota2',
   'playtime-dota2': 'PlayTime-dota2',
   'nemiga-gaming-dota2': 'nemiga-gaming-2020-dota2',
-  'gamerlegion-dota2': 'gamerlegion-dota2',
+  'gamerlegion-dota2': 'Gamerlegion-cs21',
   'betboom-team-dota2': 'betboom-dota2',
   'team-spirit-dota2': 'team-spirit-2021-dota2',
   'psg-lgd-gaming-dota2': 'psg-lgd-gaming-dota2',
@@ -446,20 +455,32 @@ function formatDateDdMmYyyy(d: Date): string {
 
 const CURL_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
 
-async function fetchHtml(url: string): Promise<string> {
-  try {
-    const { stdout } = await execFileAsync('curl', [
-      '-s', '-L', // silent, follow redirects
-      '--max-time', '15',
-      '-H', `User-Agent: ${CURL_UA}`,
-      '-H', 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      '-H', 'Accept-Language: en-US,en;q=0.9,uk;q=0.8',
-      url,
-    ], { maxBuffer: 5 * 1024 * 1024, timeout: 20000 });
-    return stdout;
-  } catch (err: any) {
-    // curl exits with non-zero on HTTP errors; stderr may be empty on 403
-    if (err.stdout && err.stdout.length > 100) return err.stdout;
-    throw new Error(`curl failed for ${url}: ${err.message}`);
+async function fetchHtml(url: string, retries = 2): Promise<string> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      if (attempt > 0) {
+        // Exponential backoff: 1s, 2s
+        await new Promise(r => setTimeout(r, attempt * 1000));
+      }
+      const { stdout } = await execFileAsync('curl', [
+        '-s', '-L', // silent, follow redirects
+        '--max-time', '15',
+        '-H', `User-Agent: ${CURL_UA}`,
+        '-H', 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        '-H', 'Accept-Language: en-US,en;q=0.9,uk;q=0.8',
+        url,
+      ], { maxBuffer: 5 * 1024 * 1024, timeout: 20000 });
+      if (stdout.length < 500) {
+        throw new Error(`Empty/too-short response (${stdout.length} bytes)`);
+      }
+      return stdout;
+    } catch (err: any) {
+      // curl returns non-zero exit code on HTTP errors but still outputs HTML
+      if (err.stdout && err.stdout.length > 1000) return err.stdout;
+      if (attempt === retries) {
+        throw new Error(`curl failed for ${url}: ${err.message}`);
+      }
+    }
   }
+  throw new Error(`curl failed for ${url} after ${retries} retries`);
 }
