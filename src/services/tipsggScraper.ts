@@ -31,6 +31,10 @@ export interface TipsGgMatch {
   tipsCount: number;
   performer: string | null; // predicted winner
   startDate: string; // ISO 8601
+  pred1: number; // tipster prediction % (0-100)
+  pred2: number;
+  coeff1: number | null; // real bookmaker coefficient from predictions page
+  coeff2: number | null;
 }
 
 interface JsonLdSportsEvent {
@@ -192,6 +196,12 @@ export async function fetchDota2Matches(dateStr?: string): Promise<TipsGgMatch[]
       const logo1 = getTeamLogo(competitor1.name, competitor1.url, logoMap);
       const logo2 = getTeamLogo(competitor2.name, competitor2.url, logoMap);
 
+      // Calculate prediction percentages from performer
+      const pred1 = ld.performer?.name === competitor1.name ? 55
+        : ld.performer?.name === competitor2.name ? 45
+        : 50;
+      const pred2 = 100 - pred1;
+
       const match: TipsGgMatch = {
         // Unique ID from slug: "rune-eaters-vs-gamerlegion"
         id: slugFromUrl(ld.url),
@@ -210,6 +220,10 @@ export async function fetchDota2Matches(dateStr?: string): Promise<TipsGgMatch[]
         tipsCount,
         performer: ld.performer?.name || null,
         startDate: ld.startDate,
+        pred1,
+        pred2,
+        coeff1: null,
+        coeff2: null,
       };
 
       matches.push(match);
@@ -217,6 +231,9 @@ export async function fetchDota2Matches(dateStr?: string): Promise<TipsGgMatch[]
       // Skip malformed JSON-LD blocks
     }
   }
+
+  // Batch-fetch predictions pages for real bookmaker coefficients
+  await enrichCoefficients(matches);
 
   return matches;
 }
@@ -242,6 +259,9 @@ export async function fetchDota2MatchDetail(matchUrl: string): Promise<TipsGgMat
   const dateKey = parseIsoDate(ld.startDate);
   const { score1, score2, status } = extractScoresFromHtml(html, ld.url);
 
+  const pred1 = ld.performer?.name === competitor1.name ? 55
+    : ld.performer?.name === competitor2.name ? 45 : 50;
+
   return {
     id: slugFromUrl(ld.url),
     date: dateKey,
@@ -259,7 +279,57 @@ export async function fetchDota2MatchDetail(matchUrl: string): Promise<TipsGgMat
     tipsCount: 0,
     performer: ld.performer?.name || null,
     startDate: ld.startDate,
+    pred1,
+    pred2: 100 - pred1,
+    coeff1: null,
+    coeff2: null,
   };
+}
+
+/**
+ * Fetch predictions page → extract Bookmakers Analysis coefficients.
+ * Raw HTML: <span class="avg-odd">16.20</span>
+ * team-first = team1, team-second = team2 (skip team-draw).
+ */
+async function fetchCoefficientsFromPredictions(link: string): Promise<{ coeff1: number; coeff2: number } | null> {
+  try {
+    const predUrl = link.endsWith('/') ? link + 'predictions/' : link + '/predictions/';
+    const html = await fetchHtml(`${TIPSGG_BASE}${predUrl}`);
+
+    const baIdx = html.indexOf('class="bookmakers-analysis-counters"');
+    if (baIdx === -1) return null;
+
+    const chunk = html.substring(baIdx, baIdx + 1000);
+    const firstMatch = chunk.match(/team-first[\s\S]*?avg-odd">([\d.]+)<\/span>/i);
+    const secondMatch = chunk.match(/team-second[\s\S]*?avg-odd">([\d.]+)<\/span>/i);
+
+    if (firstMatch && secondMatch) {
+      return { coeff1: parseFloat(firstMatch[1]), coeff2: parseFloat(secondMatch[1]) };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function enrichCoefficients(matches: TipsGgMatch[]): Promise<void> {
+  const CONCURRENCY = 3;
+  const toFetch = matches.filter(m => m.status !== 'finished');
+
+  for (let i = 0; i < toFetch.length; i += CONCURRENCY) {
+    const batch = toFetch.slice(i, i + CONCURRENCY);
+    await Promise.allSettled(batch.map(async (m) => {
+      try {
+        const result = await fetchCoefficientsFromPredictions(m.link);
+        if (result) {
+          m.coeff1 = result.coeff1;
+          m.coeff2 = result.coeff2;
+          m.pred1 = Math.round((1 / result.coeff1) * 100);
+          m.pred2 = Math.round((1 / result.coeff2) * 100);
+        }
+      } catch { /* skip */ }
+    }));
+  }
 }
 
 // ── Helpers ──
