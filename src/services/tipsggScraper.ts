@@ -216,6 +216,7 @@ async function parseMatchesFromHtml(html: string): Promise<TipsGgMatch[]> {
  * Fetch and parse today's + tomorrow's Dota 2 matches from tips.gg.
  */
 export async function fetchDota2Matches(): Promise<TipsGgMatch[]> {
+  const startTime = Date.now();
   const today = formatDateDdMmYyyy(new Date());
   const tomorrow = formatDateDdMmYyyy(new Date(Date.now() + 86400000));
 
@@ -224,12 +225,16 @@ export async function fetchDota2Matches(): Promise<TipsGgMatch[]> {
     fetchHtml(`${TIPSGG_BASE}/dota2/matches/${tomorrow}/`),
   ]);
 
+  const htmlTime = Date.now();
+
   const todayMatches = todayHtml.status === 'fulfilled'
     ? await parseMatchesFromHtml(todayHtml.value)
     : [];
   const tomorrowMatches = tomorrowHtml.status === 'fulfilled'
     ? await parseMatchesFromHtml(tomorrowHtml.value)
     : [];
+
+  const parseTime = Date.now();
 
   // Merge & dedup by id
   const seen = new Set<string>();
@@ -243,6 +248,17 @@ export async function fetchDota2Matches(): Promise<TipsGgMatch[]> {
 
   // Batch-fetch predictions pages for real coefficients
   await enrichCoefficients(all);
+
+  const totalTime = Date.now();
+  const withCoeffs = all.filter(m => m.coeff1 != null).length;
+
+  console.log(
+    `[tipsgg] Done: ${all.length} matches ` +
+    `(${todayMatches.length} today, ${tomorrowMatches.length} tomorrow) | ` +
+    `coeffs: ${withCoeffs}/${all.length} | ` +
+    `html: ${htmlTime - startTime}ms parse: ${parseTime - htmlTime}ms ` +
+    `coeffs: ${totalTime - parseTime}ms total: ${totalTime - startTime}ms`
+  );
 
   return all;
 }
@@ -300,34 +316,40 @@ export async function fetchDota2MatchDetail(matchUrl: string): Promise<TipsGgMat
  * Raw HTML: <span class="avg-odd">16.20</span>
  * team-first = team1, team-second = team2 (skip team-draw).
  */
-async function fetchCoefficientsFromPredictions(link: string): Promise<{ coeff1: number; coeff2: number } | null> {
-  try {
-    const predUrl = link.endsWith('/') ? link + 'predictions/' : link + '/predictions/';
-    const html = await fetchHtml(`${TIPSGG_BASE}${predUrl}`);
+async function fetchCoefficientsFromPredictions(link: string, retries = 1): Promise<{ coeff1: number; coeff2: number } | null> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const predUrl = link.endsWith('/') ? link + 'predictions/' : link + '/predictions/';
+      const html = await fetchHtml(`${TIPSGG_BASE}${predUrl}`);
 
-    const baIdx = html.indexOf('class="bookmakers-analysis-counters"');
-    if (baIdx === -1) return null;
+      const baIdx = html.indexOf('class="bookmakers-analysis-counters"');
+      if (baIdx === -1) return null;
 
-    const chunk = html.substring(baIdx, baIdx + 1000);
-    const firstMatch = chunk.match(/team-first[\s\S]*?avg-odd">([\d.]+)<\/span>/i);
-    const secondMatch = chunk.match(/team-second[\s\S]*?avg-odd">([\d.]+)<\/span>/i);
+      const chunk = html.substring(baIdx, baIdx + 1000);
+      const firstMatch = chunk.match(/team-first[\s\S]*?avg-odd">([\d.]+)<\/span>/i);
+      const secondMatch = chunk.match(/team-second[\s\S]*?avg-odd">([\d.]+)<\/span>/i);
 
-    if (firstMatch && secondMatch) {
-      return { coeff1: parseFloat(firstMatch[1]), coeff2: parseFloat(secondMatch[1]) };
+      if (firstMatch && secondMatch) {
+        return { coeff1: parseFloat(firstMatch[1]), coeff2: parseFloat(secondMatch[1]) };
+      }
+      return null;
+    } catch {
+      if (attempt === retries) return null;
+      await new Promise(r => setTimeout(r, (attempt + 1) * 500));
     }
-    return null;
-  } catch {
-    return null;
   }
+  return null;
 }
 
 async function enrichCoefficients(matches: TipsGgMatch[]): Promise<void> {
   const CONCURRENCY = 3;
+  const BATCH_PAUSE_MS = 800; // pause between batches to avoid rate limiting
   const toFetch = matches.filter(m => m.status !== 'finished');
+  let successCount = 0;
 
   for (let i = 0; i < toFetch.length; i += CONCURRENCY) {
     const batch = toFetch.slice(i, i + CONCURRENCY);
-    await Promise.allSettled(batch.map(async (m) => {
+    const results = await Promise.allSettled(batch.map(async (m) => {
       try {
         const result = await fetchCoefficientsFromPredictions(m.link);
         if (result) {
@@ -335,9 +357,20 @@ async function enrichCoefficients(matches: TipsGgMatch[]): Promise<void> {
           m.coeff2 = result.coeff2;
           m.pred1 = Math.round((1 / result.coeff1) * 100);
           m.pred2 = Math.round((1 / result.coeff2) * 100);
+          return true;
         }
       } catch { /* skip */ }
+      return false;
     }));
+    successCount += results.filter(r => r.status === 'fulfilled' && r.value).length;
+
+    if (i + CONCURRENCY < toFetch.length) {
+      await new Promise(r => setTimeout(r, BATCH_PAUSE_MS));
+    }
+  }
+
+  if (successCount > 0 || toFetch.length > 0) {
+    console.log(`[tipsgg] Coefficients: ${successCount}/${toFetch.length} enriched`);
   }
 }
 

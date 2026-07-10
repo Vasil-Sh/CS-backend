@@ -1,38 +1,74 @@
 /**
- * Dota 2 Matches API — wraps tips.gg scraper with caching.
+ * Dota 2 Matches API — wraps tips.gg scraper with in-memory + file caching.
  */
 
 import { Hono } from 'hono';
 import { fetchDota2Matches, fetchDota2MatchDetail, type TipsGgMatch } from '../services/tipsggScraper';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 
 const dota2Matches = new Hono();
 
-// In-memory cache (5 min TTL)
-const cache = new Map<string, { data: unknown; ts: number }>();
+// ── Two-tier cache: in-memory (fast) + file (survives restart) ──
 const CACHE_TTL = 5 * 60 * 1000;
+const CACHE_DIR = join(process.cwd(), '.cache');
+const CACHE_FILE = join(CACHE_DIR, 'dota2_matches.json');
 
-function cacheGet<T>(key: string): T | null {
-  const entry = cache.get(key);
-  if (entry && Date.now() - entry.ts < CACHE_TTL) {
-    return entry.data as T;
-  }
-  cache.delete(key);
+function ensureCacheDir(): void {
+  if (!existsSync(CACHE_DIR)) mkdirSync(CACHE_DIR, { recursive: true });
+}
+
+function readFileCache<T>(): T | null {
+  try {
+    if (!existsSync(CACHE_FILE)) return null;
+    const raw = readFileSync(CACHE_FILE, 'utf-8');
+    const { data, ts } = JSON.parse(raw);
+    if (Date.now() - ts < CACHE_TTL) return data as T;
+  } catch { /* ignore */ }
   return null;
 }
 
-function cacheSet(key: string, data: unknown): void {
-  cache.set(key, { data, ts: Date.now() });
+function writeFileCache(data: unknown): void {
+  try {
+    ensureCacheDir();
+    writeFileSync(CACHE_FILE, JSON.stringify({ data, ts: Date.now() }), 'utf-8');
+  } catch { /* ignore */ }
+}
+
+// In-memory cache (same TTL, but instant)
+const memCache = new Map<string, { data: unknown; ts: number }>();
+
+function getCache<T>(key: string): T | null {
+  const entry = memCache.get(key);
+  if (entry && Date.now() - entry.ts < CACHE_TTL) return entry.data as T;
+  memCache.delete(key);
+  return null;
+}
+
+function setCache(key: string, data: unknown): void {
+  memCache.set(key, { data, ts: Date.now() });
 }
 
 // GET /api/dota2/matches — today's + tomorrow's matches
 dota2Matches.get('/', async (c) => {
   const cacheKey = 'matches_today_tomorrow';
-  const cached = cacheGet<TipsGgMatch[]>(cacheKey);
-  if (cached) return c.json(cached);
 
+  // 1. Try in-memory
+  let matches = getCache<TipsGgMatch[]>(cacheKey);
+  if (matches) return c.json(matches);
+
+  // 2. Try file cache
+  matches = readFileCache<TipsGgMatch[]>();
+  if (matches) {
+    setCache(cacheKey, matches);
+    return c.json(matches);
+  }
+
+  // 3. Fetch fresh
   try {
-    const matches = await fetchDota2Matches();
-    cacheSet(cacheKey, matches);
+    matches = await fetchDota2Matches();
+    setCache(cacheKey, matches);
+    writeFileCache(matches);
     return c.json(matches);
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
@@ -47,13 +83,13 @@ dota2Matches.get('/:date/:slug/:time', async (c) => {
   const matchUrl = `/matches/dota2/${date}/${slug}/${time}/`;
 
   const cacheKey = `detail_${matchUrl}`;
-  const cached = cacheGet<TipsGgMatch>(cacheKey);
+  const cached = getCache<TipsGgMatch>(cacheKey);
   if (cached) return c.json(cached);
 
   try {
     const match = await fetchDota2MatchDetail(matchUrl);
     if (!match) return c.json({ error: 'Match not found' }, 404);
-    cacheSet(cacheKey, match);
+    setCache(cacheKey, match);
     return c.json(match);
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
