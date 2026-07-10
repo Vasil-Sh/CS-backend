@@ -12,12 +12,15 @@ API-сервер для [MatchIQ](https://github.com/Vasil-Sh/CS) — платф
 | ORM | **Drizzle ORM** |
 | Auth | **bcrypt** + **JWT** (access + refresh) |
 | Валідація | **Zod** |
-| Кешування | **In-memory** (TTL, Redis-ready) |
-| Rate limiting | **100 req/min per IP** |
-| CI/CD | **GitHub Actions** + **Railway** |
+| Кешування | **In-memory** + **File cache** (SWR — stale-while-revalidate) |
+| Rate limiting | **100 req/min per IP** + **5 req/30s для парсера** |
+| Circuit breaker | **3 failures → 5 min блок** |
+| CI/CD | **GitHub Actions** (daily scraper test) + **Railway** |
 | Тести | **Vitest** — 135 unit + інтеграційних (17 файлів) |
 | Документація | **OpenAPI 3.0** + **Swagger UI** (`/api/docs`) |
 | Версіонування | **API /v1** (з backward compat `/api/*`) |
+| AI | **DeepSeek Chat** + **Google Gemini Flash** (free fallback) |
+| Парсер | **tips.gg Dota 2** — 19 матчів/день + коефіцієнти |
 
 ## Швидкий старт
 
@@ -59,8 +62,12 @@ pnpm dev
 | `POST` | `/bankroll/adjust` | Корекція банкролу (±) |
 | `GET/POST` | `/strategies` | CRUD стратегій (Kelly, fractional тощо) |
 | `PUT/DELETE` | `/strategies/:id` | Оновити/видалити стратегію |
-| `POST` | `/ai/recommend` | DeepSeek AI — рекомендація по матчу CS2 |
+| `POST` | `/ai/recommend` | DeepSeek AI / Gemini Flash — рекомендація по матчу |
 | `POST` | `/ai/advice` | Порада по стану банкролу |
+| `GET` | `/v1/dota2-matches` | Dota 2 матчі з tips.gg (JSON-LD парсинг) |
+| `GET` | `/v1/dota2-matches/live-scores` | Тільки рахунки/статуси Dota 2 матчів |
+| `GET` | `/v1/dota2-matches/health` | Health check структури HTML tips.gg |
+| `GET` | `/v1/dota2-matches/logo/*` | Проксі логотипів команд через бекенд |
 | `GET/POST/DELETE` | `/telegram-groups` | Telegram-групи (CRUD) |
 | `GET/POST` | `/risky-teams` | Ризиковані команди |
 | `DELETE` | `/risky-teams/:id` | Admin: видалити команду зі списку |
@@ -68,40 +75,48 @@ pnpm dev
 
 > Всі ендпоінти також доступні з префіксом `/api/v1/*` (наприклад, `/api/v1/bets`). Старі шляхи `/api/*` продовжують працювати для зворотної сумісності.
 
-## Архітектура (v1.23.80)
+## Архітектура (v1.24.0)
 
 ```
 src/
 ├── routes/      # Тонкий HTTP-шар (тільки валідація + виклик сервісу)
-├── services/    # Бізнес-логіка (8 сервісів)
+├── services/    # Бізнес-логіка (10 сервісів)
 │   ├── authService.ts
 │   ├── betService.ts
 │   ├── goalService.ts
 │   ├── strategyService.ts
 │   ├── bankrollBackendService.ts
 │   ├── telegramGroupService.ts
-│   ├── deepseek.ts
+│   ├── deepseek.ts              # DeepSeek + Gemini Flash AI
+│   ├── tipsggScraper.ts         # tips.gg Dota 2 парсер (curl + JSON-LD)
+│   ├── circuitBreaker.ts        # Circuit breaker (3 failures → 5 min)
 │   └── telegramBot.ts
 ├── middleware/   # auth, rateLimiter, securityHeaders, bodyLimit, validation, numericNormalizer
 ├── db/           # Drizzle ORM schema + PostgreSQL client
 ├── utils/        # JWT, cache, response helpers, env validation
+├── .github/workflows/ # CI/CD: daily scraper test
 └── test/         # Test helpers
 ```
 
-## Безпека (v1.23.x)
+## Безпека (v1.24.x)
 
 - ✅ **API v1 версіонування** — `/api/v1/*` з backward compat
 - ✅ **Services layer** — бізнес-логіка винесена з routes (тестовано окремо)
+- ✅ **Stale-while-revalidate** — кеш віддається миттєво, оновлення у фоні
+- ✅ **Graceful degradation** — прострочений кеш (до 24h) при падінні tips.gg
+- ✅ **Circuit breaker** — 3 помилки → 5 хв блокування tips.gg
 - ✅ **135 тестів** — unit (middleware, utils, services) + інтеграційні (routes)
 - ✅ **Body size limit** — 1MB max (захист від DDOS)
 - ✅ **Security headers** — CSP, HSTS, X-Content-Type, X-Frame-Options, Permissions-Policy
 - ✅ **Swagger protection** — `/api/docs` захищений `?key=<ADMIN_PASSWORD>` у production
 - ✅ **env fail-safe** — усі змінні optional, не крашать сервер при відсутності
-- ✅ **Rate limiting** — 100 req/min per IP, health + login exempt
+- ✅ **Rate limiting** — 100 req/min per IP (глобально) + 5 req/30s (парсер)
 - ✅ **httpOnly cookie** — JWT у HttpOnly/Secure cookie (XSS-захист)
-- ✅ **In-memory cache** — 15s для /bets
+- ✅ **File cache** — `.cache/dota2_matches.json` виживає рестарт
 - ✅ **DB health check** — `/api/health` перевіряє PostgreSQL через shared pool
-- ✅ **Structured JSON-логування** — IP, стектрейс, тривалість
+- ✅ **Scraper health check** — `/api/v1/dota2-matches/health` валідує структуру HTML
+- ✅ **Live scores endpoint** — точкове оновлення рахунків без повного скрапінгу
+- ✅ **Structured JSON-логування** — IP, стектрейс, тривалість, метрики парсингу
 - ✅ **Graceful shutdown** — SIGTERM/SIGINT → чистий вихід
 - ✅ **Safe migrations** — `pnpm db:migrate` з трекінгом у `drizzle_migrations`
 - ✅ **Pagination** — `GET /bets?page=1&limit=50` з `meta.totalPages`
@@ -149,7 +164,8 @@ pnpm dev
 | `JWT_REFRESH_SECRET` | Refresh token secret | fallback |
 | `JWT_REFRESH_EXPIRES_IN` | Refresh token TTL | `30d` |
 | `ADMIN_PASSWORD` | Пароль для Swagger UI (`?key=…`) | — |
-| `DEEPSEEK_API_KEY` | DeepSeek AI key | — |
+| `DEEPSEEK_API_KEY` | DeepSeek AI key (optional, uses Gemini if missing) | — |
+| `GEMINI_API_KEY` | Google Gemini Flash (free fallback) | — |
 | `TELEGRAM_BOT_TOKEN` | Telegram бот | — |
 | `TELEGRAM_ADMIN_CHAT_ID` | Admin chat ID | — |
 | `CS_API_URL` | CS2 match API | `https://api.cstest.pp.ua` |
@@ -210,10 +226,11 @@ src/
 │   └── validation.ts     # Zod-схеми
 ├── routes/
 │   ├── admin.ts          # /api/admin/reset
-│   ├── ai.ts             # /api/ai/*
+│   ├── ai.ts             # /api/ai/* (DeepSeek + Gemini)
 │   ├── auth.ts           # /api/auth/*
 │   ├── bankroll.ts       # /api/bankroll/*
 │   ├── bets.ts           # /api/bets/* (з PATCH)
+│   ├── dota2Matches.ts   # /api/v1/dota2-matches/* (парсер + live scores + health + logo proxy)
 │   ├── goals.ts          # /api/goals/*
 │   ├── riskyTeams.ts     # /api/risky-teams/*
 │   ├── strategies.ts     # /api/strategies/*
