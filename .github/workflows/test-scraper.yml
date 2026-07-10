@@ -1,0 +1,58 @@
+name: Test Dota 2 Scraper
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # Daily at 6 AM UTC
+  workflow_dispatch:
+
+jobs:
+  test-scraper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+      
+      - run: pnpm install
+      
+      - name: Run scraper health check
+        id: scraper
+        run: |
+          npx tsx -e "
+          import { fetchDota2Matches } from './src/services/tipsggScraper';
+          
+          console.time('total');
+          const matches = await fetchDota2Matches();
+          console.timeEnd('total');
+          
+          const today = matches.filter(m => m.status !== 'finished').length;
+          const withCoeffs = matches.filter(m => m.coeff1 != null).length;
+          
+          if (matches.length === 0) {
+            console.error('FAIL: No matches found');
+            process.exit(1);
+          }
+          if (today === 0) {
+            console.warn('WARN: No upcoming/live matches');
+          }
+          if (withCoeffs === 0 && today > 0) {
+            console.warn('WARN: No coefficients extracted');
+          }
+          
+          console.log('PASS:', matches.length, 'matches,', today, 'live/upcoming,', withCoeffs, 'with coeffs');
+        "
+        env:
+          NODE_ENV: test
+      
+      - name: Status report
+        if: failure()
+        run: echo "Scraper test failed — HTML structure may have changed on tips.gg"

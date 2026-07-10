@@ -98,4 +98,132 @@ dota2Matches.get('/:date/:slug/:time', async (c) => {
   }
 });
 
+// GET /api/dota2-matches/live-scores — lightweight endpoint for live score updates
+dota2Matches.get('/live-scores', async (c) => {
+  try {
+    const today = new Date();
+    const dd = String(today.getDate()).padStart(2, '0');
+    const mm = String(today.getMonth() + 1).padStart(2, '0');
+    const yyyy = today.getFullYear();
+    const url = `https://tips.gg/dota2/matches/${dd}-${mm}-${yyyy}/`;
+
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const execFileAsync = promisify(execFile);
+    const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
+    
+    const { stdout: html } = await execFileAsync('curl', [
+      '-s', '-L', '--max-time', '10',
+      '-H', `User-Agent: ${UA}`,
+      '-H', 'Accept: text/html',
+      url,
+    ], { maxBuffer: 5 * 1024 * 1024, timeout: 15000 });
+
+    const scoreRegex = /class="score[^"]*">(\d{1,2})<\/span>/gi;
+    const liveUpdates: Array<{ id: string; score1: number | null; score2: number | null; status: string }> = [];
+    
+    const matchBlocks = html.split(/class="element match/).slice(1);
+    
+    for (const block of matchBlocks) {
+      const statusMatch = block.match(/class="element match (\w+)/);
+      const status = statusMatch?.[1] || 'upcoming';
+      
+      const urlMatch = block.match(/href="\/matches\/dota2\/[^"]+\/([a-z0-9-]+-vs-[a-z0-9-]+)\//);
+      if (!urlMatch) continue;
+      
+      const id = urlMatch[1];
+      const scores = [...block.matchAll(scoreRegex)].map(m => parseInt(m[1], 10));
+      
+      liveUpdates.push({
+        id,
+        score1: scores[0] ?? null,
+        score2: scores[1] ?? null,
+        status,
+      });
+    }
+
+    return c.json(liveUpdates);
+  } catch (e) {
+    return c.json({ error: 'Failed' }, 502);
+  }
+});
+
+// GET /api/dota2-matches/health — validates scraper HTML structure
+dota2Matches.get('/health', async (c) => {
+  const checks: Record<string, boolean | string> = {};
+  let ok = true;
+
+  try {
+    const today = new Date();
+    const dd = String(today.getDate()).padStart(2, '0');
+    const mm = String(today.getMonth() + 1).padStart(2, '0');
+    const yyyy = today.getFullYear();
+    const url = `https://tips.gg/dota2/matches/${dd}-${mm}-${yyyy}/`;
+
+    // Use a fresh fetch (no retry needed for health check)
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const execFileAsync = promisify(execFile);
+    const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
+    
+    const { stdout } = await execFileAsync('curl', [
+      '-s', '-L', '--max-time', '10',
+      '-H', `User-Agent: ${UA}`,
+      '-H', 'Accept: text/html',
+      url,
+    ], { maxBuffer: 5 * 1024 * 1024, timeout: 15000 });
+    
+    checks['html_response'] = stdout.length > 5000;
+    checks['json_ld'] = stdout.includes('application/ld+json');
+    checks['json_ld_count'] = String((stdout.match(/application\/ld\+json/gi) || []).length);
+    checks['score_elements'] = stdout.includes('class="score');
+    checks['bookmaker_section'] = stdout.includes('bookmakers-analysis-counters');
+    checks['match_listing'] = stdout.includes('class="element match');
+    
+    if (!checks['json_ld'] || !checks['match_listing']) ok = false;
+  } catch (e) {
+    checks['error'] = e instanceof Error ? e.message : 'Unknown';
+    ok = false;
+  }
+
+  return c.json({ ok, checks });
+});
+
+// GET /api/dota2-matches/logo/* — proxy team logos through backend
+dota2Matches.get('/logo/*', async (c) => {
+  const logoPath = c.req.param('*');
+  if (!logoPath) return c.json({ error: 'Missing path' }, 400);
+
+  const logoUrl = `https://files.tips.gg/static/image/teams/${logoPath}`;
+  
+  try {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const execFileAsync = promisify(execFile);
+    const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
+    
+    const { stdout } = await execFileAsync('curl', [
+      '-s', '-L', '--max-time', '10',
+      '-H', `User-Agent: ${UA}`,
+      '-H', 'Referer: https://tips.gg/',
+      '--output', '-',
+      logoUrl,
+    ], { maxBuffer: 512 * 1024, timeout: 12000, encoding: 'buffer' });
+    
+    if (!stdout || stdout.length === 0) {
+      return c.json({ error: 'Not found' }, 404);
+    }
+
+    return new Response(stdout, {
+      headers: {
+        'Content-Type': 'image/png',
+        'Cache-Control': 'public, max-age=86400',
+        'Access-Control-Allow-Origin': '*',
+      },
+    });
+  } catch (e) {
+    return c.json({ error: 'Failed to fetch logo' }, 502);
+  }
+});
+
 export default dota2Matches;
