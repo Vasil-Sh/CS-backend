@@ -9,6 +9,8 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { z } from 'zod';
+import { isOpen, recordSuccess, recordFailure } from './circuitBreaker';
 
 const execFileAsync = promisify(execFile);
 
@@ -216,6 +218,11 @@ async function parseMatchesFromHtml(html: string): Promise<TipsGgMatch[]> {
  * Fetch and parse today's + tomorrow's Dota 2 matches from tips.gg.
  */
 export async function fetchDota2Matches(): Promise<TipsGgMatch[]> {
+  const CIRCUIT_NAME = 'tipsgg_fetchDota2Matches';
+  if (isOpen(CIRCUIT_NAME)) {
+    throw new Error(`Circuit breaker open for ${CIRCUIT_NAME}`);
+  }
+
   const startTime = Date.now();
   const today = formatDateDdMmYyyy(new Date());
   const tomorrow = formatDateDdMmYyyy(new Date(Date.now() + 86400000));
@@ -260,6 +267,7 @@ export async function fetchDota2Matches(): Promise<TipsGgMatch[]> {
     `coeffs: ${totalTime - parseTime}ms total: ${totalTime - startTime}ms`
   );
 
+  recordSuccess(CIRCUIT_NAME);
   return all;
 }
 

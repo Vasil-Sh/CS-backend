@@ -1,16 +1,19 @@
 /**
- * Dota 2 Matches API — wraps tips.gg scraper with in-memory + file caching.
+ * Dota 2 Matches API — wraps tips.gg scraper with caching, rate limiting,
+ * stale-while-revalidate, graceful degradation.
  */
 
 import { Hono } from 'hono';
 import { fetchDota2Matches, fetchDota2MatchDetail, type TipsGgMatch } from '../services/tipsggScraper';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { recordFailure } from '../services/circuitBreaker';
 
 const dota2Matches = new Hono();
 
-// ── Two-tier cache: in-memory (fast) + file (survives restart) ──
-const CACHE_TTL = 5 * 60 * 1000;
+// ── Cache config ──
+const CACHE_TTL_FRESH = 5 * 60 * 1000;   // 5 min — normal TTL
+const CACHE_TTL_STALE = 60 * 60 * 1000;  // 1 hour — serve stale only if fresh fetch fails
 const CACHE_DIR = join(process.cwd(), '.cache');
 const CACHE_FILE = join(CACHE_DIR, 'dota2_matches.json');
 
@@ -18,58 +21,113 @@ function ensureCacheDir(): void {
   if (!existsSync(CACHE_DIR)) mkdirSync(CACHE_DIR, { recursive: true });
 }
 
-function readFileCache<T>(): T | null {
-  try {
-    if (!existsSync(CACHE_FILE)) return null;
-    const raw = readFileSync(CACHE_FILE, 'utf-8');
-    const { data, ts } = JSON.parse(raw);
-    if (Date.now() - ts < CACHE_TTL) return data as T;
-  } catch { /* ignore */ }
-  return null;
+interface CacheEntry<T> {
+  data: T;
+  ts: number;
+  from: 'fresh' | 'stale';
 }
 
-function writeFileCache(data: unknown): void {
+function readFileCache<T>(maxAge: number, key = CACHE_FILE): { data: T; stale: boolean } | null {
+  try {
+    if (!existsSync(key)) return null;
+    const raw = readFileSync(key, 'utf-8');
+    const entry: CacheEntry<T> = JSON.parse(raw);
+    const age = Date.now() - entry.ts;
+    if (age < maxAge) return { data: entry.data, stale: false };
+    // Return as stale (graceful degradation)
+    return { data: entry.data, stale: true };
+  } catch { return null; }
+}
+
+function writeFileCacheInternal(data: unknown, key = CACHE_FILE): void {
   try {
     ensureCacheDir();
-    writeFileSync(CACHE_FILE, JSON.stringify({ data, ts: Date.now() }), 'utf-8');
+    const entry: CacheEntry<unknown> = { data, ts: Date.now(), from: 'fresh' };
+    writeFileSync(key, JSON.stringify(entry), 'utf-8');
   } catch { /* ignore */ }
 }
 
-// In-memory cache (same TTL, but instant)
-const memCache = new Map<string, { data: unknown; ts: number }>();
+// ── Rate limiter ──
+const RATE_LIMIT_WINDOW = 30000; // 30s
+const RATE_LIMIT_MAX = 5;        // max 5 requests per window
+const rateBuckets = new Map<string, { count: number; resetAt: number }>();
 
-function getCache<T>(key: string): T | null {
-  const entry = memCache.get(key);
-  if (entry && Date.now() - entry.ts < CACHE_TTL) return entry.data as T;
-  memCache.delete(key);
-  return null;
+function checkRateLimit(key: string): boolean {
+  const now = Date.now();
+  let bucket = rateBuckets.get(key);
+  if (!bucket || now > bucket.resetAt) {
+    bucket = { count: 0, resetAt: now + RATE_LIMIT_WINDOW };
+    rateBuckets.set(key, bucket);
+  }
+  if (bucket.count >= RATE_LIMIT_MAX) return false;
+  bucket.count++;
+  return true;
 }
 
-function setCache(key: string, data: unknown): void {
-  memCache.set(key, { data, ts: Date.now() });
+// Compound key: IP + route
+function rateLimitKey(c: any): string {
+  const ip = c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '127.0.0.1';
+  return `${ip}::dota2-matches`;
 }
 
-// GET /api/dota2/matches — today's + tomorrow's matches
-dota2Matches.get('/', async (c) => {
-  const cacheKey = 'matches_today_tomorrow';
+// ── Stale-while-revalidate helper ──
+let refreshPromise: Promise<TipsGgMatch[] | null> | null = null;
 
-  // 1. Try in-memory
-  let matches = getCache<TipsGgMatch[]>(cacheKey);
-  if (matches) return c.json(matches);
-
-  // 2. Try file cache
-  matches = readFileCache<TipsGgMatch[]>();
-  if (matches) {
-    setCache(cacheKey, matches);
-    return c.json(matches);
+async function getMatchesWithSWR(): Promise<{ data: TipsGgMatch[]; fromCache: boolean }> {
+  // 1. Try in-memory fresh cache
+  const memResult = readFileCache<TipsGgMatch[]>(CACHE_TTL_FRESH, CACHE_FILE);
+  if (memResult && !memResult.stale) {
+    return { data: memResult.data, fromCache: true };
   }
 
-  // 3. Fetch fresh
+  // 2. Try to refresh in background
+  if (!refreshPromise) {
+    refreshPromise = fetchDota2Matches()
+      .then(matches => {
+        writeFileCacheInternal(matches);
+        return matches;
+      })
+      .catch(err => {
+        console.error('[dota2Matches] Refresh failed:', (err as Error).message);
+        recordFailure('tipsgg_fetchDota2Matches');
+        return null;
+      })
+      .finally(() => { refreshPromise = null; });
+  }
+
+  // 3. If we have fresh cached data, return immediately while refresh happens in background
+  if (memResult) {
+    // Don't await the refresh — it runs in background
+    return { data: memResult.data, fromCache: true };
+  }
+
+  // 4. No fresh cache — wait for the refresh
+  const fresh = await refreshPromise;
+  if (fresh) return { data: fresh, fromCache: false };
+
+  // 5. Graceful degradation: return stale cache (>1 hour old)
+  const staleResult = readFileCache<TipsGgMatch[]>(24 * 60 * 60 * 1000, CACHE_FILE);
+  if (staleResult) {
+    console.warn('[dota2Matches] Serving stale cache (graceful degradation)');
+    return { data: staleResult.data, fromCache: true };
+  }
+
+  throw new Error('No cached data available and refresh failed');
+}
+
+// ── Routes ──
+
+// GET /api/dota2-matches — today's + tomorrow's matches (SWR + graceful degradation)
+dota2Matches.get('/', async (c) => {
+  if (!checkRateLimit(rateLimitKey(c))) {
+    return c.json({ error: 'Too many requests, please retry later' }, 429);
+  }
+
   try {
-    matches = await fetchDota2Matches();
-    setCache(cacheKey, matches);
-    writeFileCache(matches);
-    return c.json(matches);
+    const { data, fromCache } = await getMatchesWithSWR();
+    c.header('X-Cache', fromCache ? 'HIT' : 'MISS');
+    c.header('Cache-Control', `public, max-age=${CACHE_TTL_FRESH / 1000}`);
+    return c.json(data);
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     console.error('[dota2Matches] Scrape failed:', message);
@@ -77,28 +135,7 @@ dota2Matches.get('/', async (c) => {
   }
 });
 
-// GET /api/dota2/matches/:date/:slug/:time — single match detail
-dota2Matches.get('/:date/:slug/:time', async (c) => {
-  const { date, slug, time } = c.req.param();
-  const matchUrl = `/matches/dota2/${date}/${slug}/${time}/`;
-
-  const cacheKey = `detail_${matchUrl}`;
-  const cached = getCache<TipsGgMatch>(cacheKey);
-  if (cached) return c.json(cached);
-
-  try {
-    const match = await fetchDota2MatchDetail(matchUrl);
-    if (!match) return c.json({ error: 'Match not found' }, 404);
-    setCache(cacheKey, match);
-    return c.json(match);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unknown error';
-    console.error('[dota2Matches] Detail scrape failed:', message);
-    return c.json({ error: 'Failed to fetch match detail', detail: message }, 502);
-  }
-});
-
-// GET /api/dota2-matches/live-scores — lightweight endpoint for live score updates
+// GET /api/dota2-matches/live-scores — lightweight live score updates
 dota2Matches.get('/live-scores', async (c) => {
   try {
     const today = new Date();
@@ -223,6 +260,31 @@ dota2Matches.get('/logo/*', async (c) => {
     });
   } catch (e) {
     return c.json({ error: 'Failed to fetch logo' }, 502);
+  }
+});
+
+// ── Dynamic routes (MUST be after static routes) ──
+
+// GET /api/dota2-matches/:date/:slug/:time — single match detail
+dota2Matches.get('/:date/:slug/:time', async (c) => {
+  const { date, slug, time } = c.req.param();
+  const matchUrl = `/matches/dota2/${date}/${slug}/${time}/`;
+
+  const detailCacheFile = join(CACHE_DIR, `detail_${date}_${slug}.json`);
+  const cached = readFileCache<TipsGgMatch>(CACHE_TTL_FRESH, detailCacheFile);
+  if (cached && !cached.stale) return c.json(cached.data);
+
+  try {
+    const match = await fetchDota2MatchDetail(matchUrl);
+    if (!match) return c.json({ error: 'Match not found' }, 404);
+    writeFileCacheInternal(match, detailCacheFile);
+    return c.json(match);
+  } catch (err) {
+    // Graceful degradation for detail
+    if (cached) return c.json(cached.data);
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    console.error('[dota2Matches] Detail scrape failed:', message);
+    return c.json({ error: 'Failed to fetch match detail', detail: message }, 502);
   }
 });
 
