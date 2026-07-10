@@ -88,50 +88,50 @@ function parseEventStatus(statusUrl: string): 'upcoming' | 'live' | 'finished' {
 }
 
 /**
- * Extract scores from the raw HTML text near each match URL.
- * Scans for patterns like "team1 0 team2 1" or "0 : 1".
+ * Extract scores from the raw HTML near each match.
+ *
+ * tips.gg score markup:
+ *   <span class="score normal">1</span>
+ *   <span class="score normal">1</span>
  */
 function extractScoresFromHtml(
   html: string,
   matchUrl: string,
 ): { score1: number | null; score2: number | null; status: 'upcoming' | 'live' | 'finished' } {
-  // Find the section of HTML around this match URL
-  const urlSlug = matchUrl.replace(/\/$/, '').split('/').pop() || '';
-  const escapedSlug = urlSlug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-  // Look for the match block — find the URL, then look for score nearby
+  // Find the match URL in HTML
   const urlIndex = html.indexOf(matchUrl);
   if (urlIndex === -1) {
     return { score1: null, score2: null, status: 'upcoming' };
   }
 
-  // Get surrounding HTML chunk (~2000 chars around the URL)
-  const chunkStart = Math.max(0, urlIndex - 1000);
-  const chunkEnd = Math.min(html.length, urlIndex + 1000);
+  // Status is on the parent <div class="element match finished"> — BEFORE the URL.
+  // Score spans and <span class="status finished"> are AFTER the URL.
+  const chunkStart = Math.max(0, urlIndex - 600);
+  const chunkEnd = Math.min(html.length, urlIndex + 2500);
   const chunk = html.substring(chunkStart, chunkEnd);
 
-  // Pattern 1: Score displayed as "0" and "1" next to team names
-  // We look for digit patterns near the match URL that could be scores
-  // In tips.gg, live/finished scores appear as separate numbers near the teams
+  // Match score elements: <span class="score ...">DIGIT</span>
+  const scoreRegex = /class="score[^"]*">(\d{1,2})<\/span>/gi;
+  const scores = [...chunk.matchAll(scoreRegex)].map(m => parseInt(m[1], 10));
 
-  // Pattern: ">0<" and ">1<" near the match (score elements)
-  const scorePattern = />(\d+)<\/[^>]*>\s*(?:<\/(?:span|div|p)>\s*)*$/m;
-  const scoresInChunk = [...chunk.matchAll(/>(\d+)</g)].map(m => parseInt(m[1]));
+  // Status detection — look for:
+  //   <span class="status finished">Today</span>     → finished
+  //   <span class="status live">LIVE</span>           → live
+  //   class="match live" or match finished in parent div
+  const hasFinished = /class="[^"]*status\s[^"]*finished|class="[^"]*match\s[^"]*finished/i.test(chunk);
+  const hasLive = !hasFinished && /class="[^"]*status\s[^"]*live|class="[^"]*match\s[^"]*live|Starting|In \d+ min/i.test(chunk);
 
-  // The first two single-digit numbers found after the team names are likely scores
-  const scoreNumbers = scoresInChunk.filter(n => n >= 0 && n <= 99);
-
-  // Heuristic: if we find 2+ numbers that look like scores
-  if (scoreNumbers.length >= 2) {
-    // Check if the match seems live or finished
-    // Look for "LIVE" indicator
-    const hasLive = /LIVE/i.test(chunk);
-    const hasFinished = /FT|Finished/i.test(chunk);
-
+  if (scores.length >= 2) {
+    // If scores are 0-0 and there's a finished marker, it hasn't started yet
+    // so keep it as upcoming (not finished)
+    const allZero = scores[0] === 0 && scores[1] === 0;
     return {
-      score1: scoreNumbers[0],
-      score2: scoreNumbers[1],
-      status: hasFinished ? 'finished' : hasLive ? 'live' : 'upcoming',
+      score1: scores[0],
+      score2: scores[1],
+      status: !allZero && hasFinished ? 'finished'
+        : hasLive ? 'live'
+        : allZero && !hasLive ? 'upcoming'
+        : 'live',
     };
   }
 
@@ -163,6 +163,9 @@ export async function fetchDota2Matches(dateStr?: string): Promise<TipsGgMatch[]
 
   const html = await fetchHtml(url);
 
+  // Build team → logo map from actual <img> tags in HTML
+  const logoMap = buildLogoMap(html);
+
   // Extract all JSON-LD blocks
   const jsonLdMatches = extractJsonLd(html);
 
@@ -185,10 +188,9 @@ export async function fetchDota2Matches(dateStr?: string): Promise<TipsGgMatch[]
       // Extract tips count
       const tipsCount = extractTipsCount(html, ld.url);
 
-      // Try to extract logo from team page URL (tips.gg uses poster pages, not direct images)
-      // We derive a predictable logo URL pattern from the team slug
-      const logo1 = deriveLogoUrl(competitor1.url);
-      const logo2 = deriveLogoUrl(competitor2.url);
+      // Get logos from HTML <img> tags (accurate, handles CDN naming variations)
+      const logo1 = getTeamLogo(competitor1.name, competitor1.url, logoMap);
+      const logo2 = getTeamLogo(competitor2.name, competitor2.url, logoMap);
 
       const match: TipsGgMatch = {
         // Unique ID from slug: "rune-eaters-vs-gamerlegion"
@@ -226,6 +228,7 @@ export async function fetchDota2MatchDetail(matchUrl: string): Promise<TipsGgMat
   const fullUrl = matchUrl.startsWith('http') ? matchUrl : `${TIPSGG_BASE}${matchUrl}`;
 
   const html = await fetchHtml(fullUrl);
+  const logoMap = buildLogoMap(html);
   const jsonLdMatches = extractJsonLd(html);
 
   if (jsonLdMatches.length === 0) return null;
@@ -248,8 +251,8 @@ export async function fetchDota2MatchDetail(matchUrl: string): Promise<TipsGgMat
     score2,
     nameTeam1: competitor1.name,
     nameTeam2: competitor2.name,
-    logoTeam1: deriveLogoUrl(competitor1.url),
-    logoTeam2: deriveLogoUrl(competitor2.url),
+    logoTeam1: getTeamLogo(competitor1.name, competitor1.url, logoMap),
+    logoTeam2: getTeamLogo(competitor2.name, competitor2.url, logoMap),
     tournament: ld.organizer?.name || '',
     stage: parseStage(description),
     status: status !== 'upcoming' ? status : parseEventStatus(ld.eventStatus),
@@ -281,18 +284,74 @@ function extractJsonLd(html: string): JsonLdSportsEvent[] {
 }
 
 /**
- * Convert team page URL to a predictable logo URL.
- * tips.gg stores logos at: https://files.tips.gg/static/image/teams/{slug}.png
+ * Build a map of team name → actual logo URL by parsing <img> tags in HTML.
  */
-function deriveLogoUrl(teamUrl: string): string | null {
-  try {
-    // "https://tips.gg/team/rune-eaters-dota2/" → "rune-eaters-dota2"
-    const slug = teamUrl.replace(/\/$/, '').split('/').pop();
-    if (!slug) return null;
-    return `https://files.tips.gg/static/image/teams/${slug}.png`;
-  } catch {
-    return null;
+function buildLogoMap(html: string): Map<string, string> {
+  const map = new Map<string, string>();
+  // Match any <img> tag — try src, data-src, and content attributes
+  const imgRegex = /<img[^>]+>/gi;
+  let m: RegExpExecArray | null;
+
+  while ((m = imgRegex.exec(html)) !== null) {
+    const tag = m[0];
+
+    const altM = /alt="([^"]+)"\s/i.exec(tag);
+    if (!altM) continue;
+    // Only match "X – Dota 2 Team" pattern in alt
+    if (!/\s[-–—]\sDota\s2\sTeam$/i.test(altM[1].trim())) continue;
+
+    // Try data-src first (lazy loading), then src
+    let src = '';
+    const ds = /data-src="([^"]+)"/i.exec(tag);
+    if (ds) src = ds[1];
+    if (!src) {
+      const s = /src="([^"]+)"/i.exec(tag);
+      if (s) src = s[1];
+    }
+
+    // Skip placeholders and default images
+    if (!src || src.startsWith('data:') || src.includes('default') || src.endsWith('.svg')) continue;
+
+    const teamName = altM[1].replace(/\s*[-–—]\s*Dota 2\s*Team$/i, '').trim();
+    if (teamName && !map.has(teamName)) {
+      map.set(teamName, src);
+    }
   }
+
+  return map;
+}
+
+/** Known CDN filename overrides — slug → real filename on files.tips.gg */
+const LOGO_OVERRIDES: Record<string, string> = {
+  'nigma-galaxy-dota2': 'nigma-galaxy-dota2-dota2',
+  'playtime-dota2': 'PlayTime-dota2',
+  'nemiga-gaming-dota2': 'nemiga-gaming-2020-dota2',
+  'gamerlegion-dota2': 'gamerlegion-dota2',
+  'betboom-team-dota2': 'betboom-dota2',
+  'team-spirit-dota2': 'team-spirit-2021-dota2',
+  'psg-lgd-gaming-dota2': 'psg-lgd-gaming-dota2',
+  'team-syntax-dota2': 'Team-Syntax-dota2',
+};
+
+/** Get team logo from map, overrides, or slug-derived URL */
+function getTeamLogo(teamName: string, teamUrl: string, logoMap: Map<string, string>): string | null {
+  // 1. Exact map match
+  if (logoMap.has(teamName)) return logoMap.get(teamName) ?? null;
+
+  // 2. Case-insensitive map match
+  for (const [key, url] of logoMap) {
+    if (key.toLowerCase() === teamName.toLowerCase()) return url;
+  }
+
+  // 3. Known CDN filename overrides (slug-based)
+  const slug = teamUrl.replace(/\/$/, '').split('/').pop() || '';
+  const overrideSlug = LOGO_OVERRIDES[slug];
+  if (overrideSlug) return `https://files.tips.gg/static/image/teams/${overrideSlug}.png`;
+
+  // 4. Slug-derived URL
+  if (slug) return `https://files.tips.gg/static/image/teams/${slug}.png`;
+
+  return null;
 }
 
 /**
