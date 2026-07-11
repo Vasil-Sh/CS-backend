@@ -5,7 +5,7 @@
 
 import { Hono } from 'hono';
 import { fetchDota2Matches, fetchDota2MatchDetail, type TipsGgMatch } from '../services/tipsggScraper';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordFailure } from '../services/circuitBreaker';
 
@@ -121,6 +121,13 @@ async function getMatchesWithSWR(): Promise<{ data: TipsGgMatch[]; fromCache: bo
 dota2Matches.get('/', async (c) => {
   if (!checkRateLimit(rateLimitKey(c))) {
     return c.json({ error: 'Too many requests, please retry later' }, 429);
+  }
+
+  const forceRefresh = c.req.query('refresh') === 'true';
+
+  if (forceRefresh) {
+    // Purge cached file — force fresh scrape
+    try { if (existsSync(CACHE_FILE)) unlinkSync(CACHE_FILE); } catch {}
   }
 
   try {
