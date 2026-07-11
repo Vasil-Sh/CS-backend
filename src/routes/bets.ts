@@ -36,6 +36,18 @@ bets.put('/:id', requireAuth, async (c) => {
   return c.json(updated);
 });
 
+// ── PATCH /api/bets/:id ──
+bets.patch('/:id', requireAuth, async (c) => {
+  const user = c.get('user');
+  const id = c.req.param('id') || '';
+  let body;
+  try { body = updateBetSchema.parse(await c.req.json()); }
+  catch (e: any) { return c.json({ error: 'Invalid input', details: e.errors }, 400); }
+  const updated = await betService.updateBet(id, user.userId, body);
+  if (!updated) return c.json({ error: 'Bet not found' }, 404);
+  return c.json(updated);
+});
+
 // ── DELETE /api/bets/:id ──
 bets.delete('/:id', requireAuth, async (c) => {
   const user = c.get('user');
