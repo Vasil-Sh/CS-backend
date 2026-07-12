@@ -138,26 +138,16 @@ function extractScoresFromHtml(
     return { score1: null, score2: null, status: 'upcoming' };
   }
 
-  // Look BACKWARDS up to 600 chars for the parent <div class="element match ...">
-  const beforeStart = Math.max(0, targetScriptStart - 600);
-  const before = html.substring(beforeStart, targetScriptStart);
-  // Don't use /g flag — it drops capture groups. exec() loop gives us the last match.
-  const classRegex = /class="([^"]*)"/g;
-  let lastMatch: RegExpExecArray | null = null;
-  let m: RegExpExecArray | null;
-  while ((m = classRegex.exec(before)) !== null) {
-    if (m[1].includes('match')) lastMatch = m;
-  }
-
+  // Find parent status class — tips.gg: <div class="element match finished  visible">
+  // Search backward from the script to find the class with "match" in it
+  const beforeForDiv = html.substring(0, targetScriptStart);
+  const divMatch = beforeForDiv.match(/class="[^"]*match\s+(\w+)/g);
   let statusWord = '';
-  if (lastMatch) {
-    const classes = lastMatch[1];
-    const words = classes.split(/\s+/);
-    // Status is the word immediately after "match"
-    const matchIdx = words.indexOf('match');
-    if (matchIdx >= 0 && matchIdx + 1 < words.length) {
-      statusWord = words[matchIdx + 1];
-    }
+  if (divMatch) {
+    // Take the LAST match (closest to the script)
+    const lastClass = divMatch[divMatch.length - 1];
+    const statusMatch = lastClass.match(/match\s+(\w+)/);
+    statusWord = statusMatch?.[1] || '';
   }
 
   const hasFinished = statusWord === 'finished';
@@ -171,9 +161,10 @@ function extractScoresFromHtml(
   const after = html.substring(targetScriptEnd, afterEnd);
 
   // Also search BEFORE the script (scores are between parent div and JSON-LD)
+  const beforeChunk = html.substring(Math.max(0, targetScriptStart - 1200), targetScriptStart);
   const scoreRegex = /class="score[^"]*">(\d{1,2})<\/span>/gi;
   const afterScores = [...after.matchAll(scoreRegex)];
-  const beforeScores = [...before.matchAll(scoreRegex)];
+  const beforeScores = [...beforeChunk.matchAll(scoreRegex)];
   const allScores = [...beforeScores, ...afterScores].map(m => parseInt(m[1], 10));
 
   // Compute total scores: team1 = even indices, team2 = odd indices
