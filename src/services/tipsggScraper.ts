@@ -169,7 +169,8 @@ function extractScoresFromHtml(
   const hasFinished = /class="[^"]*status\s[^"]*finished|class="[^"]*match\s[^"]*finished/i.test(chunk);
   const hasLive = !hasFinished && /class="[^"]*status\s[^"]*live|class="[^"]*match\s[^"]*live|Starting|In \d+ min/i.test(chunk);
 
-  if (allScores.length >= 2) {
+  if (allScores.length >= 1) {
+    // At least one score found — return whatever we have (may be partial for live)
     const allZero = score1 === 0 && score2 === 0;
     return {
       score1,
@@ -418,7 +419,11 @@ async function fetchCoefficientsFromPredictions(link: string, retries = 2): Prom
       // Find bookmakers analysis section (relaxed class match)
       const baIdx = html.indexOf('bookmakers-analysis');
       if (baIdx === -1) {
-        // No coefficients section — don't retry, page simply has no odds
+        // No coefficients section — page simply has no odds
+        // Log a sample URL once to help debug
+        if (!link.includes('debugged-predictions')) {
+          console.warn(`[tipsgg] No bookmakers-analysis for ${link} — predictions page may have changed layout`);
+        }
         return null;
       }
 
@@ -446,7 +451,16 @@ async function fetchCoefficientsFromPredictions(link: string, retries = 2): Prom
         return { coeff1: nonDrawOdds[0], coeff2: nonDrawOdds[1] };
       }
 
-      if (attempt === retries) return null;
+      // No odds matched — retry with backoff if attempts remain
+      if (attempt < retries) {
+        await new Promise(r => setTimeout(r, (attempt + 1) * 500));
+      } else {
+        // Log diagnostic: found bookmakers-analysis but couldn't extract any odds
+        const odc = (html.match(/avg-odd/gi) || []).length;
+        const bam = (html.match(/bookmakers-analysis/gi) || []).length;
+        console.warn(`[tipsgg] Coefficients extraction failed for ${link} — bookmakers-analyses: ${bam}, avg-odd spans: ${odc}`);
+        return null;
+      }
     } catch {
       if (attempt === retries) return null;
       await new Promise(r => setTimeout(r, (attempt + 1) * 500));
