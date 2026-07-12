@@ -165,20 +165,20 @@ function extractScoresFromHtml(
     else score2 += allScores[i];
   }
 
-  // Status detection
+  // Status detection — only trust explicit CSS classes, not "Starting" text (appears on all upcoming)
   const hasFinished = /class="[^"]*status\s[^"]*finished|class="[^"]*match\s[^"]*finished/i.test(chunk);
-  const hasLive = !hasFinished && /class="[^"]*status\s[^"]*live|class="[^"]*match\s[^"]*live|Starting|In \d+ min/i.test(chunk);
+  const hasLive = /class="[^"]*status\s[^"]*live|class="[^"]*match\s[^"]*live/i.test(chunk);
 
   if (allScores.length >= 1) {
-    // At least one score found — return whatever we have (may be partial for live)
+    // At least one score found — return whatever we have
     const allZero = score1 === 0 && score2 === 0;
     return {
       score1,
       score2,
-      status: !allZero && hasFinished ? 'finished'
+      status: hasFinished ? 'finished'
         : hasLive ? 'live'
-        : allZero && !hasLive ? 'upcoming'
-        : 'live',
+        : allZero ? 'upcoming'
+        : 'live', // non-zero scores without finished/live marker = live
     };
   }
 
