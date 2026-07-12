@@ -86,10 +86,11 @@ function parseStage(desc: string): string {
 }
 
 function parseEventStatus(statusUrl: string): 'upcoming' | 'live' | 'finished' {
+  // Cancelled matches should not be shown — treat as upcoming so frontend can filter
+  if (statusUrl.includes('EventCancelled')) return 'upcoming';
+  if (statusUrl.includes('EventPostponed')) return 'upcoming';
   if (statusUrl.includes('EventScheduled')) return 'upcoming';
   if (statusUrl.includes('EventRescheduled')) return 'upcoming';
-  if (statusUrl.includes('EventPostponed')) return 'upcoming';
-  if (statusUrl.includes('EventCancelled')) return 'finished';
   return 'upcoming';
 }
 
@@ -104,32 +105,33 @@ function extractScoresFromHtml(
   html: string,
   matchUrl: string,
 ): { score1: number | null; score2: number | null; status: 'upcoming' | 'live' | 'finished' } {
-  // Find the match URL in HTML
-  const urlIndex = html.indexOf(matchUrl);
-  if (urlIndex === -1) {
+  // Find the exact match block by searching for href="URL" in the HTML
+  // This is more precise than indexOf(matchUrl) which can match substrings
+  const hrefMarker = `href="${matchUrl}"`;
+  let foundIndex = html.indexOf(hrefMarker);
+  if (foundIndex === -1) {
+    // Try without trailing slash
+    const urlNoSlash = matchUrl.replace(/\/$/, '');
+    foundIndex = html.indexOf(`href="${urlNoSlash}"`);
+  }
+  if (foundIndex === -1) {
     return { score1: null, score2: null, status: 'upcoming' };
   }
 
-  // Status is on the parent <div class="element match finished"> — BEFORE the URL.
-  // Score spans and <span class="status finished"> are AFTER the URL.
-  const chunkStart = Math.max(0, urlIndex - 600);
-  const chunkEnd = Math.min(html.length, urlIndex + 2500);
+  // Grab a tight window around the match element
+  const chunkStart = Math.max(0, foundIndex - 800);
+  const chunkEnd = Math.min(html.length, foundIndex + 2000);
   const chunk = html.substring(chunkStart, chunkEnd);
 
   // Match score elements: <span class="score ...">DIGIT</span>
   const scoreRegex = /class="score[^"]*">(\d{1,2})<\/span>/gi;
   const scores = [...chunk.matchAll(scoreRegex)].map(m => parseInt(m[1], 10));
 
-  // Status detection — look for:
-  //   <span class="status finished">Today</span>     → finished
-  //   <span class="status live">LIVE</span>           → live
-  //   class="match live" or match finished in parent div
+  // Status detection
   const hasFinished = /class="[^"]*status\s[^"]*finished|class="[^"]*match\s[^"]*finished/i.test(chunk);
   const hasLive = !hasFinished && /class="[^"]*status\s[^"]*live|class="[^"]*match\s[^"]*live|Starting|In \d+ min/i.test(chunk);
 
   if (scores.length >= 2) {
-    // If scores are 0-0 and there's a finished marker, it hasn't started yet
-    // so keep it as upcoming (not finished)
     const allZero = scores[0] === 0 && scores[1] === 0;
     return {
       score1: scores[0],
@@ -330,23 +332,41 @@ export async function fetchDota2MatchDetail(matchUrl: string): Promise<TipsGgMat
  * Raw HTML: <span class="avg-odd">16.20</span>
  * team-first = team1, team-second = team2 (skip team-draw).
  */
-async function fetchCoefficientsFromPredictions(link: string, retries = 1): Promise<{ coeff1: number; coeff2: number } | null> {
+async function fetchCoefficientsFromPredictions(link: string, retries = 2): Promise<{ coeff1: number; coeff2: number } | null> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const predUrl = link.endsWith('/') ? link + 'predictions/' : link + '/predictions/';
-      const html = await fetchHtml(`${TIPSGG_BASE}${predUrl}`);
+      const predPath = link.endsWith('/') ? link + 'predictions/' : link + '/predictions/';
+      const html = await fetchHtml(`${TIPSGG_BASE}${predPath}`);
 
-      const baIdx = html.indexOf('class="bookmakers-analysis-counters"');
-      if (baIdx === -1) return null;
+      // Find bookmakers analysis section (relaxed class match)
+      const baIdx = html.indexOf('bookmakers-analysis');
+      if (baIdx === -1) continue;
 
-      const chunk = html.substring(baIdx, baIdx + 1000);
-      const firstMatch = chunk.match(/team-first[\s\S]*?avg-odd">([\d.]+)<\/span>/i);
-      const secondMatch = chunk.match(/team-second[\s\S]*?avg-odd">([\d.]+)<\/span>/i);
+      const chunk = html.substring(baIdx, Math.min(html.length, baIdx + 2000));
 
-      if (firstMatch && secondMatch) {
-        return { coeff1: parseFloat(firstMatch[1]), coeff2: parseFloat(secondMatch[1]) };
+      // Try named team patterns first
+      const firstNamed = chunk.match(/team-first[\s\S]*?avg-odd">([\d.]+)<\/span>/i);
+      const secondNamed = chunk.match(/team-second[\s\S]*?avg-odd">([\d.]+)<\/span>/i);
+      if (firstNamed && secondNamed) {
+        return { coeff1: parseFloat(firstNamed[1]), coeff2: parseFloat(secondNamed[1]) };
       }
-      return null;
+
+      // Fallback: grab all avg-odd values, skip team-draw
+      const allOdds = [...chunk.matchAll(/avg-odd">([\d.]+)<\/span>/gi)];
+      const nonDrawOdds: number[] = [];
+      for (let i = 0; i < allOdds.length && nonDrawOdds.length < 2; i++) {
+        const posBefore = allOdds[i].index!;
+        const snippet = chunk.substring(Math.max(0, posBefore - 100), posBefore);
+        if (!/team-draw/i.test(snippet)) {
+          nonDrawOdds.push(parseFloat(allOdds[i][1]));
+        }
+      }
+
+      if (nonDrawOdds.length >= 2) {
+        return { coeff1: nonDrawOdds[0], coeff2: nonDrawOdds[1] };
+      }
+
+      if (attempt === retries) return null;
     } catch {
       if (attempt === retries) return null;
       await new Promise(r => setTimeout(r, (attempt + 1) * 500));
@@ -356,8 +376,8 @@ async function fetchCoefficientsFromPredictions(link: string, retries = 1): Prom
 }
 
 async function enrichCoefficients(matches: TipsGgMatch[]): Promise<void> {
-  const CONCURRENCY = 3;
-  const BATCH_PAUSE_MS = 800; // pause between batches to avoid rate limiting
+  const CONCURRENCY = 2; // reduced from 3 — less aggressive to avoid rate limiting
+  const BATCH_PAUSE_MS = 1200; // increased pause between batches
   const toFetch = matches.filter(m => m.status !== 'finished');
   let successCount = 0;
 
@@ -502,30 +522,34 @@ function formatDateDdMmYyyy(d: Date): string {
 
 const CURL_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
 
-async function fetchHtml(url: string, retries = 2): Promise<string> {
+async function fetchHtml(url: string, retries = 3): Promise<string> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       if (attempt > 0) {
-        // Exponential backoff: 1s, 2s
-        await new Promise(r => setTimeout(r, attempt * 1000));
+        // Exponential backoff: 1s, 2s, 4s
+        await new Promise(r => setTimeout(r, Math.pow(2, attempt - 1) * 1000));
       }
       const { stdout } = await execFileAsync('curl', [
         '-s', '-L', // silent, follow redirects
-        '--max-time', '15',
+        '--max-time', '25', // increased from 15s — tips.gg can be slow
+        '--connect-timeout', '10',
         '-H', `User-Agent: ${CURL_UA}`,
         '-H', 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         '-H', 'Accept-Language: en-US,en;q=0.9,uk;q=0.8',
+        '-H', 'Cache-Control: no-cache',
         url,
-      ], { maxBuffer: 5 * 1024 * 1024, timeout: 20000 });
+      ], { maxBuffer: 10 * 1024 * 1024, timeout: 30000 });
+      // Detect Cloudflare challenge / empty pages
       if (stdout.length < 500) {
-        throw new Error(`Empty/too-short response (${stdout.length} bytes)`);
+        throw new Error(`Empty/too-short response (${stdout.length} bytes)${stdout.includes('cf-') ? ' — Cloudflare challenge' : ''}`);
       }
       return stdout;
     } catch (err: any) {
       // curl returns non-zero exit code on HTTP errors but still outputs HTML
-      if (err.stdout && err.stdout.length > 1000) return err.stdout;
+      if (err.stdout && err.stdout.length > 2000) return err.stdout;
       if (attempt === retries) {
-        throw new Error(`curl failed for ${url}: ${err.message}`);
+        const msg = err.stderr || err.message || 'unknown';
+        throw new Error(`curl failed for ${url}: ${msg}`);
       }
     }
   }

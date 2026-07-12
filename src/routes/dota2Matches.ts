@@ -72,6 +72,7 @@ function rateLimitKey(c: any): string {
 
 // ── Stale-while-revalidate helper ──
 let refreshPromise: Promise<TipsGgMatch[] | null> | null = null;
+let refreshLock = false; // prevent concurrent scrape starts
 
 async function getMatchesWithSWR(): Promise<{ data: TipsGgMatch[]; fromCache: boolean }> {
   // 1. Try in-memory fresh cache
@@ -80,11 +81,16 @@ async function getMatchesWithSWR(): Promise<{ data: TipsGgMatch[]; fromCache: bo
     return { data: memResult.data, fromCache: true };
   }
 
-  // 2. Try to refresh in background
-  if (!refreshPromise) {
+  // 2. Deduplicated refresh: only one concurrent scrape
+  if (!refreshLock) {
+    refreshLock = true;
     refreshPromise = fetchDota2Matches()
       .then(matches => {
-        writeFileCacheInternal(matches);
+        if (matches.length > 0) {
+          writeFileCacheInternal(matches);
+        } else {
+          console.warn('[dota2Matches] Empty scrape — keeping existing cache');
+        }
         return matches;
       })
       .catch(err => {
@@ -92,26 +98,29 @@ async function getMatchesWithSWR(): Promise<{ data: TipsGgMatch[]; fromCache: bo
         recordFailure('tipsgg_fetchDota2Matches');
         return null;
       })
-      .finally(() => { refreshPromise = null; });
+      .finally(() => {
+        refreshPromise = null;
+        refreshLock = false;
+      });
   }
 
-  // 3. If we have fresh cached data, return immediately while refresh happens in background
+  // 3. If we have cached data (even stale), return immediately while refresh runs
   if (memResult) {
-    // Don't await the refresh — it runs in background
     return { data: memResult.data, fromCache: true };
   }
 
-  // 4. No fresh cache — wait for the refresh
+  // 4. No cache — wait for refresh
   const fresh = await refreshPromise;
-  if (fresh) return { data: fresh, fromCache: false };
+  if (fresh && fresh.length > 0) return { data: fresh, fromCache: false };
 
-  // 5. Graceful degradation: return stale cache (>1 hour old)
+  // 5. Fresh empty → try stale
   const staleResult = readFileCache<TipsGgMatch[]>(24 * 60 * 60 * 1000, CACHE_FILE);
-  if (staleResult) {
+  if (staleResult && staleResult.data.length > 0) {
     console.warn('[dota2Matches] Serving stale cache (graceful degradation)');
     return { data: staleResult.data, fromCache: true };
   }
 
+  if (fresh) return { data: fresh, fromCache: false };
   throw new Error('No cached data available and refresh failed');
 }
 
