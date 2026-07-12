@@ -217,12 +217,8 @@ async function parseMatchesFromHtml(html: string): Promise<TipsGgMatch[]> {
       const dateKey = parseIsoDate(ld.startDate);
 
       const { score1, score2, status: htmlStatus } = extractScoresFromHtml(html, ld.url);
-      // Fallback: if HTML parser returns "upcoming" but startDate was >15 min ago → mark as live
-      const startTime = new Date(ld.startDate).getTime();
-      const status =
-        htmlStatus === 'upcoming' && Date.now() - startTime > 15 * 60 * 1000
-          ? ('live' as const)
-          : htmlStatus;
+      // Trust HTML status detection — time-based fallback is unreliable (delays, finished matches)
+      const status = htmlStatus !== 'upcoming' ? htmlStatus : parseEventStatus(ld.eventStatus);
       const tipsCount = extractTipsCount(html, ld.url);
       const logo1 = getTeamLogo(competitor1.name, competitor1.url, logoMap);
       const logo2 = getTeamLogo(competitor2.name, competitor2.url, logoMap);
