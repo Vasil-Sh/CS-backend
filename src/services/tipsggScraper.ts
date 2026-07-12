@@ -153,21 +153,27 @@ function extractScoresFromHtml(
   const chunk = html.substring(chunkStart, chunkEnd);
 
   // Match score elements: <span class="score ...">DIGIT</span>
-  // Only take the first 2 scores found — they belong to this match.
-  // In BO3/BO5, scores might repeat (e.g. "1 1 0 1") but the first 2 are team totals.
+  // tips.gg shows per-map scores: for BO3 2-1 → [1,0, 0,1, 1,0]
+  // We need totals: sum even indices (team1) and odd indices (team2)
   const scoreRegex = /class="score[^"]*">(\d{1,2})<\/span>/gi;
-  const allScores = [...chunk.matchAll(scoreRegex)];
-  const scores = allScores.slice(0, 2).map(m => parseInt(m[1], 10));
+  const allScores = [...chunk.matchAll(scoreRegex)].map(m => parseInt(m[1], 10));
+
+  // Compute total scores: team1 = sum of even-index scores, team2 = sum of odd-index
+  let score1 = 0, score2 = 0;
+  for (let i = 0; i < allScores.length; i++) {
+    if (i % 2 === 0) score1 += allScores[i];
+    else score2 += allScores[i];
+  }
 
   // Status detection
   const hasFinished = /class="[^"]*status\s[^"]*finished|class="[^"]*match\s[^"]*finished/i.test(chunk);
   const hasLive = !hasFinished && /class="[^"]*status\s[^"]*live|class="[^"]*match\s[^"]*live|Starting|In \d+ min/i.test(chunk);
 
-  if (scores.length >= 2) {
-    const allZero = scores[0] === 0 && scores[1] === 0;
+  if (allScores.length >= 2) {
+    const allZero = score1 === 0 && score2 === 0;
     return {
-      score1: scores[0],
-      score2: scores[1],
+      score1,
+      score2,
       status: !allZero && hasFinished ? 'finished'
         : hasLive ? 'live'
         : allZero && !hasLive ? 'upcoming'
@@ -246,8 +252,9 @@ async function parseMatchesFromHtml(html: string): Promise<TipsGgMatch[]> {
         coeff1: null,
         coeff2: null,
       });
-    } catch {
-      // Skip malformed
+    } catch (err) {
+      // Log malformed entries for debugging
+      console.warn('[tipsgg] Skipped malformed match:', (err as Error).message);
     }
   }
 
@@ -353,7 +360,7 @@ export async function fetchDota2MatchDetail(matchUrl: string): Promise<TipsGgMat
   const pred1 = ld.performer?.name === competitor1.name ? 55
     : ld.performer?.name === competitor2.name ? 45 : 50;
 
-  return {
+  const match: TipsGgMatch = {
     id: slugFromUrl(ld.url),
     date: dateKey,
     link: ld.url,
@@ -375,6 +382,26 @@ export async function fetchDota2MatchDetail(matchUrl: string): Promise<TipsGgMat
     coeff1: null,
     coeff2: null,
   };
+
+  // Try to enrich with real coefficients (best-effort, don't fail on error)
+  try {
+    const coeffs = await fetchCoefficientsFromPredictions(ld.url);
+    if (coeffs) {
+      match.coeff1 = coeffs.coeff1;
+      match.coeff2 = coeffs.coeff2;
+      const imp1 = 1 / coeffs.coeff1;
+      const imp2 = 1 / coeffs.coeff2;
+      const total = imp1 + imp2;
+      if (total > 0) {
+        match.pred1 = Math.round((imp1 / total) * 100);
+        match.pred2 = Math.round((imp2 / total) * 100);
+      }
+    }
+  } catch {
+    // best-effort
+  }
+
+  return match;
 }
 
 /**
@@ -482,7 +509,11 @@ function extractJsonLd(html: string): JsonLdSportsEvent[] {
   while ((match = regex.exec(html)) !== null) {
     try {
       const data = JSON.parse(match[1]);
-      if (data && data['@type'] === 'SportsEvent' && data.sport === 'Dota 2') {
+      // Match both 'SportsEvent' and 'Event' types (tips.gg may vary)
+      // Allow case-insensitive sport match, and also match when sport is missing
+      const isSportsEvent = data['@type'] === 'SportsEvent' || data['@type'] === 'Event';
+      const isDota = !data.sport || /dota\s*2/i.test(data.sport);
+      if (data && isSportsEvent && isDota && Array.isArray(data.competitor) && data.competitor.length >= 2) {
         results.push(data as JsonLdSportsEvent);
       }
     } catch {

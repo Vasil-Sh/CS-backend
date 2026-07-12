@@ -167,13 +167,13 @@ dota2Matches.get('/live-scores', async (c) => {
     const { promisify } = await import('node:util');
     const execFileAsync = promisify(execFile);
     const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
-    
+
     const { stdout: html } = await execFileAsync('curl', [
-      '-s', '-L', '--max-time', '10',
+      '-s', '-L', '--max-time', '15',
       '-H', `User-Agent: ${UA}`,
       '-H', 'Accept: text/html',
       url,
-    ], { maxBuffer: 5 * 1024 * 1024, timeout: 15000 });
+    ], { maxBuffer: 5 * 1024 * 1024, timeout: 20000 });
 
     const scoreRegex = /class="score[^"]*">(\d{1,2})<\/span>/gi;
     const liveUpdates: Array<{ id: string; score1: number | null; score2: number | null; status: string }> = [];
