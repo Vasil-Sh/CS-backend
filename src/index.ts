@@ -38,12 +38,10 @@ import dota2MatchesRoutes from './routes/dota2Matches';
 const app = new Hono();
 
 // ── Global middleware ──
-app.use('*', compress());
-app.use('*', securityHeaders);
-app.use('*', loggerMiddleware);
+// CORS MUST be first — handles preflight before other middleware
 app.use('*', cors({
   origin: (origin) => {
-    const allowed = (process.env.CORS_ORIGINS || 'http://localhost:5173,http://localhost:5174,http://localhost:5175,http://localhost:3001,https://matchiq.pro,https://www.matchiq.pro,https://matchiq.vercel.app,https://cs-backend-production-f9e8.up.railway.app').split(',');
+    const allowed = (process.env.CORS_ORIGINS || 'http://localhost:5173,http://localhost:5174,http://localhost:5175,http://localhost:5199,http://localhost:3001,https://matchiq.pro,https://www.matchiq.pro,https://matchiq.vercel.app,https://cs-backend-production-f9e8.up.railway.app').split(',');
     if (!origin) return allowed[0];
     // Allow all vercel.app subdomains (Vercel creates per-deployment preview URLs)
     if (origin.endsWith('.vercel.app')) return origin;
@@ -52,6 +50,9 @@ app.use('*', cors({
   },
   credentials: true,
 }));
+app.use('*', compress());
+app.use('*', securityHeaders);
+app.use('*', loggerMiddleware);
 app.use('*', rateLimiterMiddleware);
 app.use('*', bodyLimit(1_000_000)); // 1MB max body
 app.use('*', authMiddleware);

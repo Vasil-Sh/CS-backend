@@ -1,29 +1,45 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Hono } from 'hono';
 import { testClient } from 'hono/testing';
+
+// Mock the betService — tests should NOT require a real database
+vi.mock('../services/betService', () => ({
+  betService: {
+    getBets: vi.fn(() => Promise.resolve({ rows: [], total: 0, page: 1, limit: 10 })),
+    getStats: vi.fn(() => Promise.resolve({ totalBets: 0, wins: 0, totalProfit: 0, totalRoi: 0 })),
+    getProfitByMonth: vi.fn(() => Promise.resolve([])),
+    getProfitByStrategy: vi.fn(() => Promise.resolve([])),
+    createBet: vi.fn(() => Promise.resolve({ id: '1' })),
+    updateBet: vi.fn(() => Promise.resolve(null)),
+    deleteBet: vi.fn(() => Promise.resolve(null)),
+  },
+}));
+
 import betRoutes from './bets';
 
-// Create a minimal Hono app for route testing
-function createTestApp() {
-  const app = new Hono();
+let app: Hono;
 
-  // Mock auth middleware
+beforeEach(() => {
+  vi.clearAllMocks();
+  app = new Hono();
+
+  // Mock auth middleware — inject user into context
   app.use('*', async (c, next) => {
     c.set('user', { userId: 1, username: 'testuser', role: 'user' });
     await next();
   });
 
   app.route('/bets', betRoutes);
-  return app;
-}
+});
 
-const app = createTestApp();
-const client = testClient(app);
+function client() {
+  return testClient(app);
+}
 
 describe('Bets API', () => {
   describe('GET /bets', () => {
     it('returns paginated response structure', async () => {
-      const res = await client.bets.$get({ query: { page: '1', limit: '10' } });
+      const res = await client().bets.$get({ query: { page: '1', limit: '10' } });
       expect(res.status).toBe(200);
       const json = await res.json();
       // When DB is empty, data is empty but structure is correct
@@ -38,7 +54,7 @@ describe('Bets API', () => {
 
   describe('GET /bets/stats', () => {
     it('returns stats structure', async () => {
-      const res = await client.bets.stats.$get();
+      const res = await client().bets.stats.$get();
       expect(res.status).toBe(200);
       const json = await res.json();
       expect(json).toHaveProperty('totalBets');
@@ -51,14 +67,14 @@ describe('Bets API', () => {
 
   describe('POST /bets', () => {
     it('rejects invalid body with 400', async () => {
-      const res = await client.bets.$post({
+      const res = await client().bets.$post({
         json: { invalid: true } as any,
       });
       expect(res.status).toBe(400);
     });
 
     it('rejects missing required fields', async () => {
-      const res = await client.bets.$post({
+      const res = await client().bets.$post({
         json: { match: 'Test Match' } as any,
       });
       expect(res.status).toBe(400);
@@ -67,7 +83,7 @@ describe('Bets API', () => {
 
   describe('PUT /bets/:id', () => {
     it('returns 404 for non-existent bet', async () => {
-      const res = await client.bets[':id'].$put({
+      const res = await client().bets[':id'].$put({
         param: { id: '00000000-0000-0000-0000-000000000000' },
         json: {
           match: 'Updated Match',
@@ -82,7 +98,7 @@ describe('Bets API', () => {
 
   describe('DELETE /bets/:id', () => {
     it('returns 404 for non-existent bet', async () => {
-      const res = await client.bets[':id'].$delete({
+      const res = await client().bets[':id'].$delete({
         param: { id: '00000000-0000-0000-0000-000000000000' },
       });
       expect(res.status).toBe(404);
@@ -91,7 +107,7 @@ describe('Bets API', () => {
 
   describe('PATCH /bets/:id', () => {
     it('accepts partial update (validates via updateBetSchema)', async () => {
-      const res = await client.bets[':id'].$patch({
+      const res = await client().bets[':id'].$patch({
         param: { id: '00000000-0000-0000-0000-000000000000' },
         json: { result: 'Win' as const },
       });
@@ -100,7 +116,7 @@ describe('Bets API', () => {
     });
 
     it('rejects invalid result value', async () => {
-      const res = await client.bets[':id'].$patch({
+      const res = await client().bets[':id'].$patch({
         param: { id: '00000000-0000-0000-0000-000000000000' },
         json: { result: 'InvalidStatus' } as any,
       });

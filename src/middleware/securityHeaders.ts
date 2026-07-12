@@ -34,7 +34,7 @@ export async function securityHeaders(c: Context, next: Next) {
     c.res.headers.set(
       'Content-Security-Policy',
       "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-      "img-src 'self' data: https:; connect-src 'self' https://api.deepseek.com https://api.telegram.org; " +
+      "img-src 'self' data: https:; connect-src 'self' http://localhost:* https://api.deepseek.com https://api.telegram.org; " +
       "frame-ancestors 'none'"
     );
     c.res.headers.set('X-Frame-Options', 'DENY');
