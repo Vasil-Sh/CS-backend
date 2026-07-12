@@ -165,9 +165,9 @@ function extractScoresFromHtml(
     else score2 += allScores[i];
   }
 
-  // Status detection — tips.gg uses <div class="element match live|finished">
-  // The live-scores endpoint confirms this format: /class="element match (\w+)/ 
-  const statusMatch = chunk.match(/class="element match (\w+)"/);
+  // Status detection — tips.gg: <div class="element match finished  visible">
+  // Must handle double-space and extra classes after the status word
+  const statusMatch = chunk.match(/class="[^"]*match\s+(\w+)/);
   const htmlClassStatus = statusMatch?.[1] || '';
   const hasFinished = htmlClassStatus === 'finished';
   const hasLive = htmlClassStatus === 'live';
