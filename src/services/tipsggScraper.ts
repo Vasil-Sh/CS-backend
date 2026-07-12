@@ -86,12 +86,21 @@ function parseStage(desc: string): string {
 }
 
 function parseEventStatus(statusUrl: string): 'upcoming' | 'live' | 'finished' {
-  // Cancelled matches should not be shown — treat as upcoming so frontend can filter
   if (statusUrl.includes('EventCancelled')) return 'upcoming';
   if (statusUrl.includes('EventPostponed')) return 'upcoming';
   if (statusUrl.includes('EventScheduled')) return 'upcoming';
   if (statusUrl.includes('EventRescheduled')) return 'upcoming';
   return 'upcoming';
+}
+
+/**
+ * Normalize match URL from JSON-LD to absolute form for HTML search.
+ * JSON-LD has relative paths like "/matches/dota2/..."
+ * HTML has absolute paths like "https://tips.gg/matches/dota2/..."
+ */
+function normalizeMatchUrl(url: string): string {
+  if (url.startsWith('http')) return url;
+  return `${TIPSGG_BASE}${url.startsWith('/') ? '' : '/'}${url}`;
 }
 
 /**
@@ -103,17 +112,34 @@ function parseEventStatus(statusUrl: string): 'upcoming' | 'live' | 'finished' {
  */
 function extractScoresFromHtml(
   html: string,
-  matchUrl: string,
+  rawMatchUrl: string,
 ): { score1: number | null; score2: number | null; status: 'upcoming' | 'live' | 'finished' } {
-  // Find the exact match block by searching for href="URL" in the HTML
-  // This is more precise than indexOf(matchUrl) which can match substrings
-  const hrefMarker = `href="${matchUrl}"`;
-  let foundIndex = html.indexOf(hrefMarker);
-  if (foundIndex === -1) {
-    // Try without trailing slash
-    const urlNoSlash = matchUrl.replace(/\/$/, '');
-    foundIndex = html.indexOf(`href="${urlNoSlash}"`);
+  // Normalize URLs — JSON-LD gives relative, HTML has absolute
+  const absoluteUrl = normalizeMatchUrl(rawMatchUrl);
+  const relativeUrl = absoluteUrl.startsWith(TIPSGG_BASE)
+    ? absoluteUrl.slice(TIPSGG_BASE.length)
+    : rawMatchUrl;
+
+  // Try both href variants: absolute and relative, with/without trailing slash
+  const hrefMarkers = [
+    `href="${absoluteUrl}"`,
+    `href="${absoluteUrl}/"`,
+    `href="${relativeUrl}"`,
+    `href="${relativeUrl}/"`,
+  ];
+
+  let foundIndex = -1;
+  for (const marker of hrefMarkers) {
+    foundIndex = html.indexOf(marker);
+    if (foundIndex !== -1) break;
   }
+
+  if (foundIndex === -1) {
+    // Last resort: search by slug substring
+    const slug = slugFromUrl(rawMatchUrl);
+    if (slug) foundIndex = html.indexOf(slug);
+  }
+
   if (foundIndex === -1) {
     return { score1: null, score2: null, status: 'upcoming' };
   }
@@ -149,13 +175,13 @@ function extractScoresFromHtml(
 /**
  * Extract tips count from HTML near the match URL.
  */
-function extractTipsCount(html: string, matchUrl: string): number {
-  const urlIndex = html.indexOf(matchUrl);
+function extractTipsCount(html: string, rawMatchUrl: string): number {
+  const absoluteUrl = normalizeMatchUrl(rawMatchUrl);
+  const hrefMarker = `href="${absoluteUrl}"`;
+  const urlIndex = html.indexOf(hrefMarker);
   if (urlIndex === -1) return 0;
 
   const chunk = html.substring(Math.max(0, urlIndex - 500), urlIndex + 500);
-
-  // Pattern: "7 tips" or similar
   const tipsMatch = chunk.match(/(\d+)\s+tips?/i);
   return tipsMatch ? parseInt(tipsMatch[1]) : 0;
 }
@@ -340,7 +366,10 @@ async function fetchCoefficientsFromPredictions(link: string, retries = 2): Prom
 
       // Find bookmakers analysis section (relaxed class match)
       const baIdx = html.indexOf('bookmakers-analysis');
-      if (baIdx === -1) continue;
+      if (baIdx === -1) {
+        // No coefficients section — don't retry, page simply has no odds
+        return null;
+      }
 
       const chunk = html.substring(baIdx, Math.min(html.length, baIdx + 2000));
 
@@ -389,8 +418,12 @@ async function enrichCoefficients(matches: TipsGgMatch[]): Promise<void> {
         if (result) {
           m.coeff1 = result.coeff1;
           m.coeff2 = result.coeff2;
-          m.pred1 = Math.round((1 / result.coeff1) * 100);
-          m.pred2 = Math.round((1 / result.coeff2) * 100);
+          // Don't overwrite pred1/pred2 from JSON-LD — they are more reliable.
+          // Only set from coefficients if JSON-LD didn't provide predictions (50/50 default).
+          if (m.pred1 === 50 && m.pred2 === 50) {
+            m.pred1 = Math.round((1 / result.coeff1) * 100);
+            m.pred2 = Math.round((1 / result.coeff2) * 100);
+          }
           return true;
         }
       } catch { /* skip */ }
@@ -455,8 +488,8 @@ function buildLogoMap(html: string): Map<string, string> {
       if (s) src = s[1];
     }
 
-    // Skip placeholders and default images
-    if (!src || src.startsWith('data:') || src.includes('default') || src.endsWith('.svg')) continue;
+    // Skip placeholders and default images (keep SVGs — some teams have SVG logos)
+    if (!src || src.startsWith('data:') || src.includes('default')) continue;
 
     const teamName = altM[1].replace(/\s*[-–—]\s*Dota 2\s*Team$/i, '').trim();
     if (teamName && !map.has(teamName)) {
