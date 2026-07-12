@@ -80,8 +80,11 @@ function parseMatchType(desc: string): string {
 
 function parseStage(desc: string): string {
   // "BO2 Match. Group A. France. Dota 2 Premier."
+  // Also handles: "BO3 Match. Quarterfinal. Dota 2." etc.
   const parts = desc.split('.').map(s => s.trim());
-  const stagePart = parts.find(p => /group|playoff|final|stage/i.test(p));
+  const stagePart = parts.find(p =>
+    /group|playoff|final|stage|quarter|semi|grand|lower.?bracket|upper.?bracket|decider|tiebreaker/i.test(p)
+  );
   return stagePart || '';
 }
 
@@ -144,14 +147,17 @@ function extractScoresFromHtml(
     return { score1: null, score2: null, status: 'upcoming' };
   }
 
-  // Grab a tight window around the match element
-  const chunkStart = Math.max(0, foundIndex - 800);
-  const chunkEnd = Math.min(html.length, foundIndex + 2000);
+  // Grab a tight window around the match element — small enough to avoid neighbor matches
+  const chunkStart = Math.max(0, foundIndex - 600);
+  const chunkEnd = Math.min(html.length, foundIndex + 1200);
   const chunk = html.substring(chunkStart, chunkEnd);
 
   // Match score elements: <span class="score ...">DIGIT</span>
+  // Only take the first 2 scores found — they belong to this match.
+  // In BO3/BO5, scores might repeat (e.g. "1 1 0 1") but the first 2 are team totals.
   const scoreRegex = /class="score[^"]*">(\d{1,2})<\/span>/gi;
-  const scores = [...chunk.matchAll(scoreRegex)].map(m => parseInt(m[1], 10));
+  const allScores = [...chunk.matchAll(scoreRegex)];
+  const scores = allScores.slice(0, 2).map(m => parseInt(m[1], 10));
 
   // Status detection
   const hasFinished = /class="[^"]*status\s[^"]*finished|class="[^"]*match\s[^"]*finished/i.test(chunk);
@@ -287,6 +293,24 @@ export async function fetchDota2Matches(): Promise<TipsGgMatch[]> {
     }
   }
 
+  // If both today and tomorrow failed, try yesterday — live matches may still be there
+  if (all.length === 0 && todayHtml.status === 'rejected' && tomorrowHtml.status === 'rejected') {
+    const yesterday = formatDateDdMmYyyy(new Date(Date.now() - 86400000));
+    try {
+      const yesterdayHtml = await fetchHtml(`${TIPSGG_BASE}/dota2/matches/${yesterday}/`);
+      const yesterdayMatches = await parseMatchesFromHtml(yesterdayHtml);
+      for (const m of yesterdayMatches) {
+        if (!seen.has(m.id)) {
+          seen.add(m.id);
+          all.push(m);
+        }
+      }
+      console.log(`[tipsgg] Fallback: ${yesterdayMatches.length} matches from yesterday (${yesterday})`);
+    } catch {
+      // Silently fail — yesterday is best-effort
+    }
+  }
+
   // Batch-fetch predictions pages for real coefficients
   await enrichCoefficients(all);
 
@@ -405,8 +429,9 @@ async function fetchCoefficientsFromPredictions(link: string, retries = 2): Prom
 }
 
 async function enrichCoefficients(matches: TipsGgMatch[]): Promise<void> {
-  const CONCURRENCY = 2; // reduced from 3 — less aggressive to avoid rate limiting
-  const BATCH_PAUSE_MS = 1200; // increased pause between batches
+  const CONCURRENCY = 2;
+  const BATCH_PAUSE_MS = 1200;
+  const PER_MATCH_TIMEOUT_MS = 30000; // 30s hard cap per match
   const toFetch = matches.filter(m => m.status !== 'finished');
   let successCount = 0;
 
@@ -414,15 +439,21 @@ async function enrichCoefficients(matches: TipsGgMatch[]): Promise<void> {
     const batch = toFetch.slice(i, i + CONCURRENCY);
     const results = await Promise.allSettled(batch.map(async (m) => {
       try {
-        const result = await fetchCoefficientsFromPredictions(m.link);
+        const result = await Promise.race([
+          fetchCoefficientsFromPredictions(m.link),
+          new Promise<null>(resolve => setTimeout(() => resolve(null), PER_MATCH_TIMEOUT_MS)),
+        ]);
         if (result) {
           m.coeff1 = result.coeff1;
           m.coeff2 = result.coeff2;
-          // Don't overwrite pred1/pred2 from JSON-LD — they are more reliable.
-          // Only set from coefficients if JSON-LD didn't provide predictions (50/50 default).
-          if (m.pred1 === 50 && m.pred2 === 50) {
-            m.pred1 = Math.round((1 / result.coeff1) * 100);
-            m.pred2 = Math.round((1 / result.coeff2) * 100);
+          // Derive normalized predictions from real bookmaker coefficients
+          // Implied probability: 1/coeff, then normalize to sum 100% (remove overround)
+          const imp1 = 1 / result.coeff1;
+          const imp2 = 1 / result.coeff2;
+          const total = imp1 + imp2;
+          if (total > 0) {
+            m.pred1 = Math.round((imp1 / total) * 100);
+            m.pred2 = Math.round((imp2 / total) * 100);
           }
           return true;
         }
