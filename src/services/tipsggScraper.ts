@@ -166,7 +166,7 @@ function extractScoresFromHtml(
   }
 
   // Status detection — tips.gg: <div class="element match finished  visible">
-  // Must handle double-space and extra classes after the status word
+  // Extract the status word after "match " (live/finished) — don't require closing "
   const statusMatch = chunk.match(/class="[^"]*match\s+(\w+)/);
   const htmlClassStatus = statusMatch?.[1] || '';
   const hasFinished = htmlClassStatus === 'finished';
