@@ -147,9 +147,9 @@ function extractScoresFromHtml(
     return { score1: null, score2: null, status: 'upcoming' };
   }
 
-  // Grab a tight window around the match element — small enough to avoid neighbor matches
-  const chunkStart = Math.max(0, foundIndex - 600);
-  const chunkEnd = Math.min(html.length, foundIndex + 1200);
+  // Grab a wide window: need to capture parent <div class="element match ..."> BEFORE href
+  const chunkStart = Math.max(0, foundIndex - 1000);
+  const chunkEnd = Math.min(html.length, foundIndex + 1500);
   const chunk = html.substring(chunkStart, chunkEnd);
 
   // Match score elements: <span class="score ...">DIGIT</span>
@@ -165,12 +165,14 @@ function extractScoresFromHtml(
     else score2 += allScores[i];
   }
 
-  // Status detection — only trust explicit CSS classes, not "Starting" text (appears on all upcoming)
-  const hasFinished = /class="[^"]*status\s[^"]*finished|class="[^"]*match\s[^"]*finished/i.test(chunk);
-  const hasLive = /class="[^"]*status\s[^"]*live|class="[^"]*match\s[^"]*live/i.test(chunk);
+  // Status detection — tips.gg uses <div class="element match live|finished">
+  // The live-scores endpoint confirms this format: /class="element match (\w+)/ 
+  const statusMatch = chunk.match(/class="element match (\w+)"/);
+  const htmlClassStatus = statusMatch?.[1] || '';
+  const hasFinished = htmlClassStatus === 'finished';
+  const hasLive = htmlClassStatus === 'live';
 
   if (allScores.length >= 1) {
-    // At least one score found — return whatever we have
     const allZero = score1 === 0 && score2 === 0;
     return {
       score1,
@@ -178,7 +180,7 @@ function extractScoresFromHtml(
       status: hasFinished ? 'finished'
         : hasLive ? 'live'
         : allZero ? 'upcoming'
-        : 'live', // non-zero scores without finished/live marker = live
+        : 'live', // non-zero scores without live/finished = live (shouldn't happen)
     };
   }
 
