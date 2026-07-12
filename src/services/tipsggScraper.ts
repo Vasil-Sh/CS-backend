@@ -107,70 +107,81 @@ function normalizeMatchUrl(url: string): string {
 }
 
 /**
- * Extract scores from the raw HTML near each match.
- *
- * tips.gg score markup:
- *   <span class="score normal">1</span>
- *   <span class="score normal">1</span>
+ * Extract scores and status from the raw HTML near each match.
+ * Uses JSON-LD block as anchor — it's always immediately after the
+ * <div class="element match finished  visible"> parent.
  */
 function extractScoresFromHtml(
   html: string,
   rawMatchUrl: string,
 ): { score1: number | null; score2: number | null; status: 'upcoming' | 'live' | 'finished' } {
-  // Normalize URLs — JSON-LD gives relative, HTML has absolute
-  const absoluteUrl = normalizeMatchUrl(rawMatchUrl);
-  const relativeUrl = absoluteUrl.startsWith(TIPSGG_BASE)
-    ? absoluteUrl.slice(TIPSGG_BASE.length)
-    : rawMatchUrl;
+  // Strategy: find the JSON-LD script block for this match URL,
+  // then look BACKWARDS to find the parent <div class="element match ...">
+  const slug = slugFromUrl(rawMatchUrl);
+  if (!slug) return { score1: null, score2: null, status: 'upcoming' };
 
-  // Try both href variants: absolute and relative, with/without trailing slash
-  const hrefMarkers = [
-    `href="${absoluteUrl}"`,
-    `href="${absoluteUrl}/"`,
-    `href="${relativeUrl}"`,
-    `href="${relativeUrl}/"`,
-  ];
+  // Find the JSON-LD block containing this match's slug
+  const ldRegex = /<script type="application\/ld\+json">([\s\S]*?)<\/script>/gi;
+  let ldMatch: RegExpExecArray | null;
+  let targetScriptStart = -1;
+  let targetScriptEnd = -1;
 
-  let foundIndex = -1;
-  for (const marker of hrefMarkers) {
-    foundIndex = html.indexOf(marker);
-    if (foundIndex !== -1) break;
+  while ((ldMatch = ldRegex.exec(html)) !== null) {
+    if (ldMatch[1].includes(slug)) {
+      targetScriptStart = ldMatch.index;
+      targetScriptEnd = ldMatch.index + ldMatch[0].length;
+      break;
+    }
   }
 
-  if (foundIndex === -1) {
-    // Last resort: search by slug substring
-    const slug = slugFromUrl(rawMatchUrl);
-    if (slug) foundIndex = html.indexOf(slug);
-  }
-
-  if (foundIndex === -1) {
+  if (targetScriptStart === -1) {
     return { score1: null, score2: null, status: 'upcoming' };
   }
 
-  // Grab a wide window: need to capture parent <div class="element match ..."> BEFORE href
-  const chunkStart = Math.max(0, foundIndex - 1000);
-  const chunkEnd = Math.min(html.length, foundIndex + 1500);
-  const chunk = html.substring(chunkStart, chunkEnd);
+  // Look BACKWARDS up to 600 chars for the parent <div class="element match ...">
+  const beforeStart = Math.max(0, targetScriptStart - 600);
+  const before = html.substring(beforeStart, targetScriptStart);
+  // Don't use /g flag — it drops capture groups. exec() loop gives us the last match.
+  const classRegex = /class="([^"]*)"/g;
+  let lastMatch: RegExpExecArray | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = classRegex.exec(before)) !== null) {
+    if (m[1].includes('match')) lastMatch = m;
+  }
 
-  // Match score elements: <span class="score ...">DIGIT</span>
-  // tips.gg shows per-map scores: for BO3 2-1 → [1,0, 0,1, 1,0]
-  // We need totals: sum even indices (team1) and odd indices (team2)
+  let statusWord = '';
+  if (lastMatch) {
+    const classes = lastMatch[1];
+    const words = classes.split(/\s+/);
+    // Status is the word immediately after "match"
+    const matchIdx = words.indexOf('match');
+    if (matchIdx >= 0 && matchIdx + 1 < words.length) {
+      statusWord = words[matchIdx + 1];
+    }
+  }
+
+  const hasFinished = statusWord === 'finished';
+  const hasLive = statusWord === 'live';
+
+  // Look FORWARD for scores — stop at the next match element boundary
+  const afterEndBoundary = html.indexOf('<div class="element match', targetScriptEnd);
+  const afterEnd = afterEndBoundary > targetScriptEnd
+    ? afterEndBoundary
+    : Math.min(html.length, targetScriptEnd + 3000);
+  const after = html.substring(targetScriptEnd, afterEnd);
+
+  // Also search BEFORE the script (scores are between parent div and JSON-LD)
   const scoreRegex = /class="score[^"]*">(\d{1,2})<\/span>/gi;
-  const allScores = [...chunk.matchAll(scoreRegex)].map(m => parseInt(m[1], 10));
+  const afterScores = [...after.matchAll(scoreRegex)];
+  const beforeScores = [...before.matchAll(scoreRegex)];
+  const allScores = [...beforeScores, ...afterScores].map(m => parseInt(m[1], 10));
 
-  // Compute total scores: team1 = sum of even-index scores, team2 = sum of odd-index
+  // Compute total scores: team1 = even indices, team2 = odd indices
   let score1 = 0, score2 = 0;
   for (let i = 0; i < allScores.length; i++) {
     if (i % 2 === 0) score1 += allScores[i];
     else score2 += allScores[i];
   }
-
-  // Status detection — tips.gg: <div class="element match finished  visible">
-  // Extract the status word after "match " (live/finished) — don't require closing "
-  const statusMatch = chunk.match(/class="[^"]*match\s+(\w+)/);
-  const htmlClassStatus = statusMatch?.[1] || '';
-  const hasFinished = htmlClassStatus === 'finished';
-  const hasLive = htmlClassStatus === 'live';
 
   if (allScores.length >= 1) {
     const allZero = score1 === 0 && score2 === 0;
@@ -180,11 +191,16 @@ function extractScoresFromHtml(
       status: hasFinished ? 'finished'
         : hasLive ? 'live'
         : allZero ? 'upcoming'
-        : 'live', // non-zero scores without live/finished = live (shouldn't happen)
+        : 'live',
     };
   }
 
-  return { score1: null, score2: null, status: 'upcoming' };
+  // No scores found (upcoming match or broken HTML) — still use the status from parent div
+  return {
+    score1: null,
+    score2: null,
+    status: hasFinished ? 'finished' : hasLive ? 'live' : 'upcoming',
+  };
 }
 
 /**
