@@ -41,10 +41,13 @@ const app = new Hono();
 // CORS MUST be first — handles preflight before other middleware
 app.use('*', cors({
   origin: (origin) => {
-    const allowed = (process.env.CORS_ORIGINS || 'http://localhost:5173,http://localhost:5174,http://localhost:5175,http://localhost:5199,http://localhost:3001,https://matchiq.pro,https://www.matchiq.pro,https://matchiq.vercel.app,https://cs-backend-production-f9e8.up.railway.app').split(',');
-    if (!origin) return allowed[0];
-    // Allow all vercel.app subdomains (Vercel creates per-deployment preview URLs)
-    if (origin.endsWith('.vercel.app')) return origin;
+    const isDev = process.env.NODE_ENV !== 'production';
+    const allowed = isDev
+      ? ['http://localhost:5173','http://localhost:5174','http://localhost:5175','http://localhost:5199','http://localhost:3001','https://matchiq.vercel.app']
+      : (process.env.CORS_ORIGINS || 'https://matchiq.pro,https://www.matchiq.pro').split(',');
+    if (!origin) return isDev ? allowed[0] : allowed[0];
+    // Allow all vercel.app subdomains — only in dev/preview
+    if (isDev && origin.endsWith('.vercel.app')) return origin;
     if (allowed.some(a => origin.startsWith(a))) return origin;
     return null;
   },
