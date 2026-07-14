@@ -95,9 +95,9 @@ function parseEventStatus(statusUrl: string, startDate?: string): 'upcoming' | '
     try {
       const start = new Date(startDate).getTime();
       const now = Date.now();
-      // Match started more than 3h ago → probably finished
-      if (start < now - 3 * 60 * 60 * 1000) return 'finished';
-      // Match started but within last 3h → likely live
+      // Match started more than 2h ago → probably finished (Dota2 BO3: ~2h avg, BO5: ~3h)
+      if (start < now - 2 * 60 * 60 * 1000) return 'finished';
+      // Match started but within last 2h → likely live
       if (start < now) return 'live';
     } catch { /* ignore */ }
   }
@@ -246,7 +246,20 @@ async function parseMatchesFromHtml(html: string): Promise<TipsGgMatch[]> {
 
       const { score1, score2, status: htmlStatus } = extractScoresFromHtml(html, ld.url);
       // Trust HTML status detection — time-based fallback is unreliable (delays, finished matches)
-      const status = htmlStatus !== 'upcoming' ? htmlStatus : parseEventStatus(ld.eventStatus, ld.startDate);
+      let status: 'upcoming' | 'live' | 'finished' = htmlStatus !== 'upcoming' ? htmlStatus : parseEventStatus(ld.eventStatus, ld.startDate);
+
+      // Score-based override: if match format is decided by map count, force finished
+      if (status !== 'finished') {
+        const matchType = parseMatchType(description);
+        const s1 = score1 ?? 0, s2 = score2 ?? 0;
+        const winnerScore = Math.max(s1, s2);
+        if ((matchType === 'BO3' && winnerScore >= 2) ||
+            (matchType === 'BO5' && winnerScore >= 3) ||
+            (matchType === 'BO2' && (s1 + s2) >= 2 && winnerScore >= 2) ||
+            (matchType === 'BO1' && (s1 + s2) >= 1 && Math.abs(s1 - s2) >= 1)) {
+          status = 'finished';
+        }
+      }
       const tipsCount = extractTipsCount(html, ld.url);
       const logo1 = getTeamLogo(competitor1.name, competitor1.url, logoMap);
       const logo2 = getTeamLogo(competitor2.name, competitor2.url, logoMap);
