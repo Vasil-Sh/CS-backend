@@ -249,24 +249,27 @@ async function parseMatchesFromHtml(html: string): Promise<TipsGgMatch[]> {
       let status: 'upcoming' | 'live' | 'finished' = htmlStatus !== 'upcoming' ? htmlStatus : parseEventStatus(ld.eventStatus, ld.startDate);
 
       // Score-based override: if match format is decided by map count, force finished
-      if (status !== 'finished') {
-        const matchType = parseMatchType(description);
-        const s1 = score1 ?? 0, s2 = score2 ?? 0;
-        const winnerScore = Math.max(s1, s2);
-        if ((matchType === 'BO3' && winnerScore >= 2) ||
-            (matchType === 'BO5' && winnerScore >= 3) ||
-            (matchType === 'BO2' && (s1 + s2) >= 2 && winnerScore >= 2) ||
-            (matchType === 'BO1' && (s1 + s2) >= 1 && Math.abs(s1 - s2) >= 1)) {
-          status = 'finished';
-        }
+      const matchType = parseMatchType(description);
+      const s1 = score1 ?? 0, s2 = score2 ?? 0;
+      const winnerScore = Math.max(s1, s2);
+      const isScoreDecided =
+        (matchType === 'BO3' && winnerScore >= 2) ||
+        (matchType === 'BO5' && winnerScore >= 3) ||
+        (matchType === 'BO2' && (s1 + s2) >= 2 && winnerScore >= 2) ||
+        (matchType === 'BO1' && (s1 + s2) >= 1 && Math.abs(s1 - s2) >= 1);
+      const hasScores = (s1 + s2) > 0;
+
+      if (isScoreDecided) {
+        status = 'finished';
       }
 
-      // Date-based safety override: if HTML says "live" but match started >2.5h ago, it's probably finished
-      // (tips.gg sometimes doesn't update the class in time)
+      // Date-based safety override: if HTML says "live" but match started >2.5h ago, it's probably finished.
+      // BUT: only if scores confirm it (score decided) OR there are no scores (stale HTML).
+      // If scores show an undecided match (e.g. BO3 1:1), keep "live" regardless of time.
       if (status === 'live') {
         try {
           const start = new Date(ld.startDate).getTime();
-          if (Date.now() - start > 2.5 * 60 * 60 * 1000) {
+          if (Date.now() - start > 2.5 * 60 * 60 * 1000 && (!hasScores || isScoreDecided)) {
             status = 'finished';
           }
         } catch { /* ignore */ }
