@@ -138,8 +138,7 @@ dota2Matches.get('/', async (c) => {
     if (!checkRateLimit(rateLimitKey(c) + '::refresh')) {
       return c.json({ error: 'Too many refresh requests, please wait 60s' }, 429);
     }
-    // Purge cached file — force fresh scrape
-    try { if (existsSync(CACHE_FILE)) unlinkSync(CACHE_FILE); } catch {}
+    // Don't delete cache before refresh — if fresh scrape returns empty, serve stale
   }
 
   try {

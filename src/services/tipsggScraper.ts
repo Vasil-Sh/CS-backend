@@ -686,8 +686,13 @@ const PUPPETEER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.
 
 let _browser: Browser | null = null;
 
+/** Create a fresh browser instance (re-use is broken by Cloudflare detection) */
 async function getBrowser(): Promise<Browser> {
-  if (_browser && _browser.isConnected()) return _browser;
+  // Always create a new browser — Cloudflare detects reused browsers
+  if (_browser) {
+    await _browser.close().catch(() => {});
+    _browser = null;
+  }
   _browser = await puppeteer.launch({
     headless: true,
     args: [
@@ -701,7 +706,7 @@ async function getBrowser(): Promise<Browser> {
   return _browser;
 }
 
-async function fetchHtml(url: string, retries = 2): Promise<string> {
+async function fetchHtml(url: string, retries = 3): Promise<string> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     let page: Page | null = null;
     try {
@@ -723,6 +728,10 @@ async function fetchHtml(url: string, retries = 2): Promise<string> {
       const html = await page.content();
       if (html.length < 2000) {
         throw new Error(`Empty/too-short response (${html.length} bytes)`);
+      }
+      // Detect Cloudflare challenge page
+      if (html.includes('_cf_chl_opt') || html.includes('Just a moment') || html.includes('cf-browser-verify')) {
+        throw new Error('Cloudflare challenge detected — retrying with fresh browser');
       }
       return html;
     } catch (err: any) {
