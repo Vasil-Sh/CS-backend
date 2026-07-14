@@ -35,11 +35,17 @@ publicProfile.get('/:username', async (c) => {
     const totalBets = allBets.length;
     const wins = completedBets.filter((b: any) => b.result === 'Win').length;
     const winRate = completedBets.length > 0 ? Math.round((wins / completedBets.length) * 100) : 0;
-    const totalProfit = completedBets.reduce((sum: number, b: any) => sum + (b.profit || 0), 0);
-    const totalStaked = completedBets.reduce((sum: number, b: any) => sum + (b.amount || 0), 0);
+    // PostgreSQL numeric columns may return strings with commas → normalize
+    const toNum = (v: unknown): number => {
+      if (v === null || v === undefined) return 0;
+      if (typeof v === 'number') return v;
+      return Number(String(v).replace(',', '.'));
+    };
+    const totalProfit = completedBets.reduce((sum: number, b: any) => sum + toNum(b.profit), 0);
+    const totalStaked = completedBets.reduce((sum: number, b: any) => sum + toNum(b.amount), 0);
     const roi = totalStaked > 0 ? Math.round((totalProfit / totalStaked) * 100) : 0;
     const avgOdds = completedBets.length > 0
-      ? Math.round((completedBets.reduce((sum: number, b: any) => sum + Number(b.odds), 0) / completedBets.length) * 100) / 100
+      ? Math.round((completedBets.reduce((sum: number, b: any) => sum + toNum(b.odds), 0) / completedBets.length) * 100) / 100
       : 0;
     const pendingBets = totalBets - completedBets.length;
 
@@ -71,14 +77,14 @@ publicProfile.get('/:username', async (c) => {
       const date = b.date || b.createdAt;
       if (!date) continue;
       const m = String(date).substring(0, 7); // YYYY-MM
-      monthMap.set(m, (monthMap.get(m) || 0) + (b.profit || 0));
+      monthMap.set(m, (monthMap.get(m) || 0) + toNum(b.profit));
     }
     for (const [month, profit] of [...monthMap.entries()].sort()) {
       monthlyProfit.push({ month, profit: Math.round(profit * 100) / 100 });
     }
 
     const currentBank = bankroll
-      ? Number(bankroll.initialBank || 0) + Number(totalProfit)
+      ? toNum(bankroll.initialBank) + totalProfit
       : totalProfit;
 
     const losses = completedBets.filter((b: any) => b.result === 'Loss').length;
@@ -101,8 +107,8 @@ publicProfile.get('/:username', async (c) => {
       recentBets: recentBets.map((b: any) => ({
         match: b.match,
         result: b.result,
-        profit: b.profit,
-        odds: Number(b.odds),
+        profit: toNum(b.profit),
+        odds: toNum(b.odds),
         date: b.date,
         game: b.game,
       })),
