@@ -56,7 +56,7 @@ export const bets = pgTable(
     match: varchar('match', { length: 500 }).notNull(),
     team1: varchar('team1', { length: 200 }).default(''),
     team2: varchar('team2', { length: 200 }).default(''),
-    betType: varchar('bet_type', { length: 100 }).notNull().default('Ординар'),
+    betType: varchar('bet_type', { length: 2000 }).notNull().default('Ординар'),
     odds: numeric('odds', { precision: 10, scale: 3 }).notNull(),
     amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
     stake: numeric('stake', { precision: 12, scale: 2 }),
