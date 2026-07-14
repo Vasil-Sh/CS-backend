@@ -78,7 +78,7 @@ publicProfile.get('/:username', async (c) => {
     }
 
     const currentBank = bankroll
-      ? Number(bankroll.initialBank || 0) + totalProfit
+      ? Number(bankroll.initialBank || 0) + Number(totalProfit)
       : totalProfit;
 
     const losses = completedBets.filter((b: any) => b.result === 'Loss').length;
