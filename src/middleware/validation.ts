@@ -26,7 +26,7 @@ export const createBetSchema = z.object({
   match: z.string().min(1).max(500),
   team1: z.string().max(200).optional().default(''),
   team2: z.string().max(200).optional().default(''),
-  betType: z.string().max(100).default('Ординар'),
+  betType: z.string().max(2000).default('Ординар'),
   odds: z.coerce.number().min(0).max(1000),
   amount: z.coerce.number().min(0),
   stake: z.coerce.number().optional(),

@@ -4,6 +4,9 @@ import { createBetSchema, updateBetSchema } from '../middleware/validation';
 import { getPagination } from '../utils/response';
 import { betService } from '../services/betService';
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isValidUUID(id: string): boolean { return UUID_RE.test(id); }
+
 const bets = new Hono();
 
 // ── GET /api/bets?page=1&limit=50 ──
@@ -28,6 +31,8 @@ bets.post('/', requireAuth, async (c) => {
 bets.put('/:id', requireAuth, async (c) => {
   const user = c.get('user');
   const id = c.req.param('id') || '';
+  // Guard against non-UUID IDs (local_xxx from localStorage backfill)
+  if (!isValidUUID(id)) return c.json({ error: 'Bet not found' }, 404);
   let body;
   try { body = updateBetSchema.parse(await c.req.json()); }
   catch (e: any) { return c.json({ error: 'Invalid input', details: e.errors }, 400); }
@@ -40,6 +45,7 @@ bets.put('/:id', requireAuth, async (c) => {
 bets.patch('/:id', requireAuth, async (c) => {
   const user = c.get('user');
   const id = c.req.param('id') || '';
+  if (!isValidUUID(id)) return c.json({ error: 'Bet not found' }, 404);
   let body;
   try { body = updateBetSchema.parse(await c.req.json()); }
   catch (e: any) { return c.json({ error: 'Invalid input', details: e.errors }, 400); }
@@ -52,6 +58,7 @@ bets.patch('/:id', requireAuth, async (c) => {
 bets.delete('/:id', requireAuth, async (c) => {
   const user = c.get('user');
   const id = c.req.param('id') || '';
+  if (!isValidUUID(id)) return c.json({ error: 'Bet not found' }, 404);
   const deleted = await betService.deleteBet(id, user.userId);
   if (!deleted) return c.json({ error: 'Bet not found' }, 404);
   return c.json({ success: true });
