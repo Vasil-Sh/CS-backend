@@ -23,21 +23,25 @@ publicProfile.get('/:username', async (c) => {
 
     if (!user) return c.json({ error: 'User not found' }, 404);
 
-    // Get all completed bets
-    const bets = await db
+    // Get ALL bets (including pending for total count)
+    const allBets = await db
       .select()
       .from(schema.bets)
-      .where(and(eq(schema.bets.userId, user.id), sql`${schema.bets.result} != 'Pending'`));
+      .where(eq(schema.bets.userId, user.id));
 
-    const totalBets = bets.length;
-    const wins = bets.filter((b: any) => b.result === 'Win').length;
-    const winRate = totalBets > 0 ? Math.round((wins / totalBets) * 100) : 0;
-    const totalProfit = bets.reduce((sum: number, b: any) => sum + (b.profit || 0), 0);
-    const totalStaked = bets.reduce((sum: number, b: any) => sum + (b.amount || 0), 0);
+    // Completed bets only for stats calculations
+    const completedBets = allBets.filter((b: any) => b.result !== 'Pending');
+
+    const totalBets = allBets.length;
+    const wins = completedBets.filter((b: any) => b.result === 'Win').length;
+    const winRate = completedBets.length > 0 ? Math.round((wins / completedBets.length) * 100) : 0;
+    const totalProfit = completedBets.reduce((sum: number, b: any) => sum + (b.profit || 0), 0);
+    const totalStaked = completedBets.reduce((sum: number, b: any) => sum + (b.amount || 0), 0);
     const roi = totalStaked > 0 ? Math.round((totalProfit / totalStaked) * 100) : 0;
-    const avgOdds = totalBets > 0
-      ? Math.round((bets.reduce((sum: number, b: any) => sum + Number(b.odds), 0) / totalBets) * 100) / 100
+    const avgOdds = completedBets.length > 0
+      ? Math.round((completedBets.reduce((sum: number, b: any) => sum + Number(b.odds), 0) / completedBets.length) * 100) / 100
       : 0;
+    const pendingBets = totalBets - completedBets.length;
 
     // Get bankroll
     const [bankroll] = await db
@@ -60,10 +64,10 @@ publicProfile.get('/:username', async (c) => {
       .orderBy(sql`${schema.bets.createdAt} DESC`)
       .limit(5);
 
-    // Monthly profit for chart
+    // Monthly profit for chart (completed only)
     const monthlyProfit: { month: string; profit: number }[] = [];
     const monthMap = new Map<string, number>();
-    for (const b of bets) {
+    for (const b of completedBets) {
       const date = b.date || b.createdAt;
       if (!date) continue;
       const m = String(date).substring(0, 7); // YYYY-MM
@@ -77,12 +81,15 @@ publicProfile.get('/:username', async (c) => {
       ? Number(bankroll.initialBank || 0) + totalProfit
       : totalProfit;
 
+    const losses = completedBets.filter((b: any) => b.result === 'Loss').length;
+
     return c.json({
       username,
       stats: {
         totalBets,
+        pendingBets,
         wins,
-        losses: totalBets - wins,
+        losses,
         winRate,
         totalProfit: Math.round(totalProfit * 100) / 100,
         totalStaked: Math.round(totalStaked * 100) / 100,
