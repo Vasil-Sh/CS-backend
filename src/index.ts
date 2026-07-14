@@ -34,6 +34,7 @@ import riskyTeamRoutes from './routes/riskyTeams';
 import adminRoutes from './routes/admin';
 import adminStatsRoutes from './routes/adminStats';
 import dota2MatchesRoutes from './routes/dota2Matches';
+import publicProfileRoutes from './routes/publicProfile';
 
 const app = new Hono();
 
@@ -155,6 +156,7 @@ v1.route('/risky-teams', riskyTeamRoutes);
 v1.route('/dota2-matches', dota2MatchesRoutes);
 v1.route('', adminRoutes);
 v1.route('', adminStatsRoutes);
+v1.route('/public-profile', publicProfileRoutes);
 
 app.route('/api/v1', v1);
 
