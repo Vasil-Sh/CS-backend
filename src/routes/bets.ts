@@ -22,7 +22,10 @@ bets.post('/', requireAuth, async (c) => {
   const user = c.get('user');
   let body;
   try { body = createBetSchema.parse(await c.req.json()); }
-  catch (e: any) { return c.json({ error: 'Invalid input', details: e.errors }, 400); }
+  catch (e: any) {
+    console.error('[bets] Validation error:', JSON.stringify(e.errors || e.message));
+    return c.json({ error: 'Invalid input', details: e.errors }, 400);
+  }
   const bet = await betService.createBet(user.userId, body);
   return c.json(bet, 201);
 });
