@@ -260,6 +260,17 @@ async function parseMatchesFromHtml(html: string): Promise<TipsGgMatch[]> {
           status = 'finished';
         }
       }
+
+      // Date-based safety override: if HTML says "live" but match started >2.5h ago, it's probably finished
+      // (tips.gg sometimes doesn't update the class in time)
+      if (status === 'live') {
+        try {
+          const start = new Date(ld.startDate).getTime();
+          if (Date.now() - start > 2.5 * 60 * 60 * 1000) {
+            status = 'finished';
+          }
+        } catch { /* ignore */ }
+      }
       const tipsCount = extractTipsCount(html, ld.url);
       const logo1 = getTeamLogo(competitor1.name, competitor1.url, logoMap);
       const logo2 = getTeamLogo(competitor2.name, competitor2.url, logoMap);
