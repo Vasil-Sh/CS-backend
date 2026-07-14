@@ -35,6 +35,7 @@ import adminRoutes from './routes/admin';
 import adminStatsRoutes from './routes/adminStats';
 import dota2MatchesRoutes from './routes/dota2Matches';
 import publicProfileRoutes from './routes/publicProfile';
+import { closeBrowser } from './services/tipsggScraper';
 
 const app = new Hono();
 
@@ -188,6 +189,8 @@ const shutdown = async (signal: string) => {
   } catch (err) {
     console.error('❌ Error closing DB pool:', err);
   }
+  closeBrowser();
+  console.log('✅ Puppeteer browser closed');
   process.exit(0);
 };
 

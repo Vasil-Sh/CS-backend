@@ -7,12 +7,8 @@
  * Works without login — tips.gg serves public data in <script type="application/ld+json">.
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { z } from 'zod';
 import { isOpen, recordSuccess, recordFailure } from './circuitBreaker';
-
-const execFileAsync = promisify(execFile);
 
 const TIPSGG_BASE = 'https://tips.gg';
 
@@ -88,11 +84,24 @@ function parseStage(desc: string): string {
   return stagePart || '';
 }
 
-function parseEventStatus(statusUrl: string): 'upcoming' | 'live' | 'finished' {
+function parseEventStatus(statusUrl: string, startDate?: string): 'upcoming' | 'live' | 'finished' {
   if (statusUrl.includes('EventCancelled')) return 'upcoming';
   if (statusUrl.includes('EventPostponed')) return 'upcoming';
   if (statusUrl.includes('EventScheduled')) return 'upcoming';
   if (statusUrl.includes('EventRescheduled')) return 'upcoming';
+
+  // Date-based fallback: if startDate is in the past, match is likely live
+  if (startDate) {
+    try {
+      const start = new Date(startDate).getTime();
+      const now = Date.now();
+      // Match started more than 3h ago → probably finished
+      if (start < now - 3 * 60 * 60 * 1000) return 'finished';
+      // Match started but within last 3h → likely live
+      if (start < now) return 'live';
+    } catch { /* ignore */ }
+  }
+
   return 'upcoming';
 }
 
@@ -148,6 +157,16 @@ function extractScoresFromHtml(
     const lastClass = divMatch[divMatch.length - 1];
     const statusMatch = lastClass.match(/match\s+(\w+)/);
     statusWord = statusMatch?.[1] || '';
+  }
+
+  // Also search for "live" or "finished" anywhere in nearby class attributes
+  if (!statusWord) {
+    const nearDivs = beforeForDiv.match(/class="([^"]*\b(live|finished)\b[^"]*)"/gi);
+    if (nearDivs) {
+      const last = nearDivs[nearDivs.length - 1];
+      if (/finished/i.test(last)) statusWord = 'finished';
+      else if (/live/i.test(last)) statusWord = 'live';
+    }
   }
 
   const hasFinished = statusWord === 'finished';
@@ -227,7 +246,7 @@ async function parseMatchesFromHtml(html: string): Promise<TipsGgMatch[]> {
 
       const { score1, score2, status: htmlStatus } = extractScoresFromHtml(html, ld.url);
       // Trust HTML status detection — time-based fallback is unreliable (delays, finished matches)
-      const status = htmlStatus !== 'upcoming' ? htmlStatus : parseEventStatus(ld.eventStatus);
+      const status = htmlStatus !== 'upcoming' ? htmlStatus : parseEventStatus(ld.eventStatus, ld.startDate);
       const tipsCount = extractTipsCount(html, ld.url);
       const logo1 = getTeamLogo(competitor1.name, competitor1.url, logoMap);
       const logo2 = getTeamLogo(competitor2.name, competitor2.url, logoMap);
@@ -249,7 +268,7 @@ async function parseMatchesFromHtml(html: string): Promise<TipsGgMatch[]> {
         logoTeam2: logo2,
         tournament: ld.organizer?.name || '',
         stage: parseStage(description),
-        status: status !== 'upcoming' ? status : parseEventStatus(ld.eventStatus),
+        status: status !== 'upcoming' ? status : parseEventStatus(ld.eventStatus, ld.startDate),
         tipsCount,
         performer: ld.performer?.name || null,
         startDate: ld.startDate,
@@ -379,7 +398,7 @@ export async function fetchDota2MatchDetail(matchUrl: string): Promise<TipsGgMat
     logoTeam2: getTeamLogo(competitor2.name, competitor2.url, logoMap),
     tournament: ld.organizer?.name || '',
     stage: parseStage(description),
-    status: status !== 'upcoming' ? status : parseEventStatus(ld.eventStatus),
+    status: status !== 'upcoming' ? status : parseEventStatus(ld.eventStatus, ld.startDate),
     tipsCount: 0,
     performer: ld.performer?.name || null,
     startDate: ld.startDate,
@@ -632,40 +651,69 @@ function formatDateDdMmYyyy(d: Date): string {
   return `${dd}-${mm}-${yyyy}`;
 }
 
-// ── HTTP fetch via curl (bypasses Cloudflare TLS fingerprinting) ──
+// ── HTTP fetch via Puppeteer (bypasses Cloudflare JS challenge) ──
 
-const CURL_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
+import puppeteer, { type Browser, type Page } from 'puppeteer';
 
-async function fetchHtml(url: string, retries = 3): Promise<string> {
+const PUPPETEER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
+
+let _browser: Browser | null = null;
+
+async function getBrowser(): Promise<Browser> {
+  if (_browser && _browser.isConnected()) return _browser;
+  _browser = await puppeteer.launch({
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-blink-features=AutomationControlled',
+    ],
+  });
+  return _browser;
+}
+
+async function fetchHtml(url: string, retries = 2): Promise<string> {
   for (let attempt = 0; attempt <= retries; attempt++) {
+    let page: Page | null = null;
     try {
       if (attempt > 0) {
-        // Exponential backoff: 1s, 2s, 4s
-        await new Promise(r => setTimeout(r, Math.pow(2, attempt - 1) * 1000));
+        await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 1000));
       }
-      const { stdout } = await execFileAsync('curl', [
-        '-s', '-L', // silent, follow redirects
-        '--max-time', '25', // increased from 15s — tips.gg can be slow
-        '--connect-timeout', '10',
-        '-H', `User-Agent: ${CURL_UA}`,
-        '-H', 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        '-H', 'Accept-Language: en-US,en;q=0.9,uk;q=0.8',
-        '-H', 'Cache-Control: no-cache',
-        url,
-      ], { maxBuffer: 10 * 1024 * 1024, timeout: 30000 });
-      // Detect Cloudflare challenge / empty pages
-      if (stdout.length < 500) {
-        throw new Error(`Empty/too-short response (${stdout.length} bytes)${stdout.includes('cf-') ? ' — Cloudflare challenge' : ''}`);
+      const browser = await getBrowser();
+      page = await browser.newPage();
+      await page.setUserAgent(PUPPETEER_UA);
+      await page.setViewport({ width: 1920, height: 1080 });
+      await page.setExtraHTTPHeaders({
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9,uk;q=0.8',
+      });
+      // Navigate and wait for content (Cloudflare challenge resolves automatically)
+      await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+      // Extra wait for dynamic content
+      await new Promise(r => setTimeout(r, 2000));
+      const html = await page.content();
+      if (html.length < 2000) {
+        throw new Error(`Empty/too-short response (${html.length} bytes)`);
       }
-      return stdout;
+      return html;
     } catch (err: any) {
-      // curl returns non-zero exit code on HTTP errors but still outputs HTML
-      if (err.stdout && err.stdout.length > 2000) return err.stdout;
       if (attempt === retries) {
-        const msg = err.stderr || err.message || 'unknown';
-        throw new Error(`curl failed for ${url}: ${msg}`);
+        const msg = err.message || 'unknown';
+        throw new Error(`Puppeteer failed for ${url}: ${msg}`);
       }
+    } finally {
+      if (page) await page.close().catch(() => {});
     }
   }
-  throw new Error(`curl failed for ${url} after ${retries} retries`);
+  throw new Error(`Puppeteer failed for ${url} after ${retries} retries`);
+}
+
+/** Clean up browser on process exit */
+export async function closeBrowser(): Promise<void> {
+  if (_browser) {
+    await _browser.close().catch(() => {});
+    _browser = null;
+  }
 }
