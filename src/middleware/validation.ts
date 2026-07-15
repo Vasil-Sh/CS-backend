@@ -41,7 +41,7 @@ export const createBetSchema = z.object({
   exchangeRate: z.coerce.number().optional().nullable(),
   originalProfit: z.coerce.number().optional(),
   roi: z.coerce.number().optional(),
-  goalId: z.string().optional().default(''),
+  goalId: z.coerce.string().optional().default(''),
   selection: z.string().max(200).optional().default(''),
   matchUrl: z.string().max(500).optional().default(''),
   winProbability: z.coerce.number().min(0).max(100).optional(),
