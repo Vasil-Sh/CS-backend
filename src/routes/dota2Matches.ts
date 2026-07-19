@@ -206,6 +206,60 @@ dota2Matches.get('/health', async (c) => {
   return c.json({ ok, checks });
 });
 
+// GET /api/dota2-matches/live-scores — lightweight live score updates
+// Uses native fetch() (no Puppeteer) — fast enough for 30s polling.
+// Parses the tips.gg listing page HTML for score spans and match statuses.
+dota2Matches.get('/live-scores', async (c) => {
+  try {
+    const today = new Date();
+    const dd = String(today.getDate()).padStart(2, '0');
+    const mm = String(today.getMonth() + 1).padStart(2, '0');
+    const yyyy = today.getFullYear();
+    const url = `https://tips.gg/dota2/matches/${dd}-${mm}-${yyyy}/`;
+
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html',
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return c.json({ error: 'Upstream unavailable' }, 502);
+    const html = await res.text();
+
+    const liveUpdates: Array<{ id: string; score1: number | null; score2: number | null; status: string }> = [];
+
+    // Split into match blocks — each block contains one match card
+    const matchBlocks = html.split(/class="element match/).slice(1);
+
+    for (const block of matchBlocks) {
+      // Extract status from class attribute
+      const statusMatch = block.match(/^\s*(\w+)/);
+      const status = statusMatch?.[1] || 'upcoming';
+
+      // Extract slug from href (same pattern as slugFromUrl in scraper)
+      const urlMatch = block.match(/href="\/matches\/dota2\/[^"]+\/([a-z0-9]+(?:-[a-z0-9]+)*?(?:-vs-[a-z0-9]+(?:-[a-z0-9]+)*?))\/"/i);
+      if (!urlMatch) continue;
+      const id = urlMatch[1];
+
+      // Extract scores from class="score ...">N</span>
+      const scoreRegex = /class="score[^"]*">(\d{1,2})<\/span>/gi;
+      const scores = [...block.matchAll(scoreRegex)].map(m => parseInt(m[1], 10));
+
+      liveUpdates.push({
+        id,
+        score1: scores[0] ?? null,
+        score2: scores[1] ?? null,
+        status,
+      });
+    }
+
+    return c.json(liveUpdates);
+  } catch {
+    return c.json({ error: 'Failed' }, 502);
+  }
+});
+
 // GET /api/dota2-matches/logo/:filename — proxy team logos via Puppeteer browser context
 dota2Matches.get('/logo/:filename', async (c) => {
   const logoPath = c.req.param('filename');
