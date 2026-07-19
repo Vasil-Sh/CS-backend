@@ -524,7 +524,17 @@ async function enrichCoefficients(matches: TipsGgMatch[]): Promise<void> {
   const CONCURRENCY = 2;
   const BATCH_PAUSE_MS = 1200;
   const PER_MATCH_TIMEOUT_MS = 30000; // 30s hard cap per match
-  const toFetch = matches.filter(m => m.status !== 'finished');
+  const now = Date.now();
+  const MAX_FUTURE_MS = 48 * 60 * 60 * 1000; // 48h — skip matches starting too far in the future
+  const toFetch = matches.filter(m => {
+    if (m.status === 'finished') return false;
+    // Skip matches starting more than 48h from now (predictions page may not exist yet)
+    try {
+      const start = new Date(m.startDate).getTime();
+      if (start - now > MAX_FUTURE_MS) return false;
+    } catch { /* include if date is unparseable */ }
+    return true;
+  });
   let successCount = 0;
 
   for (let i = 0; i < toFetch.length; i += CONCURRENCY) {
@@ -685,10 +695,17 @@ import puppeteer, { type Browser, type Page } from 'puppeteer';
 const PUPPETEER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
 
 let _browser: Browser | null = null;
+let _browserAge = 0; // ms since launch — rotate periodically to avoid memory leaks
+const MAX_BROWSER_AGE = 15 * 60 * 1000; // 15 min — rotate to prevent memory creep
 
-/** Create a fresh browser instance (re-use is broken by Cloudflare detection) */
+/** Get or create a shared browser instance. Pages are ephemeral; browser is long-lived. */
 async function getBrowser(): Promise<Browser> {
-  // Always create a new browser — Cloudflare detects reused browsers
+  const now = Date.now();
+  // Rotate periodically to prevent memory creep from leaked contexts
+  if (_browser && _browser.isConnected() && (now - _browserAge) < MAX_BROWSER_AGE) {
+    return _browser;
+  }
+  // Close old browser if any
   if (_browser) {
     await _browser.close().catch(() => {});
     _browser = null;
@@ -701,12 +718,15 @@ async function getBrowser(): Promise<Browser> {
       '--disable-dev-shm-usage',
       '--disable-gpu',
       '--disable-blink-features=AutomationControlled',
+      '--headless=new',
+      '--window-position=-32000,-32000',
     ],
   });
+  _browserAge = now;
   return _browser;
 }
 
-async function fetchHtml(url: string, retries = 3): Promise<string> {
+export async function fetchHtml(url: string, retries = 3): Promise<string> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     let page: Page | null = null;
     try {
@@ -723,24 +743,31 @@ async function fetchHtml(url: string, retries = 3): Promise<string> {
       });
       // Navigate and wait for content (Cloudflare challenge resolves automatically)
       await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-      // Extra wait for dynamic content
-      await new Promise(r => setTimeout(r, 2000));
+      // Wait for JSON-LD to appear (reliable content-ready signal) — fallback to timeout
+      try {
+        await page.waitForSelector('script[type="application/ld+json"]', { timeout: 8000 });
+      } catch { /* no JSON-LD detected — page may have loaded differently, proceed anyway */ }
       const html = await page.content();
       if (html.length < 2000) {
         throw new Error(`Empty/too-short response (${html.length} bytes)`);
       }
-      // Detect Cloudflare challenge page
+      // Detect Cloudflare challenge page — if so, close page and retry
       if (html.includes('_cf_chl_opt') || html.includes('Just a moment') || html.includes('cf-browser-verify')) {
-        throw new Error('Cloudflare challenge detected — retrying with fresh browser');
+        await page.close().catch(() => {});
+        throw new Error('Cloudflare challenge detected — retrying');
+      }
+      // Validate that actual match content is present
+      if (!html.includes('class="element match') && !html.includes('application/ld+json')) {
+        await page.close().catch(() => {});
+        throw new Error(`Page loaded but no Dota 2 match data found (${html.length} bytes)`);
       }
       return html;
     } catch (err: any) {
+      if (page) await page.close().catch(() => {});
       if (attempt === retries) {
         const msg = err.message || 'unknown';
         throw new Error(`Puppeteer failed for ${url}: ${msg}`);
       }
-    } finally {
-      if (page) await page.close().catch(() => {});
     }
   }
   throw new Error(`Puppeteer failed for ${url} after ${retries} retries`);

@@ -4,8 +4,8 @@
  */
 
 import { Hono } from 'hono';
-import { fetchDota2Matches, fetchDota2MatchDetail, type TipsGgMatch } from '../services/tipsggScraper';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
+import { fetchDota2Matches, fetchDota2MatchDetail, fetchHtml, type TipsGgMatch } from '../services/tipsggScraper';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordFailure } from '../services/circuitBreaker';
 
@@ -43,14 +43,28 @@ function writeFileCacheInternal(data: unknown, key = CACHE_FILE): void {
   try {
     ensureCacheDir();
     const entry: CacheEntry<unknown> = { data, ts: Date.now(), from: 'fresh' };
-    writeFileSync(key, JSON.stringify(entry), 'utf-8');
+    // Atomic write: write to temp file, then rename (atomic on most filesystems)
+    const tmp = key + '.tmp';
+    writeFileSync(tmp, JSON.stringify(entry), 'utf-8');
+    // On Windows, rename fails if target exists — remove first
+    try { if (existsSync(key)) unlinkSync(key); } catch {}
+    renameSync(tmp, key);
   } catch { /* ignore */ }
 }
 
 // ── Rate limiter ──
 const RATE_LIMIT_WINDOW = 30000; // 30s
 const RATE_LIMIT_MAX = 5;        // max 5 requests per window
+const RATE_CLEANUP_INTERVAL = 60_000; // clean expired buckets every 60s
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+
+// Periodic cleanup of expired rate-limit buckets
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, bucket] of rateBuckets) {
+    if (now > bucket.resetAt) rateBuckets.delete(key);
+  }
+}, RATE_CLEANUP_INTERVAL).unref(); // unref so it doesn't keep the process alive
 
 function checkRateLimit(key: string): boolean {
   const now = Date.now();
@@ -109,12 +123,13 @@ async function getMatchesWithSWR(): Promise<{ data: TipsGgMatch[]; fromCache: bo
     return { data: memResult.data, fromCache: true };
   }
 
-  // 4. No cache — wait for refresh
-  const fresh = await refreshPromise;
+  // 4. No cache — wait for refresh (snapshot promise before .finally() nulls it)
+  const capturedPromise = refreshPromise;
+  const fresh = await capturedPromise;
   if (fresh && fresh.length > 0) return { data: fresh, fromCache: false };
 
-  // 5. Fresh empty → try stale
-  const staleResult = readFileCache<TipsGgMatch[]>(24 * 60 * 60 * 1000, CACHE_FILE);
+  // 5. Fresh empty → try stale (use CACHE_TTL_STALE, not hardcoded 24h)
+  const staleResult = readFileCache<TipsGgMatch[]>(CACHE_TTL_STALE, CACHE_FILE);
   if (staleResult && staleResult.data.length > 0) {
     console.warn('[dota2Matches] Serving stale cache (graceful degradation)');
     return { data: staleResult.data, fromCache: true };
@@ -153,56 +168,6 @@ dota2Matches.get('/', async (c) => {
   }
 });
 
-// GET /api/dota2-matches/live-scores — lightweight live score updates
-dota2Matches.get('/live-scores', async (c) => {
-  try {
-    const today = new Date();
-    const dd = String(today.getDate()).padStart(2, '0');
-    const mm = String(today.getMonth() + 1).padStart(2, '0');
-    const yyyy = today.getFullYear();
-    const url = `https://tips.gg/dota2/matches/${dd}-${mm}-${yyyy}/`;
-
-    const { execFile } = await import('node:child_process');
-    const { promisify } = await import('node:util');
-    const execFileAsync = promisify(execFile);
-    const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
-
-    const { stdout: html } = await execFileAsync('curl', [
-      '-s', '-L', '--max-time', '15',
-      '-H', `User-Agent: ${UA}`,
-      '-H', 'Accept: text/html',
-      url,
-    ], { maxBuffer: 5 * 1024 * 1024, timeout: 20000 });
-
-    const scoreRegex = /class="score[^"]*">(\d{1,2})<\/span>/gi;
-    const liveUpdates: Array<{ id: string; score1: number | null; score2: number | null; status: string }> = [];
-    
-    const matchBlocks = html.split(/class="element match/).slice(1);
-    
-    for (const block of matchBlocks) {
-      const statusMatch = block.match(/class="element match (\w+)/);
-      const status = statusMatch?.[1] || 'upcoming';
-      
-      const urlMatch = block.match(/href="\/matches\/dota2\/[^"]+\/([a-z0-9-]+-vs-[a-z0-9-]+)\//);
-      if (!urlMatch) continue;
-      
-      const id = urlMatch[1];
-      const scores = [...block.matchAll(scoreRegex)].map(m => parseInt(m[1], 10));
-      
-      liveUpdates.push({
-        id,
-        score1: scores[0] ?? null,
-        score2: scores[1] ?? null,
-        status,
-      });
-    }
-
-    return c.json(liveUpdates);
-  } catch (e) {
-    return c.json({ error: 'Failed' }, 502);
-  }
-});
-
 // GET /api/dota2-matches/health — validates scraper HTML structure
 dota2Matches.get('/health', async (c) => {
   const checks: Record<string, boolean | string> = {};
@@ -216,18 +181,15 @@ dota2Matches.get('/health', async (c) => {
     const url = `https://tips.gg/dota2/matches/${dd}-${mm}-${yyyy}/`;
 
     // Use a fresh fetch (no retry needed for health check)
-    const { execFile } = await import('node:child_process');
-    const { promisify } = await import('node:util');
-    const execFileAsync = promisify(execFile);
-    const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
-    
-    const { stdout } = await execFileAsync('curl', [
-      '-s', '-L', '--max-time', '10',
-      '-H', `User-Agent: ${UA}`,
-      '-H', 'Accept: text/html',
-      url,
-    ], { maxBuffer: 5 * 1024 * 1024, timeout: 15000 });
-    
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html',
+      },
+      signal: AbortSignal.timeout(15000),
+    });
+    const stdout = await res.text();
+
     checks['html_response'] = stdout.length > 5000;
     checks['json_ld'] = stdout.includes('application/ld+json');
     checks['json_ld_count'] = String((stdout.match(/application\/ld\+json/gi) || []).length);
@@ -244,39 +206,75 @@ dota2Matches.get('/health', async (c) => {
   return c.json({ ok, checks });
 });
 
-// GET /api/dota2-matches/logo/* — proxy team logos through backend
-dota2Matches.get('/logo/*', async (c) => {
-  const logoPath = c.req.param('*');
+// GET /api/dota2-matches/logo/:filename — proxy team logos via Puppeteer browser context
+dota2Matches.get('/logo/:filename', async (c) => {
+  const logoPath = c.req.param('filename');
   if (!logoPath) return c.json({ error: 'Missing path' }, 400);
 
   const logoUrl = `https://files.tips.gg/static/image/teams/${logoPath}`;
-  
-  try {
-    const { execFile } = await import('node:child_process');
-    const { promisify } = await import('node:util');
-    const execFileAsync = promisify(execFile);
-    const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
-    
-    const { stdout } = await execFileAsync('curl', [
-      '-s', '-L', '--max-time', '10',
-      '-H', `User-Agent: ${UA}`,
-      '-H', 'Referer: https://tips.gg/',
-      '--output', '-',
-      logoUrl,
-    ], { maxBuffer: 512 * 1024, timeout: 12000, encoding: 'buffer' });
-    
-    if (!stdout || stdout.length === 0) {
-      return c.json({ error: 'Not found' }, 404);
-    }
+  const cacheFile = join(CACHE_DIR, `logo_${logoPath.replaceAll('/', '_')}`);
 
-    return new Response(stdout, {
-      headers: {
-        'Content-Type': 'image/png',
-        'Cache-Control': 'public, max-age=86400',
-        'Access-Control-Allow-Origin': '*',
-      },
+  // Serve from disk cache
+  const cached = readFileCache<{ data: number[] }>(86400_000, cacheFile); // 24h
+  if (cached && !cached.stale) {
+    return new Response(Uint8Array.from(cached.data.data), {
+      headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400', 'Access-Control-Allow-Origin': '*' },
     });
-  } catch (e) {
+  }
+
+  // Fetch via Puppeteer page.evaluate (bypasses CDN hotlink with real browser context)
+  try {
+    const { getBrowser } = await import('../services/tipsggScraper');
+    const browser = await getBrowser();
+    const page = await browser.newPage();
+    try {
+      // First navigate to tips.gg to get session cookies, then fetch CDN image
+      await page.goto('https://tips.gg/dota2/matches/', { waitUntil: 'networkidle0', timeout: 20000 });
+      
+      const base64 = await page.evaluate(async (url: string) => {
+        try {
+          const res = await fetch(url);
+          if (!res.ok) return null;
+          const blob = await res.blob();
+          return await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result as string);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          });
+        } catch { return null; }
+      }, logoUrl);
+
+      await page.close().catch(() => {});
+
+      if (!base64 || !base64.startsWith('data:image/')) {
+        if (cached) {
+          return new Response(Uint8Array.from(cached.data.data), {
+            headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=3600', 'Access-Control-Allow-Origin': '*' },
+          });
+        }
+        return c.json({ error: 'Not found' }, 404);
+      }
+
+      // Convert base64 data URL to buffer
+      const base64Data = base64.split(',')[1];
+      const buffer = Buffer.from(base64Data, 'base64');
+
+      // Cache to disk
+      writeFileCacheInternal({ data: Array.from(buffer) }, cacheFile);
+
+      return new Response(buffer, {
+        headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400', 'Access-Control-Allow-Origin': '*' },
+      });
+    } finally {
+      await page.close().catch(() => {});
+    }
+  } catch {
+    if (cached) {
+      return new Response(Uint8Array.from(cached.data.data), {
+        headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=3600', 'Access-Control-Allow-Origin': '*' },
+      });
+    }
     return c.json({ error: 'Failed to fetch logo' }, 502);
   }
 });

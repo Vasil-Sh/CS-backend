@@ -36,6 +36,7 @@ import adminStatsRoutes from './routes/adminStats';
 import dota2MatchesRoutes from './routes/dota2Matches';
 import publicProfileRoutes from './routes/publicProfile';
 import { closeBrowser } from './services/tipsggScraper';
+import { fetchDota2Matches } from './services/tipsggScraper';
 
 const app = new Hono();
 
@@ -179,6 +180,13 @@ app.notFound((c) => {
 const port = parseInt(process.env.PORT || '3001', 10);
 
 console.log(`🚀 MatchIQ API server starting on http://localhost:${port}`);
+
+// ── Cache warmup: pre-fetch Dota2 matches in background ──
+setTimeout(() => {
+  fetchDota2Matches()
+    .then(n => console.log(`[warmup] Dota2 cache primed: ${n.length} matches`))
+    .catch(e => console.warn('[warmup] Dota2 fetch failed:', (e as Error).message));
+}, 500);
 
 // ── Graceful shutdown ──
 const shutdown = async (signal: string) => {

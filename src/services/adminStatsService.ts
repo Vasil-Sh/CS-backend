@@ -54,6 +54,18 @@ export class AdminStatsService {
          ORDER BY end_date`
       );
 
+      const recentResult = await client.query(
+        `SELECT username, created_at, price_month::int as price
+         FROM users WHERE role = 'user'
+         ORDER BY created_at DESC LIMIT 8`
+      );
+
+      const planResult = await client.query(
+        `SELECT price_month::int as price, COUNT(*) as count
+         FROM users WHERE role = 'user'
+         GROUP BY price_month ORDER BY price_month`
+      );
+
       const totalUsers = Number(totalRow?.total ?? 0);
       const activeUsers = Number(activeRow?.count ?? 0);
 
@@ -76,6 +88,15 @@ export class AdminStatsService {
           endDate: r.end_date ? new Date(r.end_date).toISOString().split('T')[0] : '',
           priceMonth: r.price_month,
         })),
+        recentRegistrations: recentResult.rows.map((r: any) => ({
+          username: r.username,
+          date: r.created_at ? new Date(r.created_at).toISOString().split('T')[0] : '',
+          price: r.price,
+        })),
+        planDistribution: planResult.rows.map((r: any) => ({
+          price: r.price,
+          count: Number(r.count),
+        })),
       };
     } finally {
       client.release();
@@ -90,6 +111,8 @@ export interface AdminStats {
   registrationsByMonth: { month: string; count: number }[];
   topUsers: { username: string; telegram: string; revenue: number; endDate: string }[];
   expiringSubscriptions: { username: string; telegram: string; endDate: string; priceMonth: number }[];
+  recentRegistrations: { username: string; date: string; price: number }[];
+  planDistribution: { price: number; count: number }[];
 }
 
 export const adminStatsService = new AdminStatsService();
