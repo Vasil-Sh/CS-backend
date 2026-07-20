@@ -99,9 +99,23 @@ class LiveScoresStore {
           if (!isNaN(val)) scores.push(val);
         });
 
-        // Time-independent live detection: if tips.gg shows score elements
-        // but hasn't updated the CSS class yet (lag), infer "live".
+        // Score-based status inference (heuristic — no match type info available):
+        // When tips.gg CSS lags behind actual match state, infer from scores.
         if (status === 'upcoming' && scores.length >= 1) status = 'live';
+
+        // Compute cumulative scores (even=team1, odd=team2 maps)
+        let c1 = 0, c2 = 0;
+        for (let i = 0; i < scores.length; i++) {
+          if (i % 2 === 0) c1 += scores[i];
+          else c2 += scores[i];
+        }
+        const bestOf = Math.max(c1, c2);
+        const diff = Math.abs(c1 - c2);
+
+        // BO3: 2 wins, BO5: 3 wins, BO2: 2 maps played, BO1: 1-0 diff
+        if (bestOf >= 3 && diff >= 1) status = 'finished';        // BO5 3-0/3-1/3-2
+        else if (bestOf >= 2 && diff >= 1) status = 'finished';   // BO3 2-0/2-1 or BO2 2-0
+        else if (scores.length === 2 && bestOf >= 1 && diff >= 1 && status !== 'upcoming') status = 'finished'; // BO1 1-0
 
         newStore.set(id, {
           id,

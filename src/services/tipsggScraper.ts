@@ -159,16 +159,18 @@ function extractScoresFromHtml(
     else score2 += scores[i];
   }
 
-  // Score-based live detection: if tips.gg shows score elements but hasn't
+  // Score-based status inference: if tips.gg shows score elements but hasn't
   // updated the CSS class yet (lag between match start and DOM update),
-  // infer "live" from score presence — even if scores are 0-0.
+  // infer status from scores. parseMatchesFromHtml will apply format-specific
+  // finished detection (BO3=2, BO5=3, etc.)
   if (scores.length >= 1) {
     const allZero = score1 === 0 && score2 === 0;
     return {
       score1,
       score2,
       status: status !== 'upcoming' ? status
-        : 'live', // ← score elements exist → match IS being tracked → live
+        : allZero ? 'live'       // 0-0 with score elements → live match just started
+        : 'live',                // non-zero scores → live (finished decided upstream)
     };
   }
 
