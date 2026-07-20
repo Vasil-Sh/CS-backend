@@ -284,53 +284,67 @@ export async function fetchDota2Matches(): Promise<TipsGgMatch[]> {
 
   const startTime = Date.now();
   const today = formatDateDdMmYyyy(new Date());
-  const tomorrow = formatDateDdMmYyyy(new Date(Date.now() + 86400000));
 
-  const [todayHtml, tomorrowHtml] = await Promise.allSettled([
-    fetchHtml(`${TIPSGG_BASE}/dota2/matches/${today}/`),
-    fetchHtml(`${TIPSGG_BASE}/dota2/matches/${tomorrow}/`),
-  ]);
+  // Build 7 dates: today + next 6 days
+  const dates: string[] = [];
+  for (let i = 0; i < 7; i++) {
+    dates.push(formatDateDdMmYyyy(new Date(Date.now() + i * 86400000)));
+  }
 
-  const htmlTime = Date.now();
-
-  const todayMatches = todayHtml.status === 'fulfilled'
-    ? await parseMatchesFromHtml(todayHtml.value)
-    : [];
-  const tomorrowMatches = tomorrowHtml.status === 'fulfilled'
-    ? await parseMatchesFromHtml(tomorrowHtml.value)
-    : [];
-
-  const parseTime = Date.now();
-
-  // Merge & dedup by id
-  const seen = new Set<string>();
-  const all: TipsGgMatch[] = [];
-  for (const m of [...todayMatches, ...tomorrowMatches]) {
-    if (!seen.has(m.id)) {
-      seen.add(m.id);
-      all.push(m);
+  // Fetch all 7 days with concurrency limit of 3 (avoid overwhelming tips.gg)
+  const CONCURRENCY = 3;
+  const results: { date: string; html: string | null }[] = [];
+  for (let i = 0; i < dates.length; i += CONCURRENCY) {
+    const batch = dates.slice(i, i + CONCURRENCY);
+    const batchResults = await Promise.allSettled(
+      batch.map(async (date) => {
+        const url = `${TIPSGG_BASE}/dota2/matches/${date}/`;
+        return { date, html: await fetchHtml(url) };
+      }),
+    );
+    for (const r of batchResults) {
+      if (r.status === 'fulfilled') results.push(r.value);
+      else results.push({ date: '', html: null });
     }
   }
 
-  // If both today and tomorrow failed, try yesterday — live matches may still be there
-  if (all.length === 0 && todayHtml.status === 'rejected' && tomorrowHtml.status === 'rejected') {
-    const yesterday = formatDateDdMmYyyy(new Date(Date.now() - 86400000));
+  const htmlTime = Date.now();
+
+  // Parse each day's HTML
+  const seen = new Set<string>();
+  const all: TipsGgMatch[] = [];
+  const dayCounts: string[] = [];
+  for (const { date, html } of results) {
+    if (!html) continue;
+    const dayMatches = await parseMatchesFromHtml(html);
+    dayCounts.push(`${dayMatches.length} ${date}`);
+    for (const m of dayMatches) {
+      if (!seen.has(m.id)) {
+        seen.add(m.id);
+        all.push(m);
+      }
+    }
+  }
+
+  // If all 7 days returned nothing, try the main listing page as last resort
+  if (all.length === 0) {
     try {
-      const yesterdayHtml = await fetchHtml(`${TIPSGG_BASE}/dota2/matches/${yesterday}/`);
-      const yesterdayMatches = await parseMatchesFromHtml(yesterdayHtml);
-      for (const m of yesterdayMatches) {
+      const mainHtml = await fetchHtml(`${TIPSGG_BASE}/dota2/matches/`);
+      const mainMatches = await parseMatchesFromHtml(mainHtml);
+      for (const m of mainMatches) {
         if (!seen.has(m.id)) {
           seen.add(m.id);
           all.push(m);
         }
       }
-      console.log(`[tipsgg] Fallback: ${yesterdayMatches.length} matches from yesterday (${yesterday})`);
+      console.log(`[tipsgg] Fallback: ${mainMatches.length} matches from main listing`);
     } catch {
-      // Silently fail — yesterday is best-effort
+      // Silently fail — fallback is best-effort
     }
   }
 
   // Batch-fetch predictions pages for real coefficients
+  const coeffsStart = Date.now();
   await enrichCoefficients(all);
 
   const totalTime = Date.now();
@@ -338,10 +352,10 @@ export async function fetchDota2Matches(): Promise<TipsGgMatch[]> {
 
   console.log(
     `[tipsgg] Done: ${all.length} matches ` +
-    `(${todayMatches.length} today, ${tomorrowMatches.length} tomorrow) | ` +
+    `(${dayCounts.join(', ')}) | ` +
     `coeffs: ${withCoeffs}/${all.length} | ` +
-    `html: ${htmlTime - startTime}ms parse: ${parseTime - htmlTime}ms ` +
-    `coeffs: ${totalTime - parseTime}ms total: ${totalTime - startTime}ms`
+    `html: ${htmlTime - startTime}ms ` +
+    `coeffs: ${totalTime - coeffsStart}ms total: ${totalTime - startTime}ms`
   );
 
   recordSuccess(CIRCUIT_NAME);
