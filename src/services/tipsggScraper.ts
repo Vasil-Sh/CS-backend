@@ -450,14 +450,16 @@ async function fetchCoefficientsFromPredictions(link: string, retries = 2): Prom
       // Find bookmakers analysis counters section
       // New tips.gg structure (2026-07): <div class="bookmakers-analysis-counters">
       // containing <div class="team team-first"> / <div class="team team-second">
-      // with <span class="avg-odd">N.NN</span> inside
-      const baIdx = html.indexOf('bookmakers-analysis-counters');
+      // with <span class="avg-odd">N.NN</span> inside.
+      // NOTE: Must search for the HTML element, not the string — CSS selectors match first.
+      let baIdx = html.indexOf('<div class="bookmakers-analysis-counters">');
+      if (baIdx === -1) baIdx = html.indexOf('class="bookmakers-analysis-counters"');
       if (baIdx === -1) {
         // No coefficients section — page simply has no odds
         return null;
       }
 
-      const chunk = html.substring(baIdx, Math.min(html.length, baIdx + 2000));
+      const chunk = html.substring(baIdx, Math.min(html.length, baIdx + 3000));
 
       // Try named team patterns first
       const firstNamed = chunk.match(/team-first[\s\S]*?avg-odd">([\d.]+)<\/span>/i);
