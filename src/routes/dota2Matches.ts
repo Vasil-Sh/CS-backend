@@ -207,8 +207,8 @@ dota2Matches.get('/health', async (c) => {
 });
 
 // GET /api/dota2-matches/live-scores — lightweight live score updates
-// Uses native fetch() (no Puppeteer) — fast enough for 30s polling.
-// Parses the tips.gg listing page HTML for score spans and match statuses.
+// Uses Puppeteer fetchHtml() (bypasses Cloudflare), but reuses the shared browser.
+// Fast enough for 30s polling — only one page load, no coefficient enrichment.
 dota2Matches.get('/live-scores', async (c) => {
   try {
     const today = new Date();
@@ -217,15 +217,7 @@ dota2Matches.get('/live-scores', async (c) => {
     const yyyy = today.getFullYear();
     const url = `https://tips.gg/dota2/matches/${dd}-${mm}-${yyyy}/`;
 
-    const res = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'text/html',
-      },
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!res.ok) return c.json({ error: 'Upstream unavailable' }, 502);
-    const html = await res.text();
+    const html = await fetchHtml(url, 1); // 1 retry only — quick fail
 
     const liveUpdates: Array<{ id: string; score1: number | null; score2: number | null; status: string }> = [];
 
@@ -255,8 +247,10 @@ dota2Matches.get('/live-scores', async (c) => {
     }
 
     return c.json(liveUpdates);
-  } catch {
-    return c.json({ error: 'Failed' }, 502);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[live-scores] Failed:', msg);
+    return c.json({ error: 'Failed', detail: msg }, 502);
   }
 });
 
