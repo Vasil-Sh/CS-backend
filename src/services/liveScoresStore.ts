@@ -1,0 +1,122 @@
+/**
+ * LiveScoresStore — In-memory background worker for Dota2 live scores.
+ *
+ * Runs a background setInterval that fetches tips.gg listing page via Puppeteer
+ * once every 30s, parses scores/status with Cheerio, and stores results in a Map.
+ *
+ * The /live-scores endpoint reads from this Map — no Puppeteer on the hot path.
+ * Response time: <1ms (RAM) vs ~5-10s (Puppeteer).
+ */
+
+import * as cheerio from 'cheerio';
+import { fetchHtml } from './tipsggScraper';
+
+export interface LiveScoreState {
+  id: string;
+  score1: number | null;
+  score2: number | null;
+  status: string;
+}
+
+class LiveScoresStore {
+  private store = new Map<string, LiveScoreState>();
+  private isUpdating = false;
+  private intervalId: ReturnType<typeof setInterval> | null = null;
+  private lastUpdate = 0;
+
+  /** Start the background worker. Idempotent — safe to call multiple times. */
+  startBackgroundWorker(intervalMs = 30000): void {
+    if (this.intervalId) return;
+
+    // Initial fetch immediately
+    this.updateScores();
+
+    this.intervalId = setInterval(() => {
+      this.updateScores();
+    }, intervalMs);
+
+    // Don't keep the process alive just for this
+    if (this.intervalId && typeof this.intervalId === 'object' && 'unref' in this.intervalId) {
+      (this.intervalId as NodeJS.Timeout).unref();
+    }
+
+    console.log('[LiveScoresStore] Background worker started (interval:', intervalMs, 'ms)');
+  }
+
+  /** Stop the background worker. */
+  stopBackgroundWorker(): void {
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
+  }
+
+  /** Get current live scores snapshot. O(1) read — no I/O. */
+  getScores(): LiveScoreState[] {
+    return Array.from(this.store.values());
+  }
+
+  /** Get age of last successful update in ms. Useful for health checks. */
+  getLastUpdateAge(): number {
+    return this.lastUpdate ? Date.now() - this.lastUpdate : Infinity;
+  }
+
+  private async updateScores(): Promise<void> {
+    if (this.isUpdating) return; // Prevent overlapping fetches
+    this.isUpdating = true;
+
+    try {
+      const today = new Date();
+      const dd = String(today.getDate()).padStart(2, '0');
+      const mm = String(today.getMonth() + 1).padStart(2, '0');
+      const yyyy = today.getFullYear();
+      const url = `https://tips.gg/dota2/matches/${dd}-${mm}-${yyyy}/`;
+
+      const html = await fetchHtml(url, 1);
+      if (!html) return;
+
+      const $ = cheerio.load(html);
+      const newStore = new Map<string, LiveScoreState>();
+
+      $('.element.match').each((_, el) => {
+        const $match = $(el);
+
+        // Status from CSS class
+        let status = 'upcoming';
+        if ($match.hasClass('finished')) status = 'finished';
+        else if ($match.hasClass('live')) status = 'live';
+
+        // Slug from match link href
+        const href = $match.find('a.match-link').attr('href') || '';
+        const parts = href.replace(/\/$/, '').split('/');
+        const id = parts[parts.length - 2] || parts[parts.length - 1] || '';
+        if (!id) return;
+
+        // Scores from .scores .score
+        const scores: number[] = [];
+        $match.find('.scores .score').each((_, scoreEl) => {
+          const val = parseInt($(scoreEl).text().trim(), 10);
+          if (!isNaN(val)) scores.push(val);
+        });
+
+        newStore.set(id, {
+          id,
+          score1: scores.length > 0 ? scores[0] : null,
+          score2: scores.length > 1 ? scores[1] : null,
+          status,
+        });
+      });
+
+      if (newStore.size > 0) {
+        this.store = newStore;
+        this.lastUpdate = Date.now();
+      }
+    } catch (err) {
+      console.error('[LiveScoresStore] Background update failed:', (err as Error).message);
+    } finally {
+      this.isUpdating = false;
+    }
+  }
+}
+
+export const liveScoresStore = new LiveScoresStore();

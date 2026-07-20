@@ -8,6 +8,8 @@
  */
 
 import { z } from 'zod';
+import * as cheerio from 'cheerio';
+import { getCachedCoefficients, setCachedCoefficients } from './coefficientsCache';
 import { isOpen, recordSuccess, recordFailure } from './circuitBreaker';
 
 const TIPSGG_BASE = 'https://tips.gg';
@@ -116,101 +118,59 @@ function normalizeMatchUrl(url: string): string {
 }
 
 /**
- * Extract scores and status from the raw HTML near each match.
- * Uses JSON-LD block as anchor — it's always immediately after the
- * <div class="element match finished  visible"> parent.
+ * Extract scores and status from the HTML near each match.
+ * Uses Cheerio to parse the DOM — robust against HTML layout changes.
+ * Selectors based on tips.gg real DOM (verified 2026-07-20):
+ *   Container: div.element.match (with status class: finished/live/upcoming)
+ *   Match URL: a.match-link[href]
+ *   Scores: div.scores > span.score (text content = score value)
  */
 function extractScoresFromHtml(
   html: string,
   rawMatchUrl: string,
 ): { score1: number | null; score2: number | null; status: 'upcoming' | 'live' | 'finished' } {
-  // Strategy: find the JSON-LD script block for this match URL,
-  // then look BACKWARDS to find the parent <div class="element match ...">
   const slug = slugFromUrl(rawMatchUrl);
   if (!slug) return { score1: null, score2: null, status: 'upcoming' };
 
-  // Find the JSON-LD block containing this match's slug
-  const ldRegex = /<script type="application\/ld\+json">([\s\S]*?)<\/script>/gi;
-  let ldMatch: RegExpExecArray | null;
-  let targetScriptStart = -1;
-  let targetScriptEnd = -1;
+  const $ = cheerio.load(html);
 
-  while ((ldMatch = ldRegex.exec(html)) !== null) {
-    if (ldMatch[1].includes(slug)) {
-      targetScriptStart = ldMatch.index;
-      targetScriptEnd = ldMatch.index + ldMatch[0].length;
-      break;
-    }
-  }
-
-  if (targetScriptStart === -1) {
+  // Find the match container with the matching slug in its href
+  const $match = $(`.element.match:has(a.match-link[href*="${slug}"])`).first();
+  if ($match.length === 0) {
     return { score1: null, score2: null, status: 'upcoming' };
   }
 
-  // Find parent status class — tips.gg: <div class="element match finished  visible">
-  // Search backward from the script to find the class with "match" in it
-  const beforeForDiv = html.substring(0, targetScriptStart);
-  const divMatch = beforeForDiv.match(/class="[^"]*match\s+(\w+)/g);
-  let statusWord = '';
-  if (divMatch) {
-    // Take the LAST match (closest to the script)
-    const lastClass = divMatch[divMatch.length - 1];
-    const statusMatch = lastClass.match(/match\s+(\w+)/);
-    statusWord = statusMatch?.[1] || '';
-  }
+  // Extract status from CSS classes on the container
+  let status: 'upcoming' | 'live' | 'finished' = 'upcoming';
+  if ($match.hasClass('finished')) status = 'finished';
+  else if ($match.hasClass('live')) status = 'live';
 
-  // Also search for "live" or "finished" anywhere in nearby class attributes
-  if (!statusWord) {
-    const nearDivs = beforeForDiv.match(/class="([^"]*\b(live|finished)\b[^"]*)"/gi);
-    if (nearDivs) {
-      const last = nearDivs[nearDivs.length - 1];
-      if (/finished/i.test(last)) statusWord = 'finished';
-      else if (/live/i.test(last)) statusWord = 'live';
-    }
-  }
+  // Extract scores from .scores .score spans
+  const scores: number[] = [];
+  $match.find('.scores .score').each((_, el) => {
+    const val = parseInt($(el).text().trim(), 10);
+    if (!isNaN(val)) scores.push(val);
+  });
 
-  const hasFinished = statusWord === 'finished';
-  const hasLive = statusWord === 'live';
-
-  // Look FORWARD for scores — stop at the next match element boundary
-  const afterEndBoundary = html.indexOf('<div class="element match', targetScriptEnd);
-  const afterEnd = afterEndBoundary > targetScriptEnd
-    ? afterEndBoundary
-    : Math.min(html.length, targetScriptEnd + 3000);
-  const after = html.substring(targetScriptEnd, afterEnd);
-
-  // Also search BEFORE the script (scores are between parent div and JSON-LD)
-  const beforeChunk = html.substring(Math.max(0, targetScriptStart - 1200), targetScriptStart);
-  const scoreRegex = /class="score[^"]*">(\d{1,2})<\/span>/gi;
-  const afterScores = [...after.matchAll(scoreRegex)];
-  const beforeScores = [...beforeChunk.matchAll(scoreRegex)];
-  const allScores = [...beforeScores, ...afterScores].map(m => parseInt(m[1], 10));
-
-  // Compute total scores: team1 = even indices, team2 = odd indices
+  // team1 = even indices, team2 = odd indices (map-level cumulative)
   let score1 = 0, score2 = 0;
-  for (let i = 0; i < allScores.length; i++) {
-    if (i % 2 === 0) score1 += allScores[i];
-    else score2 += allScores[i];
+  for (let i = 0; i < scores.length; i++) {
+    if (i % 2 === 0) score1 += scores[i];
+    else score2 += scores[i];
   }
 
-  if (allScores.length >= 1) {
+  if (scores.length >= 1) {
     const allZero = score1 === 0 && score2 === 0;
     return {
       score1,
       score2,
-      status: hasFinished ? 'finished'
-        : hasLive ? 'live'
+      status: status !== 'upcoming' ? status
         : allZero ? 'upcoming'
         : 'live',
     };
   }
 
-  // No scores found (upcoming match or broken HTML) — still use the status from parent div
-  return {
-    score1: null,
-    score2: null,
-    status: hasFinished ? 'finished' : hasLive ? 'live' : 'upcoming',
-  };
+  return { score1: null, score2: null, status };
 }
 
 /**
@@ -462,6 +422,12 @@ export async function fetchDota2MatchDetail(matchUrl: string): Promise<TipsGgMat
  * team-first = team1, team-second = team2 (skip team-draw).
  */
 async function fetchCoefficientsFromPredictions(link: string, retries = 2): Promise<{ coeff1: number; coeff2: number } | null> {
+  const slug = slugFromUrl(link);
+
+  // Check file cache first — coefficients change slowly (~20 min TTL)
+  const cached = getCachedCoefficients(slug);
+  if (cached) return cached;
+
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const predPath = link.endsWith('/') ? link + 'predictions/' : link + '/predictions/';
@@ -484,7 +450,9 @@ async function fetchCoefficientsFromPredictions(link: string, retries = 2): Prom
       const firstNamed = chunk.match(/team-first[\s\S]*?avg-odd">([\d.]+)<\/span>/i);
       const secondNamed = chunk.match(/team-second[\s\S]*?avg-odd">([\d.]+)<\/span>/i);
       if (firstNamed && secondNamed) {
-        return { coeff1: parseFloat(firstNamed[1]), coeff2: parseFloat(secondNamed[1]) };
+        const result = { coeff1: parseFloat(firstNamed[1]), coeff2: parseFloat(secondNamed[1]) };
+        setCachedCoefficients(slug, result.coeff1, result.coeff2);
+        return result;
       }
 
       // Fallback: grab all avg-odd values, skip team-draw
@@ -499,7 +467,9 @@ async function fetchCoefficientsFromPredictions(link: string, retries = 2): Prom
       }
 
       if (nonDrawOdds.length >= 2) {
-        return { coeff1: nonDrawOdds[0], coeff2: nonDrawOdds[1] };
+        const result = { coeff1: nonDrawOdds[0], coeff2: nonDrawOdds[1] };
+        setCachedCoefficients(slug, result.coeff1, result.coeff2);
+        return result;
       }
 
       // No odds matched — retry with backoff if attempts remain

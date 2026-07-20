@@ -37,6 +37,7 @@ import dota2MatchesRoutes from './routes/dota2Matches';
 import publicProfileRoutes from './routes/publicProfile';
 import { closeBrowser } from './services/tipsggScraper';
 import { fetchDota2Matches } from './services/tipsggScraper';
+import { liveScoresStore } from './services/liveScoresStore';
 
 const app = new Hono();
 
@@ -187,6 +188,10 @@ setTimeout(() => {
     .then(n => console.log(`[warmup] Dota2 cache primed: ${n.length} matches`))
     .catch(e => console.warn('[warmup] Dota2 fetch failed:', (e as Error).message));
 }, 500);
+
+// ── Live scores background worker: polls tips.gg every 30s ──
+// Keeps in-memory store fresh so /live-scores returns <1ms
+liveScoresStore.startBackgroundWorker(30000);
 
 // ── Graceful shutdown ──
 const shutdown = async (signal: string) => {
