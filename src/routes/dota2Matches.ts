@@ -129,20 +129,15 @@ async function getMatchesWithSWR(): Promise<{ data: TipsGgMatch[]; fromCache: bo
     return { data: memResult.data, fromCache: true };
   }
 
-  // 4. No cache — wait for refresh (snapshot promise before .finally() nulls it)
-  const capturedPromise = refreshPromise;
-  const fresh = await capturedPromise;
-  if (fresh && fresh.length > 0) return { data: fresh, fromCache: false };
-
-  // 5. Fresh empty → try stale (use CACHE_TTL_STALE, not hardcoded 24h)
-  const staleResult = readFileCache<TipsGgMatch[]>(CACHE_TTL_STALE, CACHE_FILE);
-  if (staleResult && staleResult.data.length > 0) {
-    console.warn('[dota2Matches] Serving stale cache (graceful degradation)');
-    return { data: staleResult.data, fromCache: true };
+  // 4. No cache — start refresh in background, don't block the request.
+  // The warmup in index.ts usually prevents this path, but if warmup failed:
+  // return empty immediately, and the next request will get cached data.
+  if (!memResult) {
+    console.log('[dota2Matches] Cold start — serving empty, refresh runs in background');
+    return { data: [], fromCache: false };
   }
 
-  if (fresh) return { data: fresh, fromCache: false };
-  throw new Error('No cached data available and refresh failed');
+  // (unreachable — memResult was handled in step 3)
 }
 
 // ── Routes ──

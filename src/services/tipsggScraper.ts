@@ -447,14 +447,13 @@ async function fetchCoefficientsFromPredictions(link: string, retries = 2): Prom
       const predPath = link.endsWith('/') ? link + 'predictions/' : link + '/predictions/';
       const html = await fetchHtml(`${TIPSGG_BASE}${predPath}`);
 
-      // Find bookmakers analysis section (relaxed class match)
-      const baIdx = html.indexOf('bookmakers-analysis');
+      // Find bookmakers analysis counters section
+      // New tips.gg structure (2026-07): <div class="bookmakers-analysis-counters">
+      // containing <div class="team team-first"> / <div class="team team-second">
+      // with <span class="avg-odd">N.NN</span> inside
+      const baIdx = html.indexOf('bookmakers-analysis-counters');
       if (baIdx === -1) {
         // No coefficients section — page simply has no odds
-        // Log a sample URL once to help debug
-        if (!link.includes('debugged-predictions')) {
-          console.warn(`[tipsgg] No bookmakers-analysis for ${link} — predictions page may have changed layout`);
-        }
         return null;
       }
 
@@ -490,10 +489,10 @@ async function fetchCoefficientsFromPredictions(link: string, retries = 2): Prom
       if (attempt < retries) {
         await new Promise(r => setTimeout(r, (attempt + 1) * 500));
       } else {
-        // Log diagnostic: found bookmakers-analysis but couldn't extract any odds
+        // Log diagnostic: found bookmakers-analysis-counters but couldn't extract odds
         const odc = (html.match(/avg-odd/gi) || []).length;
-        const bam = (html.match(/bookmakers-analysis/gi) || []).length;
-        console.warn(`[tipsgg] Coefficients extraction failed for ${link} — bookmakers-analyses: ${bam}, avg-odd spans: ${odc}`);
+        const bam = (html.match(/bookmakers-analysis-counters/gi) || []).length;
+        console.warn(`[tipsgg] Coefficients extraction failed for ${link} — bookmakers-counters: ${bam}, avg-odd spans: ${odc}`);
         return null;
       }
     } catch {
