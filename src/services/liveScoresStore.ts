@@ -99,6 +99,10 @@ class LiveScoresStore {
           if (!isNaN(val)) scores.push(val);
         });
 
+        // Time-independent live detection: if tips.gg shows score elements
+        // but hasn't updated the CSS class yet (lag), infer "live".
+        if (status === 'upcoming' && scores.length >= 1) status = 'live';
+
         newStore.set(id, {
           id,
           score1: scores.length > 0 ? scores[0] : null,
