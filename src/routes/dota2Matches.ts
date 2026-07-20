@@ -25,6 +25,7 @@ function ensureCacheDir(): void {
 interface CacheEntry<T> {
   data: T;
   ts: number;
+  day: string; // YYYY-MM-DD — auto-invalidates on date change
   from: 'fresh' | 'stale';
 }
 
@@ -33,6 +34,9 @@ function readFileCache<T>(maxAge: number, key = CACHE_FILE): { data: T; stale: b
     if (!existsSync(key)) return null;
     const raw = readFileSync(key, 'utf-8');
     const entry: CacheEntry<T> = JSON.parse(raw);
+    const today = new Date().toISOString().split('T')[0];
+    // Auto-invalidate if cache is from a different day
+    if (entry.day && entry.day !== today) return null;
     const age = Date.now() - entry.ts;
     if (age < maxAge) return { data: entry.data, stale: false };
     // Return as stale (graceful degradation)
@@ -43,7 +47,8 @@ function readFileCache<T>(maxAge: number, key = CACHE_FILE): { data: T; stale: b
 function writeFileCacheInternal(data: unknown, key = CACHE_FILE): void {
   try {
     ensureCacheDir();
-    const entry: CacheEntry<unknown> = { data, ts: Date.now(), from: 'fresh' };
+    const today = new Date().toISOString().split('T')[0];
+    const entry: CacheEntry<unknown> = { data, ts: Date.now(), day: today, from: 'fresh' };
     // Atomic write: write to temp file, then rename (atomic on most filesystems)
     const tmp = key + '.tmp';
     writeFileSync(tmp, JSON.stringify(entry), 'utf-8');
