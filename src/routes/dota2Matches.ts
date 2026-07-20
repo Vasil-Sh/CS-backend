@@ -230,53 +230,26 @@ dota2Matches.get('/logo/:filename', async (c) => {
     });
   }
 
-  // Fetch via Puppeteer page.evaluate (bypasses CDN hotlink with real browser context)
+  // Fetch via plain Node.js fetch() with Referer header — CDN only checks hotlink, not Cloudflare
   try {
-    const { getBrowser } = await import('../services/tipsggScraper');
-    const browser = await getBrowser();
-    const page = await browser.newPage();
-    try {
-      // First navigate to tips.gg to get session cookies, then fetch CDN image
-      await page.goto('https://tips.gg/dota2/matches/', { waitUntil: 'networkidle0', timeout: 20000 });
-      
-      const base64 = await page.evaluate(async (url: string) => {
-        try {
-          const res = await fetch(url);
-          if (!res.ok) return null;
-          const blob = await res.blob();
-          return await new Promise<string>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve(reader.result as string);
-            reader.onerror = reject;
-            reader.readAsDataURL(blob);
-          });
-        } catch { return null; }
-      }, logoUrl);
+    const res = await fetch(logoUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://tips.gg/',
+        'Accept': 'image/png,image/*',
+      },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) throw new Error(`Upstream ${res.status}`);
+    const arrayBuffer = await res.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
 
-      await page.close().catch(() => {});
+    // Cache to disk (as raw buffer, not number[] JSON)
+    writeFileCacheInternal({ type: 'buffer', data: Array.from(new Uint8Array(arrayBuffer)) }, cacheFile);
 
-      if (!base64 || !base64.startsWith('data:image/')) {
-        if (cached) {
-          return new Response(Uint8Array.from(cached.data.data), {
-            headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=3600', 'Access-Control-Allow-Origin': '*' },
-          });
-        }
-        return c.json({ error: 'Not found' }, 404);
-      }
-
-      // Convert base64 data URL to buffer
-      const base64Data = base64.split(',')[1];
-      const buffer = Buffer.from(base64Data, 'base64');
-
-      // Cache to disk
-      writeFileCacheInternal({ data: Array.from(buffer) }, cacheFile);
-
-      return new Response(buffer, {
-        headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400', 'Access-Control-Allow-Origin': '*' },
-      });
-    } finally {
-      await page.close().catch(() => {});
-    }
+    return new Response(buffer, {
+      headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400', 'Access-Control-Allow-Origin': '*' },
+    });
   } catch {
     if (cached) {
       return new Response(Uint8Array.from(cached.data.data), {
