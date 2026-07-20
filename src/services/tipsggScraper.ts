@@ -672,8 +672,13 @@ const MAX_BROWSER_AGE = 15 * 60 * 1000; // 15 min — rotate to prevent memory c
 async function getBrowser(): Promise<Browser> {
   const now = Date.now();
   // Rotate periodically to prevent memory creep from leaked contexts
-  if (_browser && _browser.isConnected() && (now - _browserAge) < MAX_BROWSER_AGE) {
-    return _browser;
+  if (_browser && (now - _browserAge) < MAX_BROWSER_AGE) {
+    try {
+      if (_browser.isConnected()) return _browser;
+    } catch {
+      // Browser process died (e.g. external kill) — recreate below
+      _browser = null;
+    }
   }
   // Close old browser if any
   if (_browser) {
