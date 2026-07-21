@@ -4,7 +4,7 @@
  */
 
 import { Hono } from 'hono';
-import { fetchDota2Matches, fetchDota2MatchDetail, fetchHtml, type TipsGgMatch } from '../services/tipsggScraper';
+import { fetchDota2Matches, fetchDota2MatchDetail, fetchHtml, getBrowser, type TipsGgMatch } from '../services/tipsggScraper';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordFailure } from '../services/circuitBreaker';
@@ -215,6 +215,7 @@ dota2Matches.get('/live-scores', (c) => {
 });
 
 // GET /api/dota2-matches/logo/:filename — proxy team logos via Puppeteer browser context
+// tips.gg CDN blocks plain fetch() — must use real browser to bypass
 dota2Matches.get('/logo/:filename', async (c) => {
   const logoPath = c.req.param('filename');
   if (!logoPath) return c.json({ error: 'Missing path' }, 400);
@@ -230,22 +231,35 @@ dota2Matches.get('/logo/:filename', async (c) => {
     });
   }
 
-  // Fetch via plain Node.js fetch() with Referer header — CDN only checks hotlink, not Cloudflare
+  // Fetch via Puppeteer — CDN requires real browser, plain fetch() is blocked
   try {
-    const res = await fetch(logoUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://tips.gg/',
-        'Accept': 'image/png,image/*',
-      },
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!res.ok) throw new Error(`Upstream ${res.status}`);
-    const arrayBuffer = await res.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
+    const browser = await getBrowser();
+    const page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36');
 
-    // Cache to disk (as raw buffer, not number[] JSON)
-    writeFileCacheInternal({ type: 'buffer', data: Array.from(new Uint8Array(arrayBuffer)) }, cacheFile);
+    const base64DataUrl = await page.evaluate(async (url: string): Promise<string | null> => {
+      try {
+        const res = await fetch(url, { headers: { 'Referer': 'https://tips.gg/' } });
+        if (!res.ok) return null;
+        const blob = await res.blob();
+        return new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = () => resolve(null);
+          reader.readAsDataURL(blob);
+        });
+      } catch { return null; }
+    }, logoUrl);
+
+    await page.close().catch(() => {});
+
+    if (!base64DataUrl) throw new Error('Puppeteer fetch returned null');
+
+    const base64Data = base64DataUrl.replace(/^data:image\/\w+;base64,/, '');
+    const buffer = Buffer.from(base64Data, 'base64');
+
+    // Cache to disk
+    writeFileCacheInternal({ type: 'buffer', data: Array.from(new Uint8Array(buffer)) }, cacheFile);
 
     return new Response(buffer, {
       headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400', 'Access-Control-Allow-Origin': '*' },

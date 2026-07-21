@@ -700,7 +700,7 @@ let _browserAge = 0; // ms since launch — rotate periodically to avoid memory 
 const MAX_BROWSER_AGE = 15 * 60 * 1000; // 15 min — rotate to prevent memory creep
 
 /** Get or create a shared browser instance. Pages are ephemeral; browser is long-lived. */
-async function getBrowser(): Promise<Browser> {
+export async function getBrowser(): Promise<Browser> {
   const now = Date.now();
   // Rotate periodically to prevent memory creep from leaked contexts
   if (_browser && (now - _browserAge) < MAX_BROWSER_AGE) {
