@@ -34,10 +34,12 @@ import riskyTeamRoutes from './routes/riskyTeams';
 import adminRoutes from './routes/admin';
 import adminStatsRoutes from './routes/adminStats';
 import dota2MatchesRoutes from './routes/dota2Matches';
+import cs2MatchesRoutes from './routes/cs2Matches';
 import publicProfileRoutes from './routes/publicProfile';
 import { closeBrowser } from './services/tipsggScraper';
-import { fetchDota2Matches } from './services/tipsggScraper';
+import { fetchDota2Matches, fetchCs2Matches } from './services/tipsggScraper';
 import { liveScoresStore } from './services/liveScoresStore';
+import { cs2LiveScoresStore } from './services/cs2LiveScoresStore';
 
 const app = new Hono();
 
@@ -157,6 +159,7 @@ v1.route('/tilt-blocks', tiltBlocksRoutes);
 v1.route('/user', userPrefsRoutes);
 v1.route('/risky-teams', riskyTeamRoutes);
 v1.route('/dota2-matches', dota2MatchesRoutes);
+v1.route('/cs2-matches', cs2MatchesRoutes);
 v1.route('', adminRoutes);
 v1.route('', adminStatsRoutes);
 v1.route('/public-profile', publicProfileRoutes);
@@ -189,9 +192,17 @@ setTimeout(() => {
     .catch(e => console.warn('[warmup] Dota2 fetch failed:', (e as Error).message));
 }, 500);
 
-// ── Live scores background worker: polls tips.gg every 30s ──
-// Keeps in-memory store fresh so /live-scores returns <1ms
+// ── Cache warmup: pre-fetch CS2 matches in background ──
+setTimeout(() => {
+  fetchCs2Matches()
+    .then(n => console.log(`[warmup] CS2 cache primed: ${n.length} matches`))
+    .catch(e => console.warn('[warmup] CS2 fetch failed:', (e as Error).message));
+}, 1000);
+
+// ── Live scores background workers: poll tips.gg every 30s ──
+// Keep in-memory stores fresh so /live-scores returns <1ms
 liveScoresStore.startBackgroundWorker(30000);
+cs2LiveScoresStore.startBackgroundWorker(30000);
 
 // ── Graceful shutdown ──
 const shutdown = async (signal: string) => {

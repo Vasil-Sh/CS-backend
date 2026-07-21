@@ -278,10 +278,12 @@ async function parseMatchesFromHtml(html: string): Promise<TipsGgMatch[]> {
 }
 
 /**
- * Fetch and parse today's + tomorrow's Dota 2 matches from tips.gg.
+ * Fetch and parse 7 days of matches from tips.gg for a given game.
  */
-export async function fetchDota2Matches(): Promise<TipsGgMatch[]> {
-  const CIRCUIT_NAME = 'tipsgg_fetchDota2Matches';
+async function fetchTipsGgMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[]> {
+  const gamePath = game === 'dota2' ? 'dota2' : 'csgo';
+  const gameTag = game === 'dota2' ? 'dota2' : 'cs2';
+  const CIRCUIT_NAME = `tipsgg_fetch_${gamePath}_matches`;
   if (isOpen(CIRCUIT_NAME)) {
     throw new Error(`Circuit breaker open for ${CIRCUIT_NAME}`);
   }
@@ -302,7 +304,7 @@ export async function fetchDota2Matches(): Promise<TipsGgMatch[]> {
     const batch = dates.slice(i, i + CONCURRENCY);
     const batchResults = await Promise.allSettled(
       batch.map(async (date) => {
-        const url = `${TIPSGG_BASE}/dota2/matches/${date}/`;
+        const url = `${TIPSGG_BASE}/${gamePath}/matches/${date}/`;
         return { date, html: await fetchHtml(url) };
       }),
     );
@@ -333,7 +335,7 @@ export async function fetchDota2Matches(): Promise<TipsGgMatch[]> {
   // If all 7 days returned nothing, try the main listing page as last resort
   if (all.length === 0) {
     try {
-      const mainHtml = await fetchHtml(`${TIPSGG_BASE}/dota2/matches/`);
+      const mainHtml = await fetchHtml(`${TIPSGG_BASE}/${gamePath}/matches/`);
       const mainMatches = await parseMatchesFromHtml(mainHtml);
       for (const m of mainMatches) {
         if (!seen.has(m.id)) {
@@ -341,7 +343,7 @@ export async function fetchDota2Matches(): Promise<TipsGgMatch[]> {
           all.push(m);
         }
       }
-      console.log(`[tipsgg] Fallback: ${mainMatches.length} matches from main listing`);
+      console.log(`[tipsgg:${gameTag}] Fallback: ${mainMatches.length} matches from main listing`);
     } catch {
       // Silently fail — fallback is best-effort
     }
@@ -355,7 +357,7 @@ export async function fetchDota2Matches(): Promise<TipsGgMatch[]> {
   const withCoeffs = all.filter(m => m.coeff1 != null).length;
 
   console.log(
-    `[tipsgg] Done: ${all.length} matches ` +
+    `[tipsgg:${gameTag}] Done: ${all.length} matches ` +
     `(${dayCounts.join(', ')}) | ` +
     `coeffs: ${withCoeffs}/${all.length} | ` +
     `html: ${htmlTime - startTime}ms ` +
@@ -364,6 +366,16 @@ export async function fetchDota2Matches(): Promise<TipsGgMatch[]> {
 
   recordSuccess(CIRCUIT_NAME);
   return all;
+}
+
+/** Fetch Dota 2 matches from tips.gg. */
+export async function fetchDota2Matches(): Promise<TipsGgMatch[]> {
+  return fetchTipsGgMatches('dota2');
+}
+
+/** Fetch CS2 matches from tips.gg. */
+export async function fetchCs2Matches(): Promise<TipsGgMatch[]> {
+  return fetchTipsGgMatches('cs2');
 }
 
 /**
