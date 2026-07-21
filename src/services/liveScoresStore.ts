@@ -1,11 +1,13 @@
 /**
- * LiveScoresStore — In-memory background worker for Dota2 live scores.
+ * LiveScoresStore — In-memory background worker for match live scores.
  *
  * Runs a background setInterval that fetches tips.gg listing page via Puppeteer
  * once every 30s, parses scores/status with Cheerio, and stores results in a Map.
  *
  * The /live-scores endpoint reads from this Map — no Puppeteer on the hot path.
  * Response time: <1ms (RAM) vs ~5-10s (Puppeteer).
+ *
+ * Generic: instantiate with a game name to support Dota2 or CS2.
  */
 
 import * as cheerio from 'cheerio';
@@ -18,11 +20,18 @@ export interface LiveScoreState {
   status: string;
 }
 
-class LiveScoresStore {
+export class LiveScoresStore {
   private store = new Map<string, LiveScoreState>();
   private isUpdating = false;
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private lastUpdate = 0;
+  private readonly gamePath: string;
+  private readonly tag: string;
+
+  constructor(game: 'dota2' | 'cs2') {
+    this.gamePath = game === 'dota2' ? 'dota2' : 'csgo';
+    this.tag = game === 'dota2' ? 'Dota2' : 'CS2';
+  }
 
   /** Start the background worker. Idempotent — safe to call multiple times. */
   startBackgroundWorker(intervalMs = 30000): void {
@@ -40,7 +49,7 @@ class LiveScoresStore {
       (this.intervalId as NodeJS.Timeout).unref();
     }
 
-    console.log('[LiveScoresStore] Background worker started (interval:', intervalMs, 'ms)');
+    console.log(`[${this.tag}LiveScoresStore] Background worker started (interval:`, intervalMs, 'ms)');
   }
 
   /** Stop the background worker. */
@@ -70,7 +79,7 @@ class LiveScoresStore {
       const dd = String(today.getDate()).padStart(2, '0');
       const mm = String(today.getMonth() + 1).padStart(2, '0');
       const yyyy = today.getFullYear();
-      const url = `https://tips.gg/dota2/matches/${dd}-${mm}-${yyyy}/`;
+      const url = `https://tips.gg/${this.gamePath}/matches/${dd}-${mm}-${yyyy}/`;
 
       const html = await fetchHtml(url, 1);
       if (!html) return;
@@ -99,9 +108,11 @@ class LiveScoresStore {
           if (!isNaN(val)) scores.push(val);
         });
 
-        // Score-based status inference (heuristic — no match type info available):
-        // When tips.gg CSS lags behind actual match state, infer from scores.
-        if (status === 'upcoming' && scores.length >= 1) status = 'live';
+        // Score-based status inference — only when scores exist and are non-zero
+        if (status === 'upcoming' && scores.length >= 1) {
+          const allZero = scores.every(s => s === 0);
+          if (!allZero) status = 'live';
+        }
 
         // Compute cumulative scores (even=team1, odd=team2 maps)
         let c1 = 0, c2 = 0;
@@ -130,11 +141,13 @@ class LiveScoresStore {
         this.lastUpdate = Date.now();
       }
     } catch (err) {
-      console.error('[LiveScoresStore] Background update failed:', (err as Error).message);
+      console.error(`[${this.tag}LiveScoresStore] Background update failed:`, (err as Error).message);
     } finally {
       this.isUpdating = false;
     }
   }
 }
 
-export const liveScoresStore = new LiveScoresStore();
+// Singleton instances for each game
+export const liveScoresStore = new LiveScoresStore('dota2');
+export const cs2LiveScoresStore = new LiveScoresStore('cs2');

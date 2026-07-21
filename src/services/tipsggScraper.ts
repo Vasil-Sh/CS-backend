@@ -169,8 +169,8 @@ function extractScoresFromHtml(
       score1,
       score2,
       status: status !== 'upcoming' ? status
-        : allZero ? 'live'       // 0-0 with score elements → live match just started
-        : 'live',                // non-zero scores → live (finished decided upstream)
+        : allZero ? 'upcoming'  // 0-0 with score elements → hasn't started yet
+        : 'live',               // non-zero scores → live (finished decided upstream)
     };
   }
 
@@ -381,12 +381,12 @@ export async function fetchCs2Matches(): Promise<TipsGgMatch[]> {
 /**
  * Fetch a single match page for detailed info.
  */
-export async function fetchDota2MatchDetail(matchUrl: string): Promise<TipsGgMatch | null> {
+export async function fetchMatchDetail(matchUrl: string, game: 'dota2' | 'cs2' = 'dota2'): Promise<TipsGgMatch | null> {
   const fullUrl = matchUrl.startsWith('http') ? matchUrl : `${TIPSGG_BASE}${matchUrl}`;
 
   const html = await fetchHtml(fullUrl);
-  const logoMap = buildLogoMap(html);
-  const jsonLdMatches = extractJsonLd(html);
+  const logoMap = buildLogoMap(html, game);
+  const jsonLdMatches = extractJsonLd(html, game);
 
   if (jsonLdMatches.length === 0) return null;
 
@@ -445,6 +445,9 @@ export async function fetchDota2MatchDetail(matchUrl: string): Promise<TipsGgMat
 
   return match;
 }
+
+// Backward-compatible alias
+export const fetchDota2MatchDetail = fetchMatchDetail;
 
 /**
  * Fetch predictions page → extract Bookmakers Analysis coefficients.
@@ -637,7 +640,9 @@ function buildLogoMap(html: string, game: 'dota2' | 'cs2' = 'dota2'): Map<string
     // Skip placeholders and default images (keep SVGs — some teams have SVG logos)
     if (!src || src.startsWith('data:') || src.includes('default')) continue;
 
-    const teamName = altM[1].replace(/\s*[-–—]\s*Dota 2\s*Team$/i, '').trim();
+    const teamName = altM[1]
+      .replace(/\s*[-–—]\s*(Dota 2|Counter-Strike|CS2|CSGO)\s*(Team)?$/i, '')
+      .trim();
     if (teamName && !map.has(teamName)) {
       map.set(teamName, src);
     }
@@ -713,7 +718,7 @@ export async function getBrowser(): Promise<Browser> {
   // Rotate periodically to prevent memory creep from leaked contexts
   if (_browser && (now - _browserAge) < MAX_BROWSER_AGE) {
     try {
-      if (_browser.isConnected()) return _browser;
+      if (_browser.connected) return _browser;
     } catch {
       // Browser process died (e.g. external kill) — recreate below
       _browser = null;
@@ -773,7 +778,7 @@ export async function fetchHtml(url: string, retries = 3): Promise<string> {
       // Validate that actual match content is present
       if (!html.includes('class="element match') && !html.includes('application/ld+json')) {
         await page.close().catch(() => {});
-        throw new Error(`Page loaded but no Dota 2 match data found (${html.length} bytes)`);
+        throw new Error(`Page loaded but no match data found (${html.length} bytes)`);
       }
       return html;
     } catch (err: any) {
