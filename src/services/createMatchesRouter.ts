@@ -6,7 +6,7 @@
  */
 
 import { Hono } from 'hono';
-import { fetchMatchDetail, getBrowser, type TipsGgMatch } from '../services/tipsggScraper';
+import { fetchMatchDetail, getBrowser, fetchHtml, type TipsGgMatch } from '../services/tipsggScraper';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, renameSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordFailure } from '../services/circuitBreaker';
@@ -302,14 +302,7 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       let ok = true;
 
       try {
-        const res = await fetch(healthUrl, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html',
-          },
-          signal: AbortSignal.timeout(15000),
-        });
-        const stdout = await res.text();
+        const stdout = await fetchHtml(healthUrl, 1);
 
         checks['html_response'] = stdout.length > 5000;
         checks['json_ld'] = stdout.includes('application/ld+json');
@@ -317,6 +310,7 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
         checks['score_elements'] = stdout.includes('class="score');
         checks['bookmaker_section'] = stdout.includes('bookmakers-analysis-counters');
         checks['match_listing'] = stdout.includes('class="element match');
+        checks['fetch_method'] = 'puppeteer';
 
         if (!checks['json_ld'] || !checks['match_listing']) ok = false;
       } catch (e) {
