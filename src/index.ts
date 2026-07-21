@@ -49,7 +49,7 @@ app.use('*', cors({
   origin: (origin) => {
     const isDev = process.env.NODE_ENV !== 'production';
     const allowed = isDev
-      ? ['http://localhost:5173','http://localhost:5174','http://localhost:5175','http://localhost:5199','http://localhost:3001','https://matchiq.vercel.app']
+      ? ['http://localhost:5173','http://localhost:5174','http://localhost:5175','http://localhost:5176','http://localhost:5199','http://localhost:3001','https://matchiq.vercel.app']
       : (process.env.CORS_ORIGINS || 'https://matchiq.pro,https://www.matchiq.pro').split(',');
     if (!origin) return isDev ? allowed[0] : allowed[0];
     // Allow all vercel.app subdomains — only in dev/preview
