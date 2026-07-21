@@ -665,7 +665,7 @@ const LOGO_OVERRIDES: Record<string, string> = {
 
 /** Get team logo from map, overrides, or slug-derived URL */
 function getTeamLogo(teamName: string, teamUrl: string, logoMap: Map<string, string>): string | null {
-  // 1. Exact map match
+  // 1. Exact map match (from HTML <img> data-src — always correct when present)
   if (logoMap.has(teamName)) return logoMap.get(teamName) ?? null;
 
   // 2. Case-insensitive map match
@@ -678,10 +678,23 @@ function getTeamLogo(teamName: string, teamUrl: string, logoMap: Map<string, str
   const overrideSlug = LOGO_OVERRIDES[slug];
   if (overrideSlug) return `https://files.tips.gg/static/image/teams/${overrideSlug}.png`;
 
-  // 4. Slug-derived URL
-  if (slug) return `https://files.tips.gg/static/image/teams/${slug}.png`;
+  // 4. Try multiple possible CDN filenames (CDN naming is unpredictable)
+  //    e.g. slug="m80" → try m80-csgo.png, m80.png, m80-cs2.png, etc.
+  const candidates = [slug];
+  if (!slug.endsWith('-csgo')) candidates.push(`${slug}-csgo`);
+  if (!slug.endsWith('-cs2')) candidates.push(`${slug}-cs2`);
+  if (!slug.endsWith('-dota2')) candidates.push(`${slug}-dota2`);
 
-  return null;
+  // Also try removing the last segment if it looks like a game suffix
+  const withoutGame = slug.replace(/-(csgo|cs2|dota2)$/i, '');
+  if (withoutGame !== slug) {
+    candidates.push(withoutGame);
+    candidates.push(`${withoutGame}-csgo`);
+    candidates.push(`${withoutGame}-dota2`);
+  }
+
+  // Return the first candidate — the logo proxy will fallback through alternatives on 502
+  return `https://files.tips.gg/static/image/teams/${candidates[0]}.png`;
 }
 
 /**

@@ -199,38 +199,61 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
     const logoPath = c.req.param('filename');
     if (!logoPath) return c.json({ error: 'Missing path' }, 400);
 
-    const logoUrl = `https://files.tips.gg/static/image/teams/${logoPath}`;
     const cacheFile = join(CACHE_DIR, `${imgCachePrefix}${logoPath.replaceAll('/', '_')}`);
 
+    // Serve from disk cache
     const cached = readFileCache<{ data: number[] }>(86400_000, cacheFile);
     if (cached && !cached.stale) {
       return new Response(Uint8Array.from(cached.data.data), { headers: imgHeaders });
     }
+
+    // Build candidate CDN URLs to try (CDN naming is unpredictable)
+    const candidates = [
+      `https://files.tips.gg/static/image/teams/${logoPath}`,
+    ];
+    // Also try removing/adding game suffix
+    const base = logoPath.replace(/\.png$/i, '');
+    const bare = base.replace(/-(csgo|cs2|dota2)$/i, '');
+    if (bare !== base) {
+      candidates.push(`https://files.tips.gg/static/image/teams/${bare}.png`);
+      candidates.push(`https://files.tips.gg/static/image/teams/${bare}-csgo.png`);
+      candidates.push(`https://files.tips.gg/static/image/teams/${bare}-cs2.png`);
+      candidates.push(`https://files.tips.gg/static/image/teams/${bare}-dota2.png`);
+    }
+    // De-duplicate
+    const uniqueUrls = [...new Set(candidates)];
 
     try {
       const browser = await getBrowser();
       const page = await browser.newPage();
       await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36');
 
-      const base64DataUrl = await page.evaluate(async (url: string): Promise<string | null> => {
-        try {
-          const res = await fetch(url, { headers: { 'Referer': 'https://tips.gg/' } });
-          if (!res.ok) return null;
-          const blob = await res.blob();
-          const buffer = await blob.arrayBuffer();
-          const bytes = new Uint8Array(buffer);
-          let binary = '';
-          for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-          return 'data:image/png;base64,' + btoa(binary);
-        } catch { return null; }
-      }, logoUrl);
+      let buffer: Buffer | null = null;
+      for (const url of uniqueUrls) {
+        const base64DataUrl = await page.evaluate(async (url: string): Promise<string | null> => {
+          try {
+            const res = await fetch(url, { headers: { 'Referer': 'https://tips.gg/' } });
+            if (!res.ok) return null;
+            const blob = await res.blob();
+            const arrayBuffer = await blob.arrayBuffer();
+            const bytes = new Uint8Array(arrayBuffer);
+            let binary = '';
+            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+            return 'data:image/png;base64,' + btoa(binary);
+          } catch { return null; }
+        }, url);
+
+        if (base64DataUrl) {
+          const base64Data = base64DataUrl.replace(/^data:image\/\w+;base64,/, '');
+          buffer = Buffer.from(base64Data, 'base64');
+          console.log(`[logo] ${logoPath} → OK (${url})`);
+          break;
+        }
+      }
 
       await page.close().catch(() => {});
 
-      if (!base64DataUrl) throw new Error('Puppeteer fetch returned null');
-
-      const base64Data = base64DataUrl.replace(/^data:image\/\w+;base64,/, '');
-      const buffer = Buffer.from(base64Data, 'base64');
+      if (!buffer) throw new Error('All CDN URLs failed');
 
       writeFileCacheInternal({ type: 'buffer', data: Array.from(new Uint8Array(buffer)) }, cacheFile);
 
