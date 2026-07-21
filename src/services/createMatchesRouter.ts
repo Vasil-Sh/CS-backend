@@ -7,7 +7,7 @@
 
 import { Hono } from 'hono';
 import { fetchMatchDetail, getBrowser, type TipsGgMatch } from '../services/tipsggScraper';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, renameSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordFailure } from '../services/circuitBreaker';
 import type { LiveScoresStore } from '../services/liveScoresStore';
@@ -199,19 +199,35 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
     const logoPath = c.req.param('filename');
     if (!logoPath) return c.json({ error: 'Missing path' }, 400);
 
-    const cacheFile = join(CACHE_DIR, `${imgCachePrefix}${logoPath.replaceAll('/', '_')}`);
+    const safeName = logoPath.replaceAll('/', '_').replace(/[^a-zA-Z0-9._-]/g, '_');
+    const jsonCacheFile = join(CACHE_DIR, `${imgCachePrefix}${safeName}`);
+    const binCacheFile = join(CACHE_DIR, `${imgCachePrefix}${safeName}.bin`);
 
-    // Serve from disk cache
-    const cached = readFileCache<{ data: number[] }>(86400_000, cacheFile);
-    if (cached && !cached.stale) {
-      return new Response(Uint8Array.from(cached.data.data), { headers: imgHeaders });
+    // Serve from disk cache (prefer .bin, fallback to legacy .json)
+    if (existsSync(binCacheFile)) {
+      const stat = statSync(binCacheFile);
+      const age = Date.now() - stat.mtimeMs;
+      if (age < 86400_000) {
+        const buf = readFileSync(binCacheFile);
+        return new Response(buf, { headers: imgHeaders });
+      }
+    } else if (existsSync(jsonCacheFile)) {
+      try {
+        const entry = JSON.parse(readFileSync(jsonCacheFile, 'utf-8'));
+        const data = entry.data?.data || entry.data;
+        if (Array.isArray(data)) {
+          const age = Date.now() - (entry.ts || 0);
+          if (age < 86400_000) {
+            return new Response(Uint8Array.from(data), { headers: imgHeaders });
+          }
+        }
+      } catch { /* stale/malformed — re-fetch */ }
     }
 
     // Build candidate CDN URLs to try (CDN naming is unpredictable)
     const candidates = [
       `https://files.tips.gg/static/image/teams/${logoPath}`,
     ];
-    // Also try removing/adding game suffix
     const base = logoPath.replace(/\.png$/i, '');
     const bare = base.replace(/-(csgo|cs2|dota2)$/i, '');
     if (bare !== base) {
@@ -220,7 +236,6 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       candidates.push(`https://files.tips.gg/static/image/teams/${bare}-cs2.png`);
       candidates.push(`https://files.tips.gg/static/image/teams/${bare}-dota2.png`);
     }
-    // De-duplicate
     const uniqueUrls = [...new Set(candidates)];
 
     try {
@@ -255,14 +270,26 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
 
       if (!buffer) throw new Error('All CDN URLs failed');
 
-      writeFileCacheInternal({ type: 'buffer', data: Array.from(new Uint8Array(buffer)) }, cacheFile);
+      // Write raw .bin cache (much smaller than number[] JSON)
+      ensureCacheDir();
+      writeFileSync(binCacheFile, buffer);
+
+      // Clean up legacy JSON cache if exists
+      try { if (existsSync(jsonCacheFile)) unlinkSync(jsonCacheFile); } catch {}
 
       return new Response(buffer, { headers: imgHeaders });
     } catch {
-      if (cached) {
-        return new Response(Uint8Array.from(cached.data.data), {
-          headers: { ...imgHeaders, 'Cache-Control': 'public, max-age=3600' },
-        });
+      // If we had a legacy JSON cache, serve stale
+      if (existsSync(jsonCacheFile)) {
+        try {
+          const entry = JSON.parse(readFileSync(jsonCacheFile, 'utf-8'));
+          const data = entry.data?.data || entry.data;
+          if (Array.isArray(data)) {
+            return new Response(Uint8Array.from(data), {
+              headers: { ...imgHeaders, 'Cache-Control': 'public, max-age=3600' },
+            });
+          }
+        } catch {}
       }
       return c.json({ error: 'Failed to fetch logo' }, 502);
     }

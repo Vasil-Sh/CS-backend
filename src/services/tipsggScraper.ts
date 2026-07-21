@@ -298,7 +298,7 @@ async function fetchTipsGgMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[]>
   }
 
   // Fetch all 7 days with concurrency limit of 3 (avoid overwhelming tips.gg)
-  const CONCURRENCY = 3;
+  const CONCURRENCY = 5;
   const results: { date: string; html: string | null }[] = [];
   for (let i = 0; i < dates.length; i += CONCURRENCY) {
     const batch = dates.slice(i, i + CONCURRENCY);
@@ -525,9 +525,9 @@ async function fetchCoefficientsFromPredictions(link: string, retries = 2): Prom
 }
 
 async function enrichCoefficients(matches: TipsGgMatch[]): Promise<void> {
-  const CONCURRENCY = 2;
-  const BATCH_PAUSE_MS = 1200;
-  const PER_MATCH_TIMEOUT_MS = 30000; // 30s hard cap per match
+  const CONCURRENCY = 4;
+  const BATCH_PAUSE_MS = 200; // 200ms between batches — enough to not overwhelm tips.gg
+  const PER_MATCH_TIMEOUT_MS = 25000; // 25s hard cap per match
   const now = Date.now();
   const MAX_FUTURE_MS = 48 * 60 * 60 * 1000; // 48h — skip matches starting too far in the future
   const toFetch = matches.filter(m => {
