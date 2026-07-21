@@ -6,7 +6,7 @@
  */
 
 import { Hono } from 'hono';
-import { fetchCs2Matches, type TipsGgMatch } from '../services/tipsggScraper';
+import { fetchCs2Matches, getBrowser, type TipsGgMatch } from '../services/tipsggScraper';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordFailure } from '../services/circuitBreaker';
@@ -159,6 +159,64 @@ cs2Matches.get('/', async (c) => {
 // GET /api/v1/cs2-matches/live-scores — reads from in-memory Cs2LiveScoresStore
 cs2Matches.get('/live-scores', (c) => {
   return c.json(cs2LiveScoresStore.getScores());
+});
+
+// GET /api/v1/cs2-matches/logo/:filename — proxy team logos via Puppeteer
+// Same CDN as Dota2 — files.tips.gg blocks plain fetch()
+const imgHeaders = {
+  'Content-Type': 'image/png',
+  'Cache-Control': 'public, max-age=86400',
+};
+cs2Matches.get('/logo/:filename', async (c) => {
+  const logoPath = c.req.param('filename');
+  if (!logoPath) return c.json({ error: 'Missing path' }, 400);
+
+  const logoUrl = `https://files.tips.gg/static/image/teams/${logoPath}`;
+  const cacheFile = join(CACHE_DIR, `logo_cs2_${logoPath.replaceAll('/', '_')}`);
+
+  // Serve from disk cache
+  const cached = readFileCache<{ data: number[] }>(86400_000, cacheFile);
+  if (cached && !cached.stale) {
+    return new Response(Uint8Array.from(cached.data.data), { headers: imgHeaders });
+  }
+
+  try {
+    const browser = await getBrowser();
+    const page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36');
+
+    const base64DataUrl = await page.evaluate(async (url: string): Promise<string | null> => {
+      try {
+        const res = await fetch(url, { headers: { 'Referer': 'https://tips.gg/' } });
+        if (!res.ok) return null;
+        const blob = await res.blob();
+        return new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = () => resolve(null);
+          reader.readAsDataURL(blob);
+        });
+      } catch { return null; }
+    }, logoUrl);
+
+    await page.close().catch(() => {});
+
+    if (!base64DataUrl) throw new Error('Puppeteer fetch returned null');
+
+    const base64Data = base64DataUrl.replace(/^data:image\/\w+;base64,/, '');
+    const buffer = Buffer.from(base64Data, 'base64');
+
+    writeFileCacheInternal({ type: 'buffer', data: Array.from(new Uint8Array(buffer)) }, cacheFile);
+
+    return new Response(buffer, { headers: imgHeaders });
+  } catch {
+    if (cached) {
+      return new Response(Uint8Array.from(cached.data.data), {
+        headers: { ...imgHeaders, 'Cache-Control': 'public, max-age=3600' },
+      });
+    }
+    return c.json({ error: 'Failed to fetch logo' }, 502);
+  }
 });
 
 export default cs2Matches;

@@ -216,6 +216,17 @@ dota2Matches.get('/live-scores', (c) => {
 
 // GET /api/dota2-matches/logo/:filename — proxy team logos via Puppeteer browser context
 // tips.gg CDN blocks plain fetch() — must use real browser to bypass
+// NOTE: Override ALL CORS/security headers for images.
+// Global CORS middleware adds `credentials: true` + `Access-Control-Allow-Origin: http://localhost:5173`
+// even without an Origin header (img tags). Chrome then blocks via ORB.
+// We must return fully permissive image-friendly headers.
+const imgHeaders = {
+  'Content-Type': 'image/png',
+  'Cache-Control': 'public, max-age=86400',
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Credentials': '',
+  'X-Content-Type-Options': '',
+};
 dota2Matches.get('/logo/:filename', async (c) => {
   const logoPath = c.req.param('filename');
   if (!logoPath) return c.json({ error: 'Missing path' }, 400);
@@ -227,7 +238,7 @@ dota2Matches.get('/logo/:filename', async (c) => {
   const cached = readFileCache<{ data: number[] }>(86400_000, cacheFile); // 24h
   if (cached && !cached.stale) {
     return new Response(Uint8Array.from(cached.data.data), {
-      headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400', 'Access-Control-Allow-Origin': '*' },
+      headers: imgHeaders,
     });
   }
 
@@ -261,13 +272,11 @@ dota2Matches.get('/logo/:filename', async (c) => {
     // Cache to disk
     writeFileCacheInternal({ type: 'buffer', data: Array.from(new Uint8Array(buffer)) }, cacheFile);
 
-    return new Response(buffer, {
-      headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400', 'Access-Control-Allow-Origin': '*' },
-    });
+    return new Response(buffer, { headers: imgHeaders });
   } catch {
     if (cached) {
       return new Response(Uint8Array.from(cached.data.data), {
-        headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=3600', 'Access-Control-Allow-Origin': '*' },
+        headers: { ...imgHeaders, 'Cache-Control': 'public, max-age=3600' },
       });
     }
     return c.json({ error: 'Failed to fetch logo' }, 502);

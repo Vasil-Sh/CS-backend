@@ -1,7 +1,7 @@
 /**
- * Tips.GG Dota 2 Match Scraper
+ * Tips.GG Match Scraper (Dota 2 & CS2)
  *
- * Fetches the tips.gg Dota 2 match listing page, extracts JSON-LD
+ * Fetches tips.gg match listing pages, extracts JSON-LD
  * structured data and score info, returns typed match objects.
  *
  * Works without login — tips.gg serves public data in <script type="application/ld+json">.
@@ -194,9 +194,9 @@ function extractTipsCount(html: string, rawMatchUrl: string): number {
 /**
  * Parse match listing HTML into TipsGgMatch array.
  */
-async function parseMatchesFromHtml(html: string): Promise<TipsGgMatch[]> {
-  const logoMap = buildLogoMap(html);
-  const jsonLdMatches = extractJsonLd(html);
+async function parseMatchesFromHtml(html: string, game: 'dota2' | 'cs2' = 'dota2'): Promise<TipsGgMatch[]> {
+  const logoMap = buildLogoMap(html, game);
+  const jsonLdMatches = extractJsonLd(html, game);
   const matches: TipsGgMatch[] = [];
 
   for (const ld of jsonLdMatches) {
@@ -322,7 +322,7 @@ async function fetchTipsGgMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[]>
   const dayCounts: string[] = [];
   for (const { date, html } of results) {
     if (!html) continue;
-    const dayMatches = await parseMatchesFromHtml(html);
+    const dayMatches = await parseMatchesFromHtml(html, game);
     dayCounts.push(`${dayMatches.length} ${date}`);
     for (const m of dayMatches) {
       if (!seen.has(m.id)) {
@@ -336,7 +336,7 @@ async function fetchTipsGgMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[]>
   if (all.length === 0) {
     try {
       const mainHtml = await fetchHtml(`${TIPSGG_BASE}/${gamePath}/matches/`);
-      const mainMatches = await parseMatchesFromHtml(mainHtml);
+      const mainMatches = await parseMatchesFromHtml(mainHtml, game);
       for (const m of mainMatches) {
         if (!seen.has(m.id)) {
           seen.add(m.id);
@@ -577,10 +577,14 @@ async function enrichCoefficients(matches: TipsGgMatch[]): Promise<void> {
 
 // ── Helpers ──
 
-function extractJsonLd(html: string): JsonLdSportsEvent[] {
+function extractJsonLd(html: string, game: 'dota2' | 'cs2' = 'dota2'): JsonLdSportsEvent[] {
   const results: JsonLdSportsEvent[] = [];
   const regex = /<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi;
   let match: RegExpExecArray | null;
+
+  const sportPattern = game === 'cs2'
+    ? /cs2|csgo|counter[- ]?strike/i
+    : /dota\s*2/i;
 
   while ((match = regex.exec(html)) !== null) {
     try {
@@ -588,8 +592,8 @@ function extractJsonLd(html: string): JsonLdSportsEvent[] {
       // Match both 'SportsEvent' and 'Event' types (tips.gg may vary)
       // Allow case-insensitive sport match, and also match when sport is missing
       const isSportsEvent = data['@type'] === 'SportsEvent' || data['@type'] === 'Event';
-      const isDota = !data.sport || /dota\s*2/i.test(data.sport);
-      if (data && isSportsEvent && isDota && Array.isArray(data.competitor) && data.competitor.length >= 2) {
+      const isCorrectSport = !data.sport || sportPattern.test(data.sport);
+      if (data && isSportsEvent && isCorrectSport && Array.isArray(data.competitor) && data.competitor.length >= 2) {
         results.push(data as JsonLdSportsEvent);
       }
     } catch {
@@ -603,19 +607,23 @@ function extractJsonLd(html: string): JsonLdSportsEvent[] {
 /**
  * Build a map of team name → actual logo URL by parsing <img> tags in HTML.
  */
-function buildLogoMap(html: string): Map<string, string> {
+function buildLogoMap(html: string, game: 'dota2' | 'cs2' = 'dota2'): Map<string, string> {
   const map = new Map<string, string>();
   // Match any <img> tag — try src, data-src, and content attributes
   const imgRegex = /<img[^>]+>/gi;
   let m: RegExpExecArray | null;
+
+  const sportPattern = game === 'cs2'
+    ? /\s[-–—]\s(Counter-Strike|CS2|CSGO)\s/i
+    : /\s[-–—]\sDota\s2\s/i;
 
   while ((m = imgRegex.exec(html)) !== null) {
     const tag = m[0];
 
     const altM = /alt="([^"]+)"\s/i.exec(tag);
     if (!altM) continue;
-    // Only match "X – Dota 2 Team" pattern in alt
-    if (!/\s[-–—]\sDota\s2\sTeam$/i.test(altM[1].trim())) continue;
+    // Only match teams for the correct game
+    if (!sportPattern.test(altM[1].trim())) continue;
 
     // Try data-src first (lazy loading), then src
     let src = '';
