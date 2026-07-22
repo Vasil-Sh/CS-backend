@@ -69,10 +69,15 @@ app.use('*', bodyLimit(1_000_000)); // 1MB max body
 app.use('*', authMiddleware);
 
 // ── Convert ALL string numbers to real numbers in JSON responses ──
+// Skips responses smaller than 1KB (auth, health, tokens etc.) to avoid
+// double-serialization overhead on every tiny request.
+// TODO: migrate to Drizzle .$type<number>() casts to remove this entirely.
 app.use('*', async (c, next) => {
   await next();
   const ct = c.res.headers.get('Content-Type') || '';
   if (!ct.includes('application/json')) return;
+  const cl = c.res.headers.get('Content-Length');
+  if (cl && parseInt(cl, 10) < 1024) return; // skip sub-1KB responses
   const original = c.res.clone();
   try {
     const body = await original.json();

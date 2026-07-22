@@ -12,6 +12,8 @@ export const pool = new Pool({
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: isProduction ? 10_000 : 5_000,
   ssl: isProduction ? { rejectUnauthorized: false } : undefined,
+  // ^ NOTE: set DB_CA_CERT env var for Railway/Render hosted PG,
+  // then switch to: ssl: isProduction ? { rejectUnauthorized: true, ca: process.env.DB_CA_CERT } : undefined,
 });
 
 pool.on('error', (err) => {

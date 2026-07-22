@@ -25,6 +25,10 @@ const CACHE_TTL_FRESH = 5 * 60 * 1000;   // 5 min — normal TTL
 const CACHE_TTL_STALE = 60 * 60 * 1000;  // 1 hour — serve stale only if fresh fetch fails
 const CACHE_DIR = join(process.cwd(), '.cache');
 
+// In-memory cache — avoids sync file reads on every request
+const memCache = new Map<string, { data: unknown; ts: number; day: string }>();
+const MEM_CACHE_TTL = 30_000; // 30s before stale-check falls back to disk
+
 function ensureCacheDir(): void {
   if (!existsSync(CACHE_DIR)) mkdirSync(CACHE_DIR, { recursive: true });
 }
@@ -38,12 +42,25 @@ interface CacheEntry<T> {
 
 function readFileCache<T>(maxAge: number, key: string): { data: T; stale: boolean } | null {
   try {
+    // Check in-memory cache first (fast path — no I/O)
+    const memEntry = memCache.get(key);
+    if (memEntry) {
+      const today = new Date().toISOString().split('T')[0];
+      if (memEntry.day !== today) { memCache.delete(key); }
+      else {
+        const memAge = Date.now() - memEntry.ts;
+        if (memAge < MEM_CACHE_TTL) return { data: memEntry.data as T, stale: memAge >= maxAge };
+      }
+    }
+
     if (!existsSync(key)) return null;
     const raw = readFileSync(key, 'utf-8');
     const entry: CacheEntry<T> = JSON.parse(raw);
     const today = new Date().toISOString().split('T')[0];
     if (entry.day && entry.day !== today) return null;
     const age = Date.now() - entry.ts;
+    // Populate in-memory cache on disk read
+    memCache.set(key, { data: entry.data, ts: entry.ts, day: entry.day });
     if (age < maxAge) return { data: entry.data, stale: false };
     return { data: entry.data, stale: true };
   } catch { return null; }
@@ -58,6 +75,8 @@ export function writeFileCacheInternal(data: unknown, key: string): void {
     writeFileSync(tmp, JSON.stringify(entry), 'utf-8');
     try { if (existsSync(key)) unlinkSync(key); } catch {}
     renameSync(tmp, key);
+    // Update in-memory cache too
+    memCache.set(key, { data, ts: Date.now(), day: today });
   } catch { /* ignore */ }
 }
 

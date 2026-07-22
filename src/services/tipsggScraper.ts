@@ -529,10 +529,10 @@ async function enrichCoefficients(matches: TipsGgMatch[]): Promise<void> {
   const BATCH_PAUSE_MS = 200; // 200ms between batches — enough to not overwhelm tips.gg
   const PER_MATCH_TIMEOUT_MS = 25000; // 25s hard cap per match
   const now = Date.now();
-  const MAX_FUTURE_MS = 48 * 60 * 60 * 1000; // 48h — skip matches starting too far in the future
+  const MAX_FUTURE_MS = 12 * 60 * 60 * 1000; // 12h — skip matches starting too far into the future
   const toFetch = matches.filter(m => {
     if (m.status === 'finished') return false;
-    // Skip matches starting more than 48h from now (predictions page may not exist yet)
+    // Skip matches starting more than 12h from now (predictions page may not exist yet)
     try {
       const start = new Date(m.startDate).getTime();
       if (start - now > MAX_FUTURE_MS) return false;

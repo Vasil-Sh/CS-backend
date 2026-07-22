@@ -13,6 +13,8 @@ export class BetService {
   invalidateCache(userId: number): void {
     cache.delByPrefix(`bets:${userId}`);
     cache.del(`stats:${userId}`);
+    cache.del(`profitByMonth:${userId}`);
+    cache.del(`profitByStrategy:${userId}`);
   }
 
   /** Normalize goalId: empty/'all'/whitespace → null */
@@ -118,6 +120,10 @@ export class BetService {
 
   /** Get profit aggregated by month (YYYY-MM format) */
   async getProfitByMonth(userId: number): Promise<{ month: string; profit: number }[]> {
+    const cacheKey = `profitByMonth:${userId}`;
+    const cached = cache.get<{ month: string; profit: number }[]>(cacheKey);
+    if (cached) return cached;
+
     const rows = await db
       .select({
         month: sql<string>`to_char(${schema.bets.date}, 'YYYY-MM')`,
@@ -129,11 +135,17 @@ export class BetService {
       .where(eq(schema.bets.userId, userId))
       .groupBy(sql`to_char(${schema.bets.date}, 'YYYY-MM')`)
       .orderBy(sql`to_char(${schema.bets.date}, 'YYYY-MM')`);
-    return rows.map(r => ({ month: r.month as string, profit: Number(r.profit) }));
+    const result = rows.map(r => ({ month: r.month as string, profit: Number(r.profit) }));
+    cache.set(cacheKey, result, 60_000);
+    return result;
   }
 
   /** Get profit aggregated by strategy name */
   async getProfitByStrategy(userId: number): Promise<{ strategy: string; profit: number }[]> {
+    const cacheKey = `profitByStrategy:${userId}`;
+    const cached = cache.get<{ strategy: string; profit: number }[]>(cacheKey);
+    if (cached) return cached;
+
     const rows = await db
       .select({
         strategy: sql<string>`coalesce(${schema.bets.strategy}, 'Без стратегії')`,
@@ -144,7 +156,9 @@ export class BetService {
       .from(schema.bets)
       .where(eq(schema.bets.userId, userId))
       .groupBy(schema.bets.strategy);
-    return rows.map(r => ({ strategy: r.strategy as string, profit: Number(r.profit) }));
+    const result = rows.map(r => ({ strategy: r.strategy as string, profit: Number(r.profit) }));
+    cache.set(cacheKey, result, 60_000);
+    return result;
   }
 
   // ── Private helpers ──
