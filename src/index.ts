@@ -38,8 +38,10 @@ import cs2MatchesRoutes from './routes/cs2Matches';
 import publicProfileRoutes from './routes/publicProfile';
 import { closeBrowser } from './services/tipsggScraper';
 import { fetchDota2Matches, fetchCs2Matches } from './services/tipsggScraper';
+import { join } from 'node:path';
 import { liveScoresStore } from './services/liveScoresStore';
 import { cs2LiveScoresStore } from './services/cs2LiveScoresStore';
+import { writeFileCacheInternal } from './services/createMatchesRouter';
 
 const app = new Hono();
 
@@ -188,14 +190,20 @@ console.log(`🚀 MatchIQ API server starting on http://localhost:${port}`);
 // ── Cache warmup: pre-fetch Dota2 matches in background ──
 setTimeout(() => {
   fetchDota2Matches()
-    .then(n => console.log(`[warmup] Dota2 cache primed: ${n.length} matches`))
+    .then(matches => {
+      writeFileCacheInternal(matches, join(process.cwd(), '.cache', 'dota2_matches.json'));
+      console.log(`[warmup] Dota2 cache primed: ${matches.length} matches`);
+    })
     .catch(e => console.warn('[warmup] Dota2 fetch failed:', (e as Error).message));
 }, 500);
 
 // ── Cache warmup: pre-fetch CS2 matches in background ──
 setTimeout(() => {
   fetchCs2Matches()
-    .then(n => console.log(`[warmup] CS2 cache primed: ${n.length} matches`))
+    .then(matches => {
+      writeFileCacheInternal(matches, join(process.cwd(), '.cache', 'cs2_matches.json'));
+      console.log(`[warmup] CS2 cache primed: ${matches.length} matches`);
+    })
     .catch(e => console.warn('[warmup] CS2 fetch failed:', (e as Error).message));
 }, 1000);
 

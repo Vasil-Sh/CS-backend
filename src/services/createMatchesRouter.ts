@@ -49,7 +49,7 @@ function readFileCache<T>(maxAge: number, key: string): { data: T; stale: boolea
   } catch { return null; }
 }
 
-function writeFileCacheInternal(data: unknown, key: string): void {
+export function writeFileCacheInternal(data: unknown, key: string): void {
   try {
     ensureCacheDir();
     const today = new Date().toISOString().split('T')[0];
