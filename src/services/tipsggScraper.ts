@@ -60,6 +60,7 @@ interface JsonLdSportsEvent {
   organizer?: {
     '@type': 'SportsOrganization';
     name: string;
+    url?: string;
   };
 }
 
@@ -431,6 +432,7 @@ export async function fetchMatchDetail(matchUrl: string, game: 'dota2' | 'cs2' =
     logoTeam1: getTeamLogo(competitor1.name, competitor1.url, logoMap),
     logoTeam2: getTeamLogo(competitor2.name, competitor2.url, logoMap),
     tournament: ld.organizer?.name || '',
+    tournamentLogo: null, // detail endpoint doesn't extract organizer URL
     stage: parseStage(description),
     status: status !== 'upcoming' ? status : parseEventStatus(ld.eventStatus, ld.startDate),
     tipsCount: 0,
