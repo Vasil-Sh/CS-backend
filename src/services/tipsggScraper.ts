@@ -92,14 +92,16 @@ function parseEventStatus(statusUrl: string, startDate?: string): 'upcoming' | '
   if (statusUrl.includes('EventScheduled')) return 'upcoming';
   if (statusUrl.includes('EventRescheduled')) return 'upcoming';
 
-  // Date-based fallback: if startDate is in the past, match is likely live
+  // Date-based fallback: only determine upcoming vs live.
+  // Finished status must come from scores (BO3=2 wins, BO5=3 wins).
+  // The 2h+ heuristic was incorrectly marking matches as finished
+  // when they might still be in-progress (e.g. BO3 0:1 after 2h).
   if (startDate) {
     try {
       const start = new Date(startDate).getTime();
       const now = Date.now();
-      // Match started more than 2h ago → probably finished (Dota2 BO3: ~2h avg, BO5: ~3h)
-      if (start < now - 2 * 60 * 60 * 1000) return 'finished';
-      // Match started but within last 2h → likely live
+      // Match started but not yet 4h → live
+      // (4h covers Dota2 BO5 longest case; BO3 typically 2-3h)
       if (start < now) return 'live';
     } catch { /* ignore */ }
   }
