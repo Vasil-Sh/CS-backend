@@ -26,7 +26,6 @@ export interface TipsGgMatch {
   logoTeam1: string | null;
   logoTeam2: string | null;
   tournament: string;
-  tournamentLogo: string | null; // tips.gg tournament logo from organizer URL
   stage: string;
   status: 'upcoming' | 'live' | 'finished';
   tipsCount: number;
@@ -60,7 +59,6 @@ interface JsonLdSportsEvent {
   organizer?: {
     '@type': 'SportsOrganization';
     name: string;
-    url?: string;
   };
 }
 
@@ -250,19 +248,6 @@ async function parseMatchesFromHtml(html: string, game: 'dota2' | 'cs2' = 'dota2
         : ld.performer?.name === competitor2.name ? 45
         : 50;
 
-      // Tournament logo: extract slug from organizer URL
-      // e.g. https://tips.gg/tournament/dota2-european-pro-league-masters-i/
-      //   → https://files.tips.gg/static/image/tournaments/dota2-european-pro-league-masters-i.png
-      let tournamentLogo: string | null = null;
-      const organizerUrl = ld.organizer?.url || '';
-      if (organizerUrl) {
-        const parts = organizerUrl.replace(/\/$/, '').split('/');
-        const slug = parts[parts.length - 1];
-        if (slug && slug !== 'tournament') {
-          tournamentLogo = `https://files.tips.gg/static/image/tournaments/${slug}.png`;
-        }
-      }
-
       matches.push({
         id: slugFromUrl(ld.url),
         date: dateKey,
@@ -275,7 +260,6 @@ async function parseMatchesFromHtml(html: string, game: 'dota2' | 'cs2' = 'dota2
         logoTeam1: logo1,
         logoTeam2: logo2,
         tournament: ld.organizer?.name || '',
-        tournamentLogo,
         stage: parseStage(description),
         status: status !== 'upcoming' ? status : parseEventStatus(ld.eventStatus, ld.startDate),
         tipsCount,
@@ -432,7 +416,6 @@ export async function fetchMatchDetail(matchUrl: string, game: 'dota2' | 'cs2' =
     logoTeam1: getTeamLogo(competitor1.name, competitor1.url, logoMap),
     logoTeam2: getTeamLogo(competitor2.name, competitor2.url, logoMap),
     tournament: ld.organizer?.name || '',
-    tournamentLogo: null, // detail endpoint doesn't extract organizer URL
     stage: parseStage(description),
     status: status !== 'upcoming' ? status : parseEventStatus(ld.eventStatus, ld.startDate),
     tipsCount: 0,
