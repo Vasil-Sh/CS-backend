@@ -299,6 +299,39 @@ export const tiltBlocks = pgTable(
   (table) => [index('tilt_blocks_user_idx').on(table.userId)]
 );
 
+// ═══════════════════════════════════════════
+// Matches History — persistent storage of finished matches
+// ═══════════════════════════════════════════
+
+export const matchesHistory = pgTable(
+  'matches_history',
+  {
+    id: varchar('match_id', { length: 500 }).primaryKey(),
+    game: varchar('game', { length: 20 }).notNull().default('dota2'),
+    team1: varchar('team1', { length: 200 }).notNull(),
+    team2: varchar('team2', { length: 200 }).notNull(),
+    date: date('date').notNull(),
+    score1: integer('score1').default(0),
+    score2: integer('score2').default(0),
+    status: varchar('status', { length: 20 }).notNull().default('finished'),
+    tournament: varchar('tournament', { length: 500 }).default(''),
+    matchType: varchar('match_type', { length: 20 }).default(''),
+    logoTeam1: varchar('logo_team1', { length: 500 }),
+    logoTeam2: varchar('logo_team2', { length: 500 }),
+    tournamentLogo: varchar('tournament_logo', { length: 500 }),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at')
+      .defaultNow()
+      .$onUpdate(() => new Date())
+      .notNull(),
+  },
+  (table) => [
+    index('matches_history_date_idx').on(table.date),
+    index('matches_history_game_idx').on(table.game),
+    index('matches_history_game_date_idx').on(table.game, table.date),
+  ]
+);
+
 // ── Type exports ──
 
 export type User = typeof users.$inferSelect;
@@ -313,3 +346,5 @@ export type BankrollEntry = typeof bankroll.$inferSelect;
 export type NewBankrollEntry = typeof bankroll.$inferInsert;
 export type RiskyTeam = typeof riskyTeams.$inferSelect;
 export type TiltBlock = typeof tiltBlocks.$inferSelect;
+export type MatchHistory = typeof matchesHistory.$inferSelect;
+export type NewMatchHistory = typeof matchesHistory.$inferInsert;

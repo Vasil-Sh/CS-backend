@@ -11,6 +11,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, renameS
 import { join } from 'node:path';
 import { recordFailure } from '../services/circuitBreaker';
 import type { LiveScoresStore } from '../services/liveScoresStore';
+import { upsertMatchHistoryBatch } from '../services/matchHistoryService';
 
 interface MatchRouterConfig {
   game: 'dota2' | 'cs2';
@@ -155,6 +156,28 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
         .then(matches => {
           if (matches.length > 0) {
             writeFileCacheInternal(matches, cacheFile);
+            // Persist finished matches to DB for history
+            const finished = matches
+              .filter(m => m.status === 'finished')
+              .map(m => ({
+                id: m.id,
+                game: cfg.game,
+                team1: m.nameTeam1,
+                team2: m.nameTeam2,
+                date: m.date,
+                score1: m.score1 ?? 0,
+                score2: m.score2 ?? 0,
+                status: 'finished' as const,
+                tournament: m.tournament || m.stage || '',
+                matchType: m.type,
+                logoTeam1: m.logoTeam1,
+                logoTeam2: m.logoTeam2,
+              }));
+            if (finished.length > 0) {
+              upsertMatchHistoryBatch(finished).catch(e =>
+                console.error(`[${prefix}Matches] History sync failed:`, (e as Error).message)
+              );
+            }
           } else {
             console.warn(`[${prefix}Matches] Empty scrape — keeping existing cache`);
           }
