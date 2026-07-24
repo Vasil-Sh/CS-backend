@@ -293,9 +293,9 @@ async function fetchTipsGgMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[]>
   const startTime = Date.now();
   const today = formatDateDdMmYyyy(new Date());
 
-  // Build 7 dates: today + next 6 days
+  // Build 8 dates: yesterday + today + next 6 days
   const dates: string[] = [];
-  for (let i = 0; i < 7; i++) {
+  for (let i = -1; i < 7; i++) {
     dates.push(formatDateDdMmYyyy(new Date(Date.now() + i * 86400000)));
   }
 
