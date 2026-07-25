@@ -687,6 +687,13 @@ function getTeamLogo(teamName: string, teamUrl: string, logoMap: Map<string, str
   if (!slug.endsWith('-cs2')) candidates.push(`${slug}-cs2`);
   if (!slug.endsWith('-dota2')) candidates.push(`${slug}-dota2`);
 
+  // Also try with underscores ↔ hyphens swapped (CDN uses both)
+  const swapped = slug.replace(/_/g, '-');
+  if (swapped !== slug) {
+    if (!swapped.endsWith('-csgo')) candidates.push(`${swapped}-csgo`);
+    candidates.push(`${swapped}-cs2`);
+  }
+
   // Also try removing the last segment if it looks like a game suffix
   const withoutGame = slug.replace(/-(csgo|cs2|dota2)$/i, '');
   if (withoutGame !== slug) {

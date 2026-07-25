@@ -278,6 +278,13 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       candidates.push(`https://files.tips.gg/static/image/teams/${bare}-cs2.png`);
       candidates.push(`https://files.tips.gg/static/image/teams/${bare}-dota2.png`);
     }
+    // Also try with underscores ↔ hyphens swapped (CDN uses both)
+    const swapped = bare.replace(/_/g, '-');
+    if (swapped !== bare) {
+      candidates.push(`https://files.tips.gg/static/image/teams/${swapped}.png`);
+      candidates.push(`https://files.tips.gg/static/image/teams/${swapped}-csgo.png`);
+      candidates.push(`https://files.tips.gg/static/image/teams/${swapped}-cs2.png`);
+    }
     const uniqueUrls = [...new Set(candidates)];
 
     try {
