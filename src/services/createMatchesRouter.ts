@@ -231,9 +231,15 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
     }
   });
 
-  // ── GET /live-scores — in-memory, <1ms ──
+  // ── GET /live-scores — only changed scores (compact, efficient) ──
   router.get('/live-scores', (c) => {
-    return c.json(scoresStore.getScores());
+    const changed = scoresStore.getChangedScores();
+    return c.json(changed);
+  });
+
+  // ── GET /live-scores/all — full snapshot (debug / initial load) ──
+  router.get('/live-scores/all', (c) => {
+    return c.json(scoresStore.getResponse());
   });
 
   // ── GET /logo/:filename — proxy team logos via Puppeteer ──

@@ -216,8 +216,8 @@ setTimeout(() => {
 
 // ── Live scores background workers: poll tips.gg every 30s ──
 // Keep in-memory stores fresh so /live-scores returns <1ms
-liveScoresStore.startBackgroundWorker(30000);
-cs2LiveScoresStore.startBackgroundWorker(30000);
+liveScoresStore.startBackgroundWorker(15_000);
+cs2LiveScoresStore.startBackgroundWorker(15_000);
 
 // ── Graceful shutdown ──
 const shutdown = async (signal: string) => {
