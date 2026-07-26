@@ -405,7 +405,7 @@ const _spec = {
           },
           "createdAt": {
             "type": "string",
-            "example": "2026-06-30T12:00:00.000Z"
+            "example": "2026-06-30T12:00:00Z"
           }
         }
       },
@@ -886,7 +886,94 @@ const _spec = {
           },
           "timestamp": {
             "type": "string",
-            "example": "2026-06-30T12:00:00.000Z"
+            "example": "2026-06-30T12:00:00Z"
+          }
+        }
+      },
+      "MatchEntry": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "sparta-vs-benched-gods"
+          },
+          "date": {
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-07-26T11:04:00+03:00"
+          },
+          "link": {
+            "type": "string",
+            "example": "/matches/cs2/26-07-2026/sparta-vs-benched-gods/11-04/"
+          },
+          "type": {
+            "type": "string",
+            "example": "BO3"
+          },
+          "score1": {
+            "type": "integer",
+            "nullable": true,
+            "example": 0
+          },
+          "score2": {
+            "type": "integer",
+            "nullable": true,
+            "example": 1
+          },
+          "nameTeam1": {
+            "type": "string",
+            "example": "SPARTA"
+          },
+          "nameTeam2": {
+            "type": "string",
+            "example": "Benched gods"
+          },
+          "logoTeam1": {
+            "type": "string",
+            "nullable": true
+          },
+          "logoTeam2": {
+            "type": "string",
+            "nullable": true
+          },
+          "tournament": {
+            "type": "string",
+            "example": "CCT Europe 2026 Series #5"
+          },
+          "stage": {
+            "type": "string",
+            "example": "Group Stage"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "upcoming",
+              "live",
+              "finished"
+            ],
+            "example": "live"
+          },
+          "tipsCount": {
+            "type": "integer",
+            "example": 4
+          },
+          "pred1": {
+            "type": "integer",
+            "example": 72
+          },
+          "pred2": {
+            "type": "integer",
+            "example": 28
+          },
+          "coeff1": {
+            "type": "number",
+            "nullable": true,
+            "example": 1.45
+          },
+          "coeff2": {
+            "type": "number",
+            "nullable": true,
+            "example": 2.7
           }
         }
       }
@@ -932,6 +1019,10 @@ const _spec = {
     {
       "name": "AI",
       "description": "DeepSeek AI recommendations"
+    },
+    {
+      "name": "Matches",
+      "description": "Dota 2 & CS2 match data from tips.gg scraper"
     }
   ],
   "paths": {
@@ -1918,6 +2009,224 @@ const _spec = {
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/v1/cs2-matches/live-scores": {
+      "get": {
+        "tags": [
+          "Matches"
+        ],
+        "description": "In-memory live score updates for CS2 matches.",
+        "summary": "CS2 live scores",
+        "responses": {
+          "200": {
+            "description": "Live score updates"
+          }
+        }
+      }
+    },
+    "/v1/cs2-matches": {
+      "get": {
+        "tags": [
+          "Matches"
+        ],
+        "description": "Today's and upcoming CS2 matches from tips.gg. Uses stale-while-revalidate caching.",
+        "parameters": [
+          {
+            "name": "refresh",
+            "schema": {
+              "type": "boolean"
+            },
+            "in": "query",
+            "description": "Force fresh scrape",
+            "required": false
+          }
+        ],
+        "summary": "CS2 matches",
+        "responses": {
+          "200": {
+            "description": "CS2 matches array",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/MatchEntry"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Scraper unavailable"
+          }
+        }
+      }
+    },
+    "/v1/dota2-matches/live-scores": {
+      "get": {
+        "tags": [
+          "Matches"
+        ],
+        "description": "In-memory live score updates for Dota 2 matches.",
+        "summary": "Dota 2 live scores",
+        "responses": {
+          "200": {
+            "description": "Live score updates"
+          }
+        }
+      }
+    },
+    "/v1/cs2-matches/logo/{filename}": {
+      "get": {
+        "tags": [
+          "Matches"
+        ],
+        "description": "Proxies team logos from tips.gg CDN to avoid CORS/ORB issues.",
+        "parameters": [
+          {
+            "name": "filename",
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "description": "Logo filename",
+            "required": true
+          }
+        ],
+        "summary": "CS2 team logo proxy",
+        "responses": {
+          "200": {
+            "description": "Team logo image"
+          },
+          "404": {
+            "description": "Logo not found"
+          }
+        }
+      }
+    },
+    "/v1/dota2-matches": {
+      "get": {
+        "tags": [
+          "Matches"
+        ],
+        "description": "Today's and upcoming Dota 2 matches from tips.gg. Uses stale-while-revalidate caching.",
+        "parameters": [
+          {
+            "name": "refresh",
+            "schema": {
+              "type": "boolean"
+            },
+            "in": "query",
+            "description": "Force fresh scrape",
+            "required": false
+          }
+        ],
+        "summary": "Dota 2 matches",
+        "responses": {
+          "200": {
+            "description": "Dota 2 matches array",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/MatchEntry"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Scraper unavailable"
+          }
+        }
+      }
+    },
+    "/v1/matches-history": {
+      "get": {
+        "tags": [
+          "Matches"
+        ],
+        "description": "Returns persisted finished matches from PostgreSQL.",
+        "summary": "Completed matches history",
+        "responses": {
+          "200": {
+            "description": "History array",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/MatchEntry"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/dota2-matches/logo/{filename}": {
+      "get": {
+        "tags": [
+          "Matches"
+        ],
+        "description": "Proxies team logos from tips.gg CDN to avoid CORS/ORB issues.",
+        "parameters": [
+          {
+            "name": "filename",
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "description": "Logo filename",
+            "required": true
+          }
+        ],
+        "summary": "Dota 2 team logo proxy",
+        "responses": {
+          "200": {
+            "description": "Team logo image"
+          },
+          "404": {
+            "description": "Logo not found"
+          }
+        }
+      }
+    },
+    "/v1/dota2-matches/health": {
+      "get": {
+        "tags": [
+          "Matches"
+        ],
+        "description": "Validates tips.gg HTML structure is parseable.",
+        "summary": "Dota 2 scraper health",
+        "responses": {
+          "200": {
+            "description": "Scraper healthy"
+          },
+          "503": {
+            "description": "Scraper broken"
+          }
+        }
+      }
+    },
+    "/v1/cs2-matches/health": {
+      "get": {
+        "tags": [
+          "Matches"
+        ],
+        "description": "Validates tips.gg HTML structure is parseable for CS2.",
+        "summary": "CS2 scraper health",
+        "responses": {
+          "200": {
+            "description": "Scraper healthy"
+          },
+          "503": {
+            "description": "Scraper broken"
           }
         }
       }
