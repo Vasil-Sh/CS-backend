@@ -18,7 +18,7 @@ export class TelegramGroupService {
   async remove(id: string, userId: number): Promise<boolean> {
     const [found] = await db.select().from(schema.telegramGroups).where(and(eq(schema.telegramGroups.id, id), eq(schema.telegramGroups.userId, userId))).limit(1);
     if (!found) return false;
-    await db.delete(schema.telegramGroups).where(eq(schema.telegramGroups.id, id));
+    await db.delete(schema.telegramGroups).where(and(eq(schema.telegramGroups.id, id), eq(schema.telegramGroups.userId, userId)));
     return true;
   }
 }

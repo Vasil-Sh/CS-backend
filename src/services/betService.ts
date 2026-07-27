@@ -79,7 +79,7 @@ export class BetService {
     const [updated] = await db
       .update(schema.bets)
       .set(updateData)
-      .where(eq(schema.bets.id, id))
+      .where(and(eq(schema.bets.id, id), eq(schema.bets.userId, userId)))
       .returning();
     return updated;
   }
@@ -91,7 +91,7 @@ export class BetService {
     const existing = await this.getOwnedBet(id, userId);
     if (!existing) return false;
 
-    await db.delete(schema.bets).where(eq(schema.bets.id, id));
+    await db.delete(schema.bets).where(and(eq(schema.bets.id, id), eq(schema.bets.userId, userId)));
     return true;
   }
 

@@ -48,7 +48,7 @@ export class StrategyService {
       [found] = await db.select().from(schema.strategies).where(and(eq(schema.strategies.name, name), eq(schema.strategies.userId, userId))).limit(1);
     }
     if (!found) return false;
-    await db.delete(schema.strategies).where(eq(schema.strategies.id, found.id));
+    await db.delete(schema.strategies).where(and(eq(schema.strategies.id, found.id), eq(schema.strategies.userId, userId)));
     return true;
   }
 
@@ -61,7 +61,7 @@ export class StrategyService {
     await db.update(schema.strategies).set({ isPrimary: false })
       .where(eq(schema.strategies.userId, userId));
     await db.update(schema.strategies).set({ isPrimary: true, updatedAt: new Date() })
-      .where(eq(schema.strategies.id, id));
+      .where(and(eq(schema.strategies.id, id), eq(schema.strategies.userId, userId)));
     return true;
   }
 }

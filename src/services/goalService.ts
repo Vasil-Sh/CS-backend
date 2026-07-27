@@ -50,7 +50,7 @@ export class GoalService {
   async remove(id: string, userId: number): Promise<boolean> {
     const [found] = await db.select().from(schema.goals).where(and(eq(schema.goals.id, id), eq(schema.goals.userId, userId))).limit(1);
     if (!found) return false;
-    await db.delete(schema.goals).where(eq(schema.goals.id, found.id));
+    await db.delete(schema.goals).where(and(eq(schema.goals.id, found.id), eq(schema.goals.userId, userId)));
     return true;
   }
 }
