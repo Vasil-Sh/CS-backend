@@ -725,8 +725,13 @@ function formatDateDdMmYyyy(d: Date): string {
 }
 
 // ── HTTP fetch via Puppeteer (bypasses Cloudflare JS challenge) ──
+// Uses puppeteer-extra with stealth plugin for anti-detection
 
-import puppeteer, { type Browser, type Page } from 'puppeteer';
+import puppeteerExtra from 'puppeteer-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import type { Browser, Page } from 'puppeteer';
+
+puppeteerExtra.use(StealthPlugin());
 
 const PUPPETEER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
 
@@ -751,7 +756,7 @@ export async function getBrowser(): Promise<Browser> {
     await _browser.close().catch(() => {});
     _browser = null;
   }
-  _browser = await puppeteer.launch({
+  _browser = await puppeteerExtra.launch({
     headless: true,
     args: [
       '--no-sandbox',

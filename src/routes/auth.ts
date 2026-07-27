@@ -3,6 +3,9 @@ import { requireAuth, requireAdmin } from '../middleware/auth';
 import { loginSchema, registerSchema, updateUserSchema } from '../middleware/validation';
 import { authService } from '../services/authService';
 import { verifyRefreshToken, signToken, signRefreshToken } from '../utils/jwt';
+import { blocklistJti } from '../utils/jwtBlocklist';
+import { AppError } from '../utils/AppError';
+import jwt from 'jsonwebtoken';
 
 const auth = new Hono();
 
@@ -36,6 +39,37 @@ auth.post('/refresh', async (c) => {
     c.header('Set-Cookie', `auth_token=${token}; HttpOnly; ${isProd ? 'Secure; ' : ''}SameSite=Lax; Path=/; Max-Age=${7 * 24 * 60 * 60}`, { append: true });
     return c.json({ token, refreshToken });
   } catch { return c.json({ error: 'Invalid or expired refresh token' }, 401); }
+});
+
+// ── POST /api/auth/logout ──
+auth.post('/logout', async (c) => {
+  try {
+    // Try to extract token from header or cookie
+    let token: string | undefined;
+    const authHeader = c.req.header('Authorization');
+    if (authHeader?.startsWith('Bearer ')) {
+      token = authHeader.slice(7);
+    } else {
+      token = c.req.header('Cookie')?.match(/auth_token=([^;]+)/)?.[1];
+    }
+    if (!token) return c.json({ success: true }); // nothing to revoke
+
+    try {
+      const payload = jwt.verify(token, process.env.JWT_SECRET || '') as import('../utils/jwt').JwtPayload;
+      const now = Math.floor(Date.now() / 1000);
+      const remainingSec = Math.max(0, payload.exp - now);
+      await blocklistJti(payload.jti, remainingSec * 1000);
+    } catch {
+      // Token already expired — nothing to revoke
+    }
+
+    // Clear auth cookie
+    c.header('Set-Cookie', 'auth_token=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0', { append: true });
+    return c.json({ success: true });
+  } catch (err: unknown) {
+    const e = err as Error;
+    throw new AppError('Logout failed: ' + e.message, 500, 'LOGOUT_ERROR');
+  }
 });
 
 auth.post('/register', requireAuth, requireAdmin, async (c) => {

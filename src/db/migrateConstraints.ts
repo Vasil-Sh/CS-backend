@@ -4,8 +4,8 @@
  */
 import 'dotenv/config';
 import { pool } from './client';
-import fs from 'fs';
-import path from 'path';
+import fs from 'node:fs';
+import path from 'node:path';
 
 async function runMigrations() {
   const client = await pool.connect();

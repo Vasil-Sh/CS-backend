@@ -1,8 +1,9 @@
 import type { Context, Next } from 'hono';
+import { getRequestContext } from '../utils/requestContext';
 
 /**
- * Structured request logger with error details.
- * Logs every request: method, path, status, duration.
+ * Structured request logger with transaction IDs and error details.
+ * Logs every request: method, path, status, duration, transactionId.
  * On 5xx errors, also logs the error message.
  */
 export async function loggerMiddleware(c: Context, next: Next) {
@@ -10,6 +11,7 @@ export async function loggerMiddleware(c: Context, next: Next) {
   const method = c.req.method;
   const path = c.req.path;
   const ip = c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '-';
+  const { transactionId } = getRequestContext();
 
   try {
     await next();
@@ -18,6 +20,7 @@ export async function loggerMiddleware(c: Context, next: Next) {
     const duration = Date.now() - start;
     console.error(JSON.stringify({
       level: 'error',
+      transactionId,
       method,
       path,
       status: 500,
@@ -36,6 +39,7 @@ export async function loggerMiddleware(c: Context, next: Next) {
   if (status >= 500) {
     console.error(JSON.stringify({
       level: 'error',
+      transactionId,
       method,
       path,
       status,

@@ -3,7 +3,7 @@
 // ═══════════════════════════════════════════
 
 import bcrypt from 'bcryptjs';
-import crypto from 'crypto';
+import crypto from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { db, schema } from '../db/client';
 import { signToken, signRefreshToken } from '../utils/jwt';

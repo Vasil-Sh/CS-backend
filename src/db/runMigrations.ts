@@ -1,8 +1,8 @@
 // Run migrations from Drizzle Kit generated SQL files
 import 'dotenv/config';
-import { readFileSync, readdirSync } from 'fs';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));

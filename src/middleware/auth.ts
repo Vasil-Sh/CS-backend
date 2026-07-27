@@ -1,8 +1,10 @@
 import type { Context, Next } from 'hono';
 import { verifyToken, type JwtPayload } from '../utils/jwt';
+import { isBlocked } from '../utils/jwtBlocklist';
 
 /**
  * Attach user to context if valid Bearer token present or httpOnly cookie set.
+ * Also checks JWT blocklist for revoked tokens.
  * Does NOT reject — routes that require auth call `requireAuth` after.
  */
 export async function authMiddleware(c: Context, next: Next) {
@@ -12,7 +14,12 @@ export async function authMiddleware(c: Context, next: Next) {
     const token = auth.slice(7);
     try {
       const payload = verifyToken(token);
-      c.set('user', payload);
+      // Check blocklist before accepting
+      if (await isBlocked(payload.jti)) {
+        // Token revoked — silently continue (will hit requireAuth below)
+      } else {
+        c.set('user', payload);
+      }
     } catch {
       // Invalid/expired token — silently continue
     }
@@ -24,7 +31,11 @@ export async function authMiddleware(c: Context, next: Next) {
     if (cookieToken) {
       try {
         const payload = verifyToken(cookieToken);
-        c.set('user', payload);
+        if (await isBlocked(payload.jti)) {
+          // Revoked — treat as no user
+        } else {
+          c.set('user', payload);
+        }
       } catch {
         // Invalid/expired cookie — silently continue
       }

@@ -1,5 +1,5 @@
 import jwt from 'jsonwebtoken';
-import crypto from 'crypto';
+import crypto from 'node:crypto';
 
 const SECRET = process.env.JWT_SECRET || (() => { throw new Error('JWT_SECRET must be set'); })();
 const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || crypto.randomBytes(32).toString('hex');
@@ -18,25 +18,36 @@ export interface JwtPayload {
   userId: number;
   username: string;
   role: 'admin' | 'user';
+  jti: string; // unique token ID — used for blocklisting
+  iat: number; // issued at (Unix seconds)
+  exp: number; // expiration (Unix seconds)
 }
 
-export function signToken(payload: JwtPayload): string {
-  return jwt.sign(payload as object, SECRET, { expiresIn: EXPIRES_IN } as jwt.SignOptions);
+export function signToken(payload: Omit<JwtPayload, 'jti' | 'iat' | 'exp'>): string {
+  return jwt.sign(
+    { ...payload, jti: crypto.randomUUID() },
+    SECRET,
+    { expiresIn: EXPIRES_IN } as jwt.SignOptions,
+  );
 }
 
-export function signRefreshToken(payload: JwtPayload): string {
-  return jwt.sign({ ...payload, type: 'refresh' } as object, REFRESH_SECRET, { expiresIn: REFRESH_EXPIRES_IN } as jwt.SignOptions);
+export function signRefreshToken(payload: Omit<JwtPayload, 'jti' | 'iat' | 'exp'>): string {
+  return jwt.sign(
+    { ...payload, type: 'refresh', jti: crypto.randomUUID() },
+    REFRESH_SECRET,
+    { expiresIn: REFRESH_EXPIRES_IN } as jwt.SignOptions,
+  );
 }
 
 export function verifyToken(token: string): JwtPayload {
   const decoded = jwt.verify(token, SECRET) as JwtPayload & { type?: string };
   // Access tokens must NOT have type='refresh'
   if (decoded.type === 'refresh') throw new Error('Invalid token type');
-  return decoded;
+  return decoded as JwtPayload;
 }
 
 export function verifyRefreshToken(token: string): JwtPayload {
   const decoded = jwt.verify(token, REFRESH_SECRET) as JwtPayload & { type?: string };
   if (decoded.type !== 'refresh') throw new Error('Invalid refresh token');
-  return decoded;
+  return decoded as JwtPayload;
 }

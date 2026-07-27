@@ -43,11 +43,14 @@ import { join } from 'node:path';
 import { liveScoresStore } from './services/liveScoresStore';
 import { cs2LiveScoresStore } from './services/cs2LiveScoresStore';
 import { writeFileCacheInternal } from './services/createMatchesRouter';
+import { runWithRequestContext } from './utils/requestContext';
+import { AppError } from './utils/AppError';
 
 const app = new Hono();
 
 // ── Global middleware ──
 // CORS MUST be first — handles preflight before other middleware
+app.use('*', async (c, next) => runWithRequestContext(() => next()));
 app.use('*', cors({
   origin: (origin) => {
     const isDev = process.env.NODE_ENV !== 'production';
@@ -115,8 +118,8 @@ import openapiSpec from './openapiEmbedded';
 app.get('/api/docs.json', (c) => c.json(openapiSpec));
 
 // Swagger UI
-import fs from 'fs';
-import path from 'path';
+import fs from 'node:fs';
+import path from 'node:path';
 
 let _swaggerHtml = '';
 try {
@@ -138,7 +141,7 @@ if (_swaggerHtml) {
     if (!isDev && adminPassword) {
       const key = c.req.query('key');
       if (key !== adminPassword) {
-        return c.json({ error: 'Access denied. Use ?key=<password>' }, 403);
+        throw new AppError('Access denied. Use ?key=<password>', 403, 'ACCESS_DENIED');
       }
     }
     return c.html(_swaggerHtml);
@@ -180,13 +183,19 @@ app.route('/api', v1);
 
 // ── Global error handler ──
 app.onError((err, c) => {
-  console.error('[Error]', err.message);
-  return c.json({ error: 'Internal server error' }, 500);
+  if (err instanceof AppError && err.isOperational) {
+    // Operational: show the message to the client, log as warn
+    console.warn(`[AppError] ${err.code} — ${err.message}`);
+    return c.json(err.toJSON(), err.httpStatus as 400 | 401 | 403 | 404 | 429);
+  }
+  // Programmer error / unknown: mask the message, log full stack
+  console.error('[Error]', err.message, err.stack?.split('\n').slice(0, 3).join(' | '));
+  return c.json({ error: 'Internal server error', code: 'INTERNAL_ERROR' }, 500);
 });
 
 // ── 404 handler ──
 app.notFound((c) => {
-  return c.json({ error: `Not found: ${c.req.method} ${c.req.path}` }, 404);
+  throw new AppError(`Not found: ${c.req.method} ${c.req.path}`, 404, 'NOT_FOUND');
 });
 
 // ── Start ──
