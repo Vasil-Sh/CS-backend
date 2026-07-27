@@ -221,9 +221,15 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
 
     try {
       const { data, fromCache } = await getMatchesWithSWR();
+
+      // Filter out matches from past days (date < today).
+      // Today's finished matches are still returned — frontend handles auto-hide.
+      const today = new Date().toISOString().split('T')[0];
+      const filtered = data.filter(m => m.date >= today);
+
       c.header('X-Cache', fromCache ? 'HIT' : 'MISS');
       c.header('Cache-Control', `public, max-age=${CACHE_TTL_FRESH / 1000}`);
-      return c.json(data);
+      return c.json(filtered);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';
       console.error(`[${prefix}Matches] Scrape failed:`, message);

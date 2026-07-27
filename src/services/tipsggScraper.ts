@@ -91,17 +91,19 @@ function parseEventStatus(statusUrl: string, startDate?: string): 'upcoming' | '
   if (statusUrl.includes('EventPostponed')) return 'upcoming';
   if (statusUrl.includes('EventScheduled')) return 'upcoming';
   if (statusUrl.includes('EventRescheduled')) return 'upcoming';
+  // tips.gg JSON-LD sometimes sets EventCompleted for finished matches
+  if (statusUrl.includes('EventCompleted')) return 'finished';
 
-  // Date-based fallback: only determine upcoming vs live.
-  // Finished status must come from scores (BO3=2 wins, BO5=3 wins).
-  // The 2h+ heuristic was incorrectly marking matches as finished
-  // when they might still be in-progress (e.g. BO3 0:1 after 2h).
+  // Date-based fallback: determine upcoming vs live vs finished.
   if (startDate) {
     try {
       const start = new Date(startDate).getTime();
       const now = Date.now();
-      // Match started but not yet 4h → live
-      // (4h covers Dota2 BO5 longest case; BO3 typically 2-3h)
+      const hoursSinceStart = (now - start) / (1000 * 60 * 60);
+      // Match started >6h ago and no longer live → assume finished
+      if (hoursSinceStart > 6) return 'finished';
+      // Match started within 6h → live
+      // (6h covers Dota2 BO5 worst case; BO3 typically 2-3h)
       if (start < now) return 'live';
     } catch { /* ignore */ }
   }
@@ -176,6 +178,18 @@ function extractScoresFromHtml(
     };
   }
 
+  // Fallback: try to find final result in "X:Y" format (e.g., "2:0").
+  // This catches finished matches where tips.gg replaced score spans with a result div.
+  // Restrict to 0-5 (valid CS2/Dota2 Bo5 scores) to avoid matching dates like 27:07.
+  const resultMatch = $match.text().match(/\b([0-5])\s*:\s*([0-5])\b/);
+  if (resultMatch) {
+    const r1 = parseInt(resultMatch[1], 10);
+    const r2 = parseInt(resultMatch[2], 10);
+    if (!isNaN(r1) && !isNaN(r2)) {
+      return { score1: r1, score2: r2, status: status !== 'upcoming' ? status : 'finished' };
+    }
+  }
+
   return { score1: null, score2: null, status };
 }
 
@@ -229,13 +243,22 @@ async function parseMatchesFromHtml(html: string, game: 'dota2' | 'cs2' = 'dota2
         status = 'finished';
       }
 
-      // Date-based safety override: if HTML says "live" but match started >2.5h ago, it's probably finished.
-      // BUT: only if scores confirm it (score decided) OR there are no scores (stale HTML).
-      // If scores show an undecided match (e.g. BO3 1:1), keep "live" regardless of time.
+      // Date-based safety override: if HTML says "live" but match started too long ago,
+      // it's probably finished. Threshold depends on game + format:
+      //   CS2:   BO1=1.5h, BO3=2h, BO5=3.5h
+      //   Dota2: BO1=2h,   BO3=3h, BO5=5h
+      // Only auto-finish if scores confirm it (score decided) OR there are no scores
+      // (stale HTML). If scores show an undecided match (e.g. BO3 1:1), keep "live".
       if (status === 'live') {
         try {
           const start = new Date(ld.startDate).getTime();
-          if (Date.now() - start > 2.5 * 60 * 60 * 1000 && (!hasScores || isScoreDecided)) {
+          const hoursSinceStart = (Date.now() - start) / (1000 * 60 * 60);
+          const isCs2 = game === 'cs2';
+          const maxHours = matchType === 'BO1' ? (isCs2 ? 1.5 : 2)
+            : matchType === 'BO5' ? (isCs2 ? 3.5 : 5)
+            : (isCs2 ? 2 : 3); // BO3 default
+
+          if (hoursSinceStart > maxHours && (!hasScores || isScoreDecided)) {
             status = 'finished';
           }
         } catch { /* ignore */ }
@@ -349,6 +372,43 @@ async function fetchTipsGgMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[]>
     } catch {
       // Silently fail — fallback is best-effort
     }
+  }
+
+  // ── Second pass: fill missing scores for finished matches ──
+  // When tips.gg removes a finished match from the listing page, scores come back
+  // as null. Fetch each match's detail page to get the final result.
+  const noScoreFinished = all.filter(
+    m => m.status === 'finished' && (m.score1 == null || m.score2 == null),
+  );
+  if (noScoreFinished.length > 0) {
+    const scoreBackfillStart = Date.now();
+    const DETAIL_CONCURRENCY = 4;
+    for (let i = 0; i < noScoreFinished.length; i += DETAIL_CONCURRENCY) {
+      const batch = noScoreFinished.slice(i, i + DETAIL_CONCURRENCY);
+      const batchResults = await Promise.allSettled(
+        batch.map(async (m) => {
+          const detail = await fetchMatchDetail(m.link, game);
+          return { id: m.id, detail };
+        }),
+      );
+      for (const r of batchResults) {
+        if (r.status !== 'fulfilled' || !r.value.detail) continue;
+        const { id, detail } = r.value;
+        const match = all.find(x => x.id === id);
+        if (match && detail.score1 != null && detail.score2 != null) {
+          match.score1 = detail.score1;
+          match.score2 = detail.score2;
+        }
+      }
+    }
+    const filled = noScoreFinished.filter(m => {
+      const updated = all.find(x => x.id === m.id);
+      return updated && updated.score1 != null;
+    }).length;
+    console.log(
+      `[tipsgg:${gameTag}] Score backfill: ${filled}/${noScoreFinished.length} ` +
+      `(${Date.now() - scoreBackfillStart}ms)`,
+    );
   }
 
   // Batch-fetch predictions pages for real coefficients
