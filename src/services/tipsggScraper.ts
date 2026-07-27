@@ -63,12 +63,14 @@ interface JsonLdSportsEvent {
 }
 
 function parseIsoDate(dateStr: string): string {
-  try {
-    // "2026-07-10T12:04:58+0300" → "2026-07-10"
-    return dateStr.split('T')[0];
-  } catch {
-    return '';
-  }
+  if (!dateStr || typeof dateStr !== 'string') return '';
+  // Parse ISO date string and validate it produces a valid date
+  const parts = dateStr.split('T')[0];
+  if (!parts) return '';
+  // Validate: must match YYYY-MM-DD and be a real date
+  const parsed = new Date(parts + 'T12:00:00Z');
+  if (isNaN(parsed.getTime())) return '';
+  return parts;
 }
 
 function parseMatchType(desc: string): string {
@@ -91,7 +93,6 @@ function parseEventStatus(statusUrl: string, startDate?: string): 'upcoming' | '
   if (statusUrl.includes('EventPostponed')) return 'upcoming';
   if (statusUrl.includes('EventScheduled')) return 'upcoming';
   if (statusUrl.includes('EventRescheduled')) return 'upcoming';
-  // tips.gg JSON-LD sometimes sets EventCompleted for finished matches
   if (statusUrl.includes('EventCompleted')) return 'finished';
 
   // Date-based fallback: determine upcoming vs live vs finished.
@@ -322,7 +323,7 @@ async function fetchTipsGgMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[]>
     dates.push(formatDateDdMmYyyy(new Date(Date.now() + i * 86400000)));
   }
 
-  // Fetch all 7 days with concurrency limit of 3 (avoid overwhelming tips.gg)
+  // Fetch all 8 days with concurrency limit of 5 (avoid overwhelming tips.gg)
   const CONCURRENCY = 5;
   const results: { date: string; html: string | null }[] = [];
   for (let i = 0; i < dates.length; i += CONCURRENCY) {

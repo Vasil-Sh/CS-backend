@@ -179,7 +179,11 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
               );
             }
           } else {
+            // Scrape returned 0 matches — don't overwrite cache. Return cached data if available.
             console.warn(`[${prefix}Matches] Empty scrape — keeping existing cache`);
+            // Read stale cache to serve (don't bother writing empty)
+            const stale = readFileCache<TipsGgMatch[]>(CACHE_TTL_STALE, cacheFile);
+            return stale ? stale.data : [];
           }
           return matches;
         })
@@ -198,7 +202,22 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       return { data: memResult.data, fromCache: true };
     }
 
+    // Cold start: wait for initial fetch to complete (up to 15s) so the first
+    // visitor doesn't see an empty list. Only return empty if both refresh
+    // and stale cache are unavailable.
     if (!memResult) {
+      if (state.promise) {
+        try {
+          const fresh = await Promise.race([
+            state.promise,
+            new Promise<null>(r => setTimeout(() => r(null), 15_000)),
+          ]);
+          if (fresh && fresh.length > 0) return { data: fresh, fromCache: false };
+        } catch { /* fall through */ }
+      }
+      // Re-check: refresh may have completed and written cache between checks
+      const recheck = readFileCache<TipsGgMatch[]>(CACHE_TTL_STALE, cacheFile);
+      if (recheck) return { data: recheck.data, fromCache: true };
       console.log(`[${prefix}Matches] Cold start — serving empty, refresh runs in background`);
       return { data: [], fromCache: false };
     }

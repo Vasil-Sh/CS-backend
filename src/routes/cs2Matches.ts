@@ -7,6 +7,11 @@ import { fetchCs2Matches } from '../services/tipsggScraper';
 import { cs2LiveScoresStore } from '../services/liveScoresStore';
 import { join } from 'node:path';
 
+function ddmmyyyy(): string {
+  const d = new Date();
+  return `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear()}`;
+}
+
 const CACHE_DIR = join(process.cwd(), '.cache');
 
 export default createMatchesRouter({
@@ -15,4 +20,5 @@ export default createMatchesRouter({
   liveScoresStore: cs2LiveScoresStore,
   cacheFile: join(CACHE_DIR, 'cs2_matches.json'),
   circuitBreakerName: 'tipsgg_fetch_cs2_matches',
+  healthUrl: `https://tips.gg/csgo/matches/${ddmmyyyy()}/`,
 });

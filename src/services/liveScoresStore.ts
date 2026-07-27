@@ -114,6 +114,16 @@ export class LiveScoresStore {
 
         if (status === 'upcoming' && (w1>0||w2>0)) status = 'live';
 
+        // Date-based finished detection (mirrors tipsggScraper logic).
+        // If HTML says 'live' but match started too long ago, mark as finished.
+        if (status === 'live') {
+          const startAttr = $m.attr('data-start') || $m.find('time').attr('datetime') || '';
+          if (startAttr) {
+            const hoursSinceStart = (Date.now() - new Date(startAttr).getTime()) / 3600000;
+            if (hoursSinceStart > 4) status = 'finished'; // 4h conservative cutoff for live scores
+          }
+        }
+
         ns.set(id, { id, score1: rs.length>0?w1:null, score2: rs.length>0?w2:null, status });
       });
 
