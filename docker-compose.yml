@@ -12,5 +12,17 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  browserless:
+    image: browserless/chrome:latest
+    container_name: matchiq-browserless
+    restart: unless-stopped
+    ports:
+      - '3003:3000'
+    environment:
+      CONNECTION_TIMEOUT: '300000'
+      MAX_CONCURRENT_SESSIONS: '5'
+      PREBOOT_CHROME: 'true'
+      KEEP_ALIVE: 'true'
+
 volumes:
   pgdata:

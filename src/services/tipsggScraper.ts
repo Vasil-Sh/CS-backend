@@ -725,7 +725,12 @@ function formatDateDdMmYyyy(d: Date): string {
 }
 
 // ── HTTP fetch via Puppeteer (bypasses Cloudflare JS challenge) ──
-// Uses puppeteer-extra with stealth plugin for anti-detection
+// Uses puppeteer-extra with stealth plugin for anti-detection.
+//
+// Two modes:
+//   LOCAL (default): browser runs in-process, rotated every 15 min.
+//   BROWSERLESS: if BROWSERLESS_URL env var is set, connects to a browserless/chrome
+//                Docker container via WebSocket. No rotation needed.
 
 import puppeteerExtra from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
@@ -733,25 +738,39 @@ import type { Browser, Page } from 'puppeteer';
 
 puppeteerExtra.use(StealthPlugin());
 
+const BROWSERLESS_URL = process.env.BROWSERLESS_URL || '';
+const USE_BROWSERLESS = !!BROWSERLESS_URL;
+
 const PUPPETEER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
 
 let _browser: Browser | null = null;
-let _browserAge = 0; // ms since launch — rotate periodically to avoid memory leaks
-const MAX_BROWSER_AGE = 15 * 60 * 1000; // 15 min — rotate to prevent memory creep
+let _browserAge = 0;
+const MAX_BROWSER_AGE = 15 * 60 * 1000;
 
-/** Get or create a shared browser instance. Pages are ephemeral; browser is long-lived. */
+/** Get or create a shared browser instance. */
 export async function getBrowser(): Promise<Browser> {
+  // Browserless mode: connect via WebSocket (no lifecycle management needed)
+  if (USE_BROWSERLESS) {
+    if (_browser?.connected) return _browser;
+    if (_browser) {
+      await _browser.close().catch(() => {});
+      _browser = null;
+    }
+    const wsUrl = `${BROWSERLESS_URL}?stealth&--disable-blink-features=AutomationControlled&--headless=new`;
+    _browser = await puppeteerExtra.connect({ browserWSEndpoint: wsUrl }) as Browser;
+    console.log('[scraper] Connected to browserless');
+    return _browser;
+  }
+
+  // Local mode: launch in-process with 15-min rotation
   const now = Date.now();
-  // Rotate periodically to prevent memory creep from leaked contexts
   if (_browser && (now - _browserAge) < MAX_BROWSER_AGE) {
     try {
       if (_browser.connected) return _browser;
     } catch {
-      // Browser process died (e.g. external kill) — recreate below
       _browser = null;
     }
   }
-  // Close old browser if any
   if (_browser) {
     await _browser.close().catch(() => {});
     _browser = null;
@@ -822,7 +841,12 @@ export async function fetchHtml(url: string, retries = 3): Promise<string> {
 /** Clean up browser on process exit */
 export async function closeBrowser(): Promise<void> {
   if (_browser) {
-    await _browser.close().catch(() => {});
+    // In browserless mode, disconnect (don't close — container manages its own lifecycle)
+    if (USE_BROWSERLESS) {
+      await _browser.disconnect().catch(() => {});
+    } else {
+      await _browser.close().catch(() => {});
+    }
     _browser = null;
   }
 }
