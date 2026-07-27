@@ -7,6 +7,7 @@ import './utils/env'; // Fail-fast env validation
 
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import { csrf } from 'hono/csrf';
 import { compress } from 'hono/compress';
 import { serve } from '@hono/node-server';
 import { authMiddleware } from './middleware/auth';
@@ -66,6 +67,24 @@ app.use('*', cors({
   credentials: true,
 }));
 app.use('*', compress());
+
+// ── CSRF protection ──
+// Validates Origin/Referer on state-changing requests (POST/PUT/DELETE/PATCH).
+// Non-browser clients (no Origin header) are allowed — they can't be CSRF attacks.
+// GET/HEAD/OPTIONS are never checked — they don't modify state.
+app.use('*', csrf({
+  origin: (origin) => {
+    if (!origin) return true; // non-browser: curl, mobile app, server-to-server
+    const isDev = process.env.NODE_ENV !== 'production';
+    if (isDev) {
+      // Dev: localhost + vercel previews
+      return origin.startsWith('http://localhost') || origin.endsWith('.vercel.app');
+    }
+    // Prod: matchiq.pro only
+    return origin === 'https://matchiq.pro' || origin === 'https://www.matchiq.pro';
+  },
+}));
+
 app.use('*', securityHeaders);
 app.use('*', loggerMiddleware);
 app.use('*', rateLimiterMiddleware);
