@@ -16,7 +16,7 @@ API-сервер для [MatchIQ](https://github.com/Vasil-Sh/CS) — платф
 | Rate limiting | **100 req/min per IP** + **5 req/30s для парсера** |
 | Circuit breaker | **3 failures → 5 min блок** |
 | CI/CD | **GitHub Actions** (daily scraper test) + **Railway** |
-| Тести | **Vitest** — 135 unit + інтеграційних (17 файлів) |
+| Тести | **Vitest** — 135 unit + інтеграційних (17 файлів) + **k6** (навантажувальне) |
 | Документація | **OpenAPI 3.0** + **Swagger UI** (`/api/docs`) |
 | Версіонування | **API /v1** (з backward compat `/api/*`) |
 | AI | **DeepSeek Chat** + **Google Gemini Flash** (free fallback) |
@@ -200,9 +200,26 @@ https://cs-backend-production-f9e8.up.railway.app/api/health
 ## Тести
 
 ```bash
-pnpm test          # запустити всі тести (135, 17 файлів)
+pnpm test          # запустити всі тести (135+, 17+ файлів)
 pnpm test:watch    # watch-режим
 ```
+
+### Навантажувальне тестування (k6)
+
+k6-скрипти знаходяться в кореневому `k6/` — запускаються з кореня проєкту:
+
+```bash
+# З кореня mathciq/ (не backend/)
+pnpm test:load         # smoke-тест (3 VUs, 30s) — швидка перевірка
+pnpm test:load:stress  # stress-тест (20→50 VUs, 10min) — пошук меж
+pnpm test:load:soak    # soak-тест (10 VUs, 30min) — тест стабільності
+
+# Або напряму:
+k6 run k6/smoke.js
+k6 run k6/stress.js -e API_URL=https://cs-backend-production-f9e8.up.railway.app/api
+```
+
+> ⚠️ Перед запуском переконайтесь що бекенд працює (`pnpm dev`).
 
 ## Структура
 
