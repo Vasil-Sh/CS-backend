@@ -36,10 +36,12 @@ import adminRoutes from './routes/admin';
 import adminStatsRoutes from './routes/adminStats';
 import dota2MatchesRoutes from './routes/dota2Matches';
 import cs2MatchesRoutes from './routes/cs2Matches';
+import cs2HltvMatchesRoutes from './routes/cs2HltvMatches';
 import publicProfileRoutes from './routes/publicProfile';
 import matchesHistoryRoutes from './routes/matchesHistory';
 import { closeBrowser } from './services/tipsggScraper';
 import { fetchDota2Matches, fetchCs2Matches } from './services/tipsggScraper';
+import { fetchCstestMatches } from './services/hltv/cstestClient';
 import { join } from 'node:path';
 import { liveScoresStore } from './services/liveScoresStore';
 import { cs2LiveScoresStore } from './services/cs2LiveScoresStore';
@@ -190,6 +192,7 @@ v1.route('/user', userPrefsRoutes);
 v1.route('/risky-teams', riskyTeamRoutes);
 v1.route('/dota2-matches', dota2MatchesRoutes);
 v1.route('/cs2-matches', cs2MatchesRoutes);
+v1.route('/cs2-hltv-matches', cs2HltvMatchesRoutes);
 v1.route('/matches-history', matchesHistoryRoutes);
 v1.route('', adminRoutes);
 v1.route('', adminStatsRoutes);
@@ -232,15 +235,25 @@ setTimeout(() => {
     .catch(e => console.warn('[warmup] Dota2 fetch failed:', (e as Error).message));
 }, 500);
 
-// ── Cache warmup: pre-fetch CS2 matches in background ──
+// ── Cache warmup: pre-fetch CS2 matches (tips.gg) in background ──
 setTimeout(() => {
   fetchCs2Matches()
     .then(matches => {
       writeFileCacheInternal(matches, join(process.cwd(), '.cache', 'cs2_matches.json'));
-      console.log(`[warmup] CS2 cache primed: ${matches.length} matches`);
+      console.log(`[warmup] CS2 (tips.gg) cache primed: ${matches.length} matches`);
     })
-    .catch(e => console.warn('[warmup] CS2 fetch failed:', (e as Error).message));
+    .catch(e => console.warn('[warmup] CS2 (tips.gg) fetch failed:', (e as Error).message));
 }, 1000);
+
+// ── Cache warmup: pre-fetch CS2 HLTV matches via cstest.pp.ua in background ──
+setTimeout(() => {
+  fetchCstestMatches()
+    .then(matches => {
+      writeFileCacheInternal(matches, join(process.cwd(), '.cache', 'cs2_hltv_matches.json'));
+      console.log(`[warmup] CS2 (HLTV/cstest) cache primed: ${matches.length} matches`);
+    })
+    .catch(e => console.warn('[warmup] CS2 (HLTV/cstest) fetch failed:', (e as Error).message));
+}, 1500);
 
 // ── Live scores background workers: poll tips.gg every 30s ──
 // Keep in-memory stores fresh so /live-scores returns <1ms
