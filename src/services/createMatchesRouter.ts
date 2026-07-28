@@ -344,18 +344,48 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       }
     }
 
-    // Fetch via HTTP (no Puppeteer — these are public CDN images)
+    // Fetch via HTTP (works for cstest, HLTV). For tips.gg CDN, use Puppeteer.
     try {
-      const resp = await fetch(externalUrl, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Accept': 'image/*,*/*;q=0.8',
-        },
-        signal: AbortSignal.timeout(8_000),
-      });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const buf = Buffer.from(await resp.arrayBuffer());
-      if (buf.length < 100) throw new Error('Too small');
+      const isTipsGgCdn = externalUrl.includes('files.tips.gg');
+      let buf: Buffer;
+
+      if (isTipsGgCdn) {
+        // tips.gg CDN is behind Cloudflare — use Puppeteer's browser context
+        const browser = await getBrowser();
+        const page = await browser.newPage();
+        try {
+          const base64DataUrl = await page.evaluate(async (url: string): Promise<string | null> => {
+            try {
+              const res = await fetch(url, { headers: { 'Referer': 'https://tips.gg/' } });
+              if (!res.ok) return null;
+              const blob = await res.blob();
+              const arrayBuffer = await blob.arrayBuffer();
+              const bytes = new Uint8Array(arrayBuffer);
+              let binary = '';
+              for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+              return 'data:' + blob.type + ';base64,' + btoa(binary);
+            } catch { return null; }
+          }, externalUrl);
+
+          if (!base64DataUrl) throw new Error('Puppeteer fetch failed');
+          const base64Data = base64DataUrl.replace(/^data:[^;]+;base64,/, '');
+          buf = Buffer.from(base64Data, 'base64');
+        } finally {
+          await page.close().catch(() => {});
+        }
+      } else {
+        // Non-tips.gg CDN — plain HTTP fetch is fine
+        const resp = await fetch(externalUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'image/*,*/*;q=0.8',
+          },
+          signal: AbortSignal.timeout(8_000),
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        buf = Buffer.from(await resp.arrayBuffer());
+        if (buf.length < 100) throw new Error('Too small');
+      }
 
       ensureCacheDir();
       writeFileSync(binCacheFile, buf);
