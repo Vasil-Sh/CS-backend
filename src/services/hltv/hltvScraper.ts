@@ -103,6 +103,7 @@ async function fetchMatchListing(page: Page): Promise<HltvMatch[]> {
 
 /**
  * Navigate to a specific match page and extract game details.
+ * Reuses an existing page (caller manages lifecycle).
  */
 async function fetchGameDetail(
   page: Page,
@@ -113,15 +114,78 @@ async function fetchGameDetail(
   await navigateAndWait(page, fullUrl, 3000);
 
   const script = loadJs('GameParser.js');
-  // GameParser.js is already an IIFE — evaluate directly
 
   try {
     const raw = await page.evaluate(script);
     if (!raw || typeof raw !== 'object') return null;
     return raw as HltvGameDetail;
   } catch {
-    // GameParser may fail if page structure changed
     return null;
+  }
+}
+
+/**
+ * Fetch game detail with its own page lifecycle (creates/closes a page).
+ * Use this from routes that don't manage pages themselves.
+ */
+/**
+ * Fetch match score with its own stealth browser (bypasses HLTV Cloudflare).
+ * Uses local puppeteer-extra + stealth plugin even when BROWSERLESS is configured.
+ */
+export async function fetchMatchScore(
+  matchUrl: string,
+): Promise<{ score1: number; score2: number; type: string } | null> {
+  // Dynamic imports so this module doesn't force puppeteer-extra dependency on startup
+  const puppeteerExtra = (await import('puppeteer-extra')).default;
+  const StealthPlugin = (await import('puppeteer-extra-plugin-stealth')).default;
+  puppeteerExtra.use(StealthPlugin());
+
+  const browser = await puppeteerExtra.launch({
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-blink-features=AutomationControlled',
+    ],
+  });
+
+  let page: Page | null = null;
+  try {
+    page = await browser.newPage();
+    await page.setUserAgent(PUPPETEER_UA);
+    await page.setViewport({ width: 1920, height: 1080 });
+    await page.setExtraHTTPHeaders({
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.9',
+    });
+
+    const fullUrl = matchUrl.startsWith('http') ? matchUrl : `${HLTV_BASE}${matchUrl}`;
+
+    await page.goto(fullUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+    // Wait for HLTV Vue.js hydration
+    await new Promise(r => setTimeout(r, 4000));
+
+    const script = loadJs('GameParser.js');
+    const raw = await page.evaluate(script);
+    const detail = raw && typeof raw === 'object' ? raw as HltvGameDetail : null;
+
+    if (!detail) {
+      console.warn(`[hltv:score] Parser returned null for ${fullUrl}`);
+      return null;
+    }
+
+    const hasPositiveScore = detail.score1 > 0 || detail.score2 > 0;
+    if (!hasPositiveScore) {
+      console.warn(`[hltv:score] No scores for ${fullUrl}: ${detail.score1}-${detail.score2}`);
+      return null;
+    }
+
+    console.log(`[hltv:score] ${detail.nameTeam1} ${detail.score1}-${detail.score2} ${detail.nameTeam2}`);
+    return { score1: detail.score1, score2: detail.score2, type: detail.type };
+  } finally {
+    if (page) await page.close().catch(() => {});
+    await browser.close().catch(() => {});
   }
 }
 

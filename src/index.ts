@@ -41,7 +41,6 @@ import publicProfileRoutes from './routes/publicProfile';
 import matchesHistoryRoutes from './routes/matchesHistory';
 import { closeBrowser } from './services/tipsggScraper';
 import { fetchDota2Matches, fetchCs2Matches } from './services/tipsggScraper';
-import { fetchCstestMatches } from './services/hltv/cstestClient';
 import { join } from 'node:path';
 import { liveScoresStore } from './services/liveScoresStore';
 import { cs2LiveScoresStore } from './services/cs2LiveScoresStore';
@@ -244,16 +243,6 @@ setTimeout(() => {
     })
     .catch(e => console.warn('[warmup] CS2 (tips.gg) fetch failed:', (e as Error).message));
 }, 1000);
-
-// ── Cache warmup: pre-fetch CS2 HLTV matches via cstest.pp.ua in background ──
-setTimeout(() => {
-  fetchCstestMatches()
-    .then(matches => {
-      writeFileCacheInternal(matches, join(process.cwd(), '.cache', 'cs2_hltv_matches.json'));
-      console.log(`[warmup] CS2 (HLTV/cstest) cache primed: ${matches.length} matches`);
-    })
-    .catch(e => console.warn('[warmup] CS2 (HLTV/cstest) fetch failed:', (e as Error).message));
-}, 1500);
 
 // ── Live scores background workers: poll tips.gg every 30s ──
 // Keep in-memory stores fresh so /live-scores returns <1ms

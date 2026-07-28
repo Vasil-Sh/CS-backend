@@ -39,21 +39,34 @@ interface CstestGame {
  * Convert cstest.pp.ua Game to TipsGgMatch (unified format).
  */
 function cstestToTipsGgMatch(g: CstestGame): TipsGgMatch {
-  const scores = g.isLive || (g.score1 > 0 || g.score2 > 0);
-  const finished = !g.isLive && scores;
-  const status: 'upcoming' | 'live' | 'finished' = finished
+  const now = Date.now();
+  const matchTime = new Date(g.date).getTime();
+  const hoursAgo = (now - matchTime) / (1000 * 60 * 60);
+
+  // SC parser only scrapes listing page — it returns score 0 for finished matches
+  // that it hasn't visited. Detect finished matches: not live + started >2h ago.
+  // CS2 BO3 rarely exceeds 2h; even BO5 OT wraps up under 4h. 2h is the sweet spot
+  // — short enough to catch all finished, long enough to not flag delayed starts.
+  const hasRealScore = g.score1 > 0 || g.score2 > 0;
+  const isFinished = !g.isLive && (hasRealScore || hoursAgo > 2);
+
+  const status: 'upcoming' | 'live' | 'finished' = isFinished
     ? 'finished'
     : g.isLive
       ? 'live'
       : 'upcoming';
 
+  // Strip " (Online)" / " (LAN)" suffix from type (e.g. "bo3 (Online)" → "BO3")
+  const cleanType = g.type.replace(/\s*\(.*\)/i, '').toUpperCase();
+
   return {
     id: String(g.id),
     date: g.date.split('T')[0],
     link: g.link.startsWith('http') ? g.link : `https://www.hltv.org${g.link}`,
-    type: g.type.toUpperCase(),
-    score1: g.score1 || null,
-    score2: g.score2 || null,
+    type: cleanType || 'BO3',
+    // Use ?? null — but if cstest says 0 and we don't have real scores, set null
+    score1: hasRealScore || g.isLive ? (g.score1 ?? null) : null,
+    score2: hasRealScore || g.isLive ? (g.score2 ?? null) : null,
     nameTeam1: g.nameTeam1,
     nameTeam2: g.nameTeam2,
     logoTeam1: g.logoTeam1,

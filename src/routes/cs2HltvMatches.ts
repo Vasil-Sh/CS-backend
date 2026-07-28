@@ -13,11 +13,12 @@
 import { Hono } from 'hono';
 import { createMatchesRouter } from '../services/createMatchesRouter';
 import { fetchCstestMatches } from '../services/hltv/cstestClient';
-import { fetchCs2Matches, getBrowser, type TipsGgMatch } from '../services/tipsggScraper';
+import { fetchCs2Matches, type TipsGgMatch, getBrowser } from '../services/tipsggScraper';
 import {
   fetchHltvRanking,
   fetchHltvTeamMaps,
   fetchHltvGameDetails,
+  fetchMatchScore,
   setBrowserFactory,
 } from '../services/hltv/hltvScraper';
 import { cs2LiveScoresStore } from '../services/liveScoresStore';
@@ -37,12 +38,58 @@ const CACHE_DIR = join(process.cwd(), '.cache');
 const RANKING_CACHE_FILE = join(CACHE_DIR, 'hltv_ranking.json');
 const RANKING_CACHE_TTL = 6 * 60 * 60 * 1000; // 6 hours
 
-// Fetch: primary = cstest.pp.ua, fallback = tips.gg
+// Fetch: primary = cstest.pp.ua, fallback = tips.gg.
+// Enriches finished matches with missing scores via Puppeteer (HLTV detail pages).
 async function fetchFn(): Promise<TipsGgMatch[]> {
   try {
     const primary = await fetchCstestMatches();
-    if (primary.length > 10) return primary; // 50+ expected from cstest
-    console.warn('[cs2-hltv] cstest.pp.ua returned only', primary.length, '— trying fallback');
+    if (primary.length <= 10) {
+      console.warn('[cs2-hltv] cstest.pp.ua returned only', primary.length, '— trying fallback');
+      return fetchCs2Matches();
+    }
+
+    // ── Score enrichment: cstest doesn't visit match pages — fill in missing scores ──
+    const needsScores = primary.filter(
+      m => m.status === 'finished' && (m.score1 == null || m.score2 == null),
+    );
+    if (needsScores.length > 0) {
+      const startTime = Date.now();
+      const CONCURRENCY = 4;
+      let enriched = 0;
+
+      for (let i = 0; i < needsScores.length; i += CONCURRENCY) {
+        const batch = needsScores.slice(i, i + CONCURRENCY);
+        const results = await Promise.allSettled(
+          batch.map(async (m) => {
+            const score = await fetchMatchScore(m.link);
+            return { id: m.id, score };
+          }),
+        );
+
+        for (const r of results) {
+          if (r.status !== 'fulfilled' || !r.value.score) continue;
+          const { id, score } = r.value;
+          const match = primary.find(x => x.id === id);
+          if (match) {
+            match.score1 = score.score1;
+            match.score2 = score.score2;
+            match.type = score.type.toUpperCase();
+            enriched++;
+          }
+        }
+
+        if (i + CONCURRENCY < needsScores.length) {
+          await new Promise(r => setTimeout(r, 300));
+        }
+      }
+
+      console.log(
+        `[cs2-hltv] Score enrichment: ${enriched}/${needsScores.length} ` +
+        `(${Date.now() - startTime}ms)`,
+      );
+    }
+
+    return primary;
   } catch (e) {
     console.warn('[cs2-hltv] cstest.pp.ua failed:', (e as Error).message, '— trying fallback');
   }
