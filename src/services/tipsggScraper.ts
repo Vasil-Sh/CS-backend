@@ -926,9 +926,14 @@ export async function fetchLiveHtml(url: string, retries = 1): Promise<string | 
       }
       const html = await resp.text();
       if (html.length < 2000) return null;
-      // Detect Cloudflare — fall through to Puppeteer
-      if (html.includes('_cf_chl_opt') || html.includes('Just a moment') || html.includes('cf-browser-verify')) {
-        console.warn('[fetchLiveHtml] Cloudflare challenge — will fall back to Puppeteer');
+      // Detect Cloudflare — any of: legacy markers, new minimal CF, or small page with no match HTML
+      const isCloudflare =
+        html.includes('_cf_chl_opt') || html.includes('Just a moment') ||
+        html.includes('cf-browser-verify') || html.includes('cf-captcha') ||
+        html.includes('Attention Required') || /Ray ID: [0-9a-f]+/.test(html) ||
+        (html.length < 5000 && !html.includes('class="element match') && !html.includes('application/ld+json'));
+      if (isCloudflare) {
+        console.warn('[fetchLiveHtml] Cloudflare challenge detected');
         return null;
       }
       if (!html.includes('class="element match') && !html.includes('application/ld+json')) {
