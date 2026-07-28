@@ -323,7 +323,9 @@ async function fetchTipsGgMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[]>
     dates.push(formatDateDdMmYyyy(new Date(Date.now() + i * 86400000)));
   }
 
-  // Fetch all 8 days with concurrency limit of 5 (avoid overwhelming tips.gg)
+  // Fetch ALL 8 days with concurrency limit of 5.
+  // HTTP first (fast), Puppeteer fallback for Cloudflare-blocked pages.
+  // Future dates are often behind Cloudflare → Puppeteer stealth bypasses it.
   const CONCURRENCY = 5;
   const results: { date: string; html: string | null }[] = [];
   for (let i = 0; i < dates.length; i += CONCURRENCY) {
@@ -331,7 +333,6 @@ async function fetchTipsGgMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[]>
     const batchResults = await Promise.allSettled(
       batch.map(async (date) => {
         const url = `${TIPSGG_BASE}/${gamePath}/matches/${date}/`;
-        // Fast HTTP first (100-500ms), fallback to Puppeteer on Cloudflare
         let html = await fetchLiveHtml(url, 1);
         if (!html) {
           try { html = await fetchHtml(url, 1); } catch { /* ignore */ }
@@ -360,25 +361,6 @@ async function fetchTipsGgMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[]>
         seen.add(m.id);
         all.push(m);
       }
-    }
-  }
-
-  // If all 7 days returned nothing, try the main listing page as last resort
-  if (all.length === 0) {
-    try {
-      const mainUrl = `${TIPSGG_BASE}/${gamePath}/matches/`;
-      let mainHtml = await fetchLiveHtml(mainUrl, 1);
-      if (!mainHtml) mainHtml = await fetchHtml(mainUrl);
-      const mainMatches = await parseMatchesFromHtml(mainHtml, game);
-      for (const m of mainMatches) {
-        if (!seen.has(m.id)) {
-          seen.add(m.id);
-          all.push(m);
-        }
-      }
-      console.log(`[tipsgg:${gameTag}] Fallback: ${mainMatches.length} matches from main listing`);
-    } catch {
-      // Silently fail — fallback is best-effort
     }
   }
 

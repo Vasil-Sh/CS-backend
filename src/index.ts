@@ -315,6 +315,7 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
 
       // Build lookup: id → match + normalized name → match for fuzzy dedup
       const existingMap = new Map(existing.map((m: any) => [m.id, m]));
+      const prevCount = existing.length; // track before merge to prevent shrinking
       const fuzzyIndex: Map<string, { match: any; namePair: string }> = new Map();
       for (const m of existing) {
         const pair = `${normalizeTeam(m.nameTeam1)}|||${normalizeTeam(m.nameTeam2)}`;
@@ -364,15 +365,22 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
         }
       }
 
+      // ── Write back only if we didn't shrink the cache ──
+      // Prevents incremental (today-only 3 matches) from overwriting
+      // a full 8-day warmup result (31 matches).
       if (updates > 0 || added > 0) {
-        writeFileCacheInternal(existing, cacheFile);
-        const parts: string[] = [];
-        if (added > 0) parts.push(`+${added} new`);
-        if (skippedDupes > 0) parts.push(`${skippedDupes} deduped`);
-        if (skippedUnmatched > 0) parts.push(`${skippedUnmatched} unmatched`);
-        if (updates > 0) parts.push(`${updates} updated`);
-        if (parts.length > 0) {
-          console.log(`[incr:${tag}] ${parts.join(', ')} (${existing.length} total)`);
+        if (existing.length < prevCount) {
+          console.log(`[incr:${tag}] Skipped write (would shrink ${prevCount}→${existing.length})`);
+        } else {
+          writeFileCacheInternal(existing, cacheFile);
+          const parts: string[] = [];
+          if (added > 0) parts.push(`+${added} new`);
+          if (skippedDupes > 0) parts.push(`${skippedDupes} deduped`);
+          if (skippedUnmatched > 0) parts.push(`${skippedUnmatched} unmatched`);
+          if (updates > 0) parts.push(`${updates} updated`);
+          if (parts.length > 0) {
+            console.log(`[incr:${tag}] ${parts.join(', ')} (${existing.length} total)`);
+          }
         }
       }
     } catch (err) {
