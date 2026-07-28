@@ -266,6 +266,34 @@ cstestLiveScoresStore.startBackgroundWorker(7_000);
 // ── Incremental refresh: fast HTTP fetch of today's page every 60s ──
 // Merges new matches & scores into the file cache without a full 8-day scrape.
 // This covers: new matches appearing on today's listing, score changes, status transitions.
+
+/**
+ * Normalize a team name for fuzzy matching: lowercase, strip suffixes like
+ * "esports"/"gaming", remove non-alphanumeric chars.
+ * "UNiTY esports" and "UNiTY" both → "unity"
+ */
+function normalizeTeam(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/\b(esports|gaming|team|academy|acad)\b/gi, '')
+    .replace(/[^a-z0-9]/g, '')
+    .trim();
+}
+
+/**
+ * Check if two matches are likely the same: same date + fuzzy team name match.
+ */
+function isSameMatch(a: { date: string; nameTeam1: string; nameTeam2: string },
+                     b: { date: string; nameTeam1: string; nameTeam2: string }): boolean {
+  if (a.date !== b.date) return false;
+  const a1 = normalizeTeam(a.nameTeam1);
+  const a2 = normalizeTeam(a.nameTeam2);
+  const b1 = normalizeTeam(b.nameTeam1);
+  const b2 = normalizeTeam(b.nameTeam2);
+  // Same teams in same order, OR swapped
+  return (a1 === b1 && a2 === b2) || (a1 === b2 && a2 === b1);
+}
+
 function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: string): void {
   const interval = setInterval(async () => {
     try {
@@ -281,10 +309,11 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
         } catch { /* stale cache */ }
       }
 
-      // Merge: update existing matches, add new ones
+      // Merge: update existing matches, add new ones (with fuzzy dedup)
       const existingMap = new Map(existing.map((m: any) => [m.id, m]));
       let updates = 0;
       let added = 0;
+      let skippedDupes = 0;
 
       for (const tm of todayMatches) {
         const prev = existingMap.get(tm.id);
@@ -297,6 +326,19 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
             updates++;
           }
         } else {
+          // Fuzzy dedup: check if same match exists with different slug
+          const dupe = existing.find((m: any) => isSameMatch(m, tm));
+          if (dupe) {
+            // Update existing match's scores but keep its data (cstest logos etc.)
+            if (dupe.status !== 'finished') {
+              if (tm.score1 != null) dupe.score1 = tm.score1;
+              if (tm.score2 != null) dupe.score2 = tm.score2;
+              if (tm.status !== 'upcoming') dupe.status = tm.status;
+              updates++;
+            }
+            skippedDupes++;
+            continue;
+          }
           existing.push(tm as any);
           existingMap.set(tm.id, tm as any);
           added++;
@@ -305,8 +347,12 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
 
       if (updates > 0 || added > 0) {
         writeFileCacheInternal(existing, cacheFile);
-        if (added > 0 || updates > 3) {
-          console.log(`[incr:${tag}] +${added} new, ${updates} updated (${existing.length} total)`);
+        const parts: string[] = [];
+        if (added > 0) parts.push(`+${added} new`);
+        if (skippedDupes > 0) parts.push(`${skippedDupes} deduped`);
+        if (updates > 0 && (added > 0 || updates > 3)) parts.push(`${updates} updated`);
+        if (parts.length > 0) {
+          console.log(`[incr:${tag}] ${parts.join(', ')} (${existing.length} total)`);
         }
       }
     } catch (err) {

@@ -9,6 +9,8 @@
  */
 
 import type { TipsGgMatch } from '../tipsggScraper';
+import { fetchLiveHtml } from '../tipsggScraper';
+import * as cheerio from 'cheerio';
 
 const CSTEST_BASE = 'https://api.cstest.pp.ua';
 
@@ -60,6 +62,22 @@ interface CstestGame {
 }
 
 /**
+ * Sanitize external logo URL: skip fallbacks, fix broken URLs.
+ * Returns null for invalid/fallback images so frontend can render placeholder.
+ */
+function sanitizeLogoUrl(url: string | null): string | null {
+  if (!url) return null;
+  // Skip generic fallback images
+  if (/fallback\.(webp|png|svg)/i.test(url)) return null;
+  // Encode spaces and other unsafe chars for valid HTTP URLs
+  try {
+    return encodeURI(url);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Convert cstest.pp.ua Game to TipsGgMatch (unified format).
  */
 function cstestToTipsGgMatch(g: CstestGame): TipsGgMatch {
@@ -93,8 +111,8 @@ function cstestToTipsGgMatch(g: CstestGame): TipsGgMatch {
     score2: hasRealScore || g.isLive ? (g.score2 ?? null) : null,
     nameTeam1: g.nameTeam1,
     nameTeam2: g.nameTeam2,
-    logoTeam1: g.logoTeam1,
-    logoTeam2: g.logoTeam2,
+    logoTeam1: sanitizeLogoUrl(g.logoTeam1),
+    logoTeam2: sanitizeLogoUrl(g.logoTeam2),
     tournament: '',
     stage: '',
     status,
@@ -148,10 +166,6 @@ export async function fetchCstestMatches(): Promise<TipsGgMatch[]> {
   }
 }
 
-// ── CstestLiveScoresStore — polls cstest API for live scores ──
-// Separate from tips.gg-based LiveScoresStore because cstest has different
-// match IDs (team-name slugs generated from HLTV data).
-
 export interface LiveScoreState {
   id: string;
   score1: number | null;
@@ -165,6 +179,16 @@ export interface LiveScoresResponse {
   interval: number;
 }
 
+// ── CstestLiveScoresStore — dual-source live scores for CS2 ──
+//
+// Architecture:
+//   1. cstest API → match list + isLive flag (coverage: 50+ matches)
+//   2. tips.gg CS2 today page → real scores from HTML (via fast HTTP)
+//   3. Merge: cstest provides match discovery, tips.gg provides real scores
+//
+// Dead-man switch: if cstest fails 3× consecutively, switch to tips.gg-only mode.
+// Auto-recover when cstest comes back online.
+
 export class CstestLiveScoresStore {
   private store = new Map<string, LiveScoreState>();
   private lastStore = new Map<string, LiveScoreState>();
@@ -172,6 +196,10 @@ export class CstestLiveScoresStore {
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private lastUpdate = 0;
   private currentInterval = 7_000;
+  private cstestFailCount = 0;
+  private tipsggFailCount = 0;
+  private lastCstestLatency = 0;
+  private lastTipsggLatency = 0;
 
   startBackgroundWorker(intervalMs = 7_000): void {
     if (this.intervalId) return;
@@ -182,20 +210,12 @@ export class CstestLiveScoresStore {
     console.log(`[CstestLiveScoresStore] Worker started (${intervalMs}ms)`);
   }
 
-  stopBackgroundWorker(): void {
-    if (this.intervalId) { clearInterval(this.intervalId); this.intervalId = null; }
-  }
-
   getScores(): LiveScoreState[] {
     return Array.from(this.store.values());
   }
 
   getResponse(): LiveScoresResponse {
-    return {
-      scores: this.getScores(),
-      lastUpdate: this.lastUpdate,
-      interval: this.currentInterval,
-    };
+    return { scores: this.getScores(), lastUpdate: this.lastUpdate, interval: this.currentInterval };
   }
 
   getChangedScores(): LiveScoreState[] {
@@ -215,61 +235,206 @@ export class CstestLiveScoresStore {
     return n;
   }
 
+  /** Expose metrics for health monitoring. */
+  getMetrics() {
+    return {
+      storeSize: this.store.size,
+      cstestFailCount: this.cstestFailCount,
+      tipsggFailCount: this.tipsggFailCount,
+      lastCstestLatency: this.lastCstestLatency,
+      lastTipsggLatency: this.lastTipsggLatency,
+    };
+  }
+
+  // ── Score update: fetch cstest + tips.gg in parallel, merge ──
   private async updateScores(): Promise<void> {
     if (this.isUpdating) return;
     this.isUpdating = true;
+    const t0 = Date.now();
+
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10_000);
+      // ── Fetch both sources in parallel ──
+      const [cstestResult, tipsggScores] = await Promise.allSettled([
+        this.fetchCstestScores(),
+        this.fetchTipsggScores(),
+      ]);
 
-      try {
-        const response = await fetch(`${CSTEST_BASE}/api/Game/TodaysAndUpcoming`, {
-          method: 'GET',
-          headers: { Accept: 'application/json' },
-          signal: controller.signal,
-        });
-        clearTimeout(timeout);
+      // ── Build final store ──
+      const ns = new Map<string, LiveScoreState>();
 
-        if (!response.ok) return;
-        const raw = (await response.json()) as CstestGame[];
-        if (!Array.isArray(raw)) return;
+      // Primary: cstest provides the match list (coverage)
+      if (cstestResult.status === 'fulfilled' && cstestResult.value) {
+        for (const s of cstestResult.value) {
+          ns.set(s.id, { ...s });
+        }
+        this.cstestFailCount = 0;
+      } else {
+        this.cstestFailCount++;
+        if (cstestResult.status === 'rejected') {
+          console.warn(`[CstestLiveScoresStore] cstest fetch failed (×${this.cstestFailCount}):`,
+            (cstestResult.reason as Error)?.message);
+        }
+      }
 
-        const ns = new Map<string, LiveScoreState>();
-        for (const g of raw) {
-          const slug = generateMatchSlug(g.nameTeam1, g.nameTeam2);
-          let status = 'upcoming';
-          if (g.isLive) status = 'live';
-          else if (g.score1 > 0 || g.score2 > 0) {
-            // cstest has scores → determine if finished
-            const matchTime = new Date(g.date).getTime();
-            const hoursAgo = (Date.now() - matchTime) / (1000 * 60 * 60);
-            status = hoursAgo > 2 ? 'finished' : 'live';
-          } else {
-            const matchTime = new Date(g.date).getTime();
-            const hoursAgo = (Date.now() - matchTime) / (1000 * 60 * 60);
-            if (hoursAgo > 4) status = 'finished';
+      // Secondary: tips.gg provides real scores — overlay on cstest entries
+      if (tipsggScores.status === 'fulfilled') {
+        let overlays = 0;
+        let newEntries = 0;
+        for (const ts of tipsggScores.value) {
+          const existing = ns.get(ts.id);
+          if (existing) {
+            // Overlay tips.gg real scores on cstest match if:
+            // - tips.gg has non-null scores (cstest may show 0-0)
+            // - Don't overwrite non-zero cstest scores with null tips.gg scores
+            if (ts.score1 != null) existing.score1 = ts.score1;
+            if (ts.score2 != null) existing.score2 = ts.score2;
+            // Status: trust tips.gg more (they update CSS classes faster)
+            if (ts.status !== 'upcoming') existing.status = ts.status;
+            overlays++;
+          } else if (this.cstestFailCount >= 3) {
+            // Dead-man switch: cstest is down → add tips.gg entries directly
+            ns.set(ts.id, ts);
+            newEntries++;
           }
-
-          ns.set(slug, {
-            id: slug,
-            score1: g.score1 ?? null,
-            score2: g.score2 ?? null,
-            status,
-          });
         }
+        this.tipsggFailCount = 0;
 
-        if (ns.size > 0) {
-          this.lastStore = new Map(this.store);
-          this.store = ns;
-          this.lastUpdate = Date.now();
+        const liveNow = [...ns.values()].filter(s => s.status === 'live').length;
+        if (overlays > 0 || newEntries > 0 || liveNow > 0) {
+          const ms = Date.now() - t0;
+          console.log(
+            `[CstestLiveScoresStore] ${ns.size} matches (${liveNow} live) | ` +
+            `${overlays} scores overlaid from tips.gg` +
+            (newEntries ? ` | +${newEntries} from tips.gg (dead-man)` : '') +
+            ` | ${ms}ms`,
+          );
         }
-      } finally {
-        clearTimeout(timeout);
+      } else {
+        this.tipsggFailCount++;
+      }
+
+      if (ns.size > 0) {
+        this.lastStore = new Map(this.store);
+        this.store = ns;
+        this.lastUpdate = Date.now();
       }
     } catch (err) {
       console.error('[CstestLiveScoresStore] fail:', (err as Error).message);
     } finally {
       this.isUpdating = false;
+    }
+  }
+
+  // ── Fetch from cstest API ──
+  private async fetchCstestScores(): Promise<LiveScoreState[] | null> {
+    const t0 = Date.now();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+
+    try {
+      const response = await fetch(`${CSTEST_BASE}/api/Game/TodaysAndUpcoming`, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      if (!response.ok) return null;
+      const raw = (await response.json()) as CstestGame[];
+      if (!Array.isArray(raw)) return null;
+
+      const result: LiveScoreState[] = [];
+      for (const g of raw) {
+        const slug = generateMatchSlug(g.nameTeam1, g.nameTeam2);
+        let status = 'upcoming';
+        if (g.isLive) status = 'live';
+        else if (g.score1 > 0 || g.score2 > 0) {
+          const matchTime = new Date(g.date).getTime();
+          const hoursAgo = (Date.now() - matchTime) / (1000 * 60 * 60);
+          status = hoursAgo > 2 ? 'finished' : 'live';
+        } else {
+          const matchTime = new Date(g.date).getTime();
+          const hoursAgo = (Date.now() - matchTime) / (1000 * 60 * 60);
+          if (hoursAgo > 4) status = 'finished';
+        }
+
+        result.push({
+          id: slug,
+          score1: g.score1 ?? null,
+          score2: g.score2 ?? null,
+          status,
+        });
+      }
+      this.lastCstestLatency = Date.now() - t0;
+      return result;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  // ── Fetch from tips.gg CS2 today page (HTTP, real scores via HTML parsing) ──
+  private async fetchTipsggScores(): Promise<LiveScoreState[]> {
+    const t0 = Date.now();
+    try {
+      const today = new Date();
+      const dd = String(today.getDate()).padStart(2, '0');
+      const mm = String(today.getMonth() + 1).padStart(2, '0');
+      const yyyy = today.getFullYear();
+      const url = `https://tips.gg/csgo/matches/${dd}-${mm}-${yyyy}/`;
+
+      const html = await fetchLiveHtml(url, 1);
+      if (!html) return [];
+      const $ = cheerio.load(html);
+      const result: LiveScoreState[] = [];
+
+      $('.element.match').each((_, el) => {
+        const $m = $(el);
+        let status = 'upcoming';
+        if ($m.hasClass('finished')) status = 'finished';
+        else if ($m.hasClass('live')) status = 'live';
+
+        const href = $m.find('a.match-link').attr('href') || '';
+        const p = href.replace(/\/$/, '').split('/');
+        const id = p[p.length - 2] || p[p.length - 1] || '';
+        if (!id) return;
+
+        const rs: number[] = [];
+        $m.find('.scores .score').each((_, se) => {
+          const v = parseInt($(se).text().trim(), 10);
+          if (!isNaN(v)) rs.push(v);
+        });
+
+        let w1 = 0, w2 = 0;
+        for (let i = 0; i + 1 < rs.length; i += 2) {
+          if (rs[i] > rs[i + 1]) w1++;
+          else if (rs[i + 1] > rs[i]) w2++;
+        }
+
+        if (status === 'upcoming' && (w1 > 0 || w2 > 0)) status = 'live';
+
+        if (status === 'live') {
+          const startAttr = $m.attr('data-start') || $m.find('time').attr('datetime') || '';
+          if (startAttr) {
+            const hoursSinceStart = (Date.now() - new Date(startAttr).getTime()) / 3600000;
+            if (hoursSinceStart > 4) status = 'finished';
+          }
+        }
+
+        result.push({
+          id,
+          score1: rs.length > 0 ? w1 : null,
+          score2: rs.length > 0 ? w2 : null,
+          status,
+        });
+      });
+
+      this.lastTipsggLatency = Date.now() - t0;
+      return result;
+    } catch (err) {
+      console.warn('[CstestLiveScoresStore] tips.gg fetch failed:', (err as Error).message);
+      return [];
     }
   }
 }

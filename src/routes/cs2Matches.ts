@@ -33,7 +33,7 @@ async function fetchCs2MatchesAll(): Promise<TipsGgMatch[]> {
   return fetchCs2Matches();
 }
 
-export default createMatchesRouter({
+const router = createMatchesRouter({
   game: 'cs2',
   fetchFn: fetchCs2MatchesAll,
   liveScoresStore: cstestLiveScoresStore,
@@ -41,3 +41,14 @@ export default createMatchesRouter({
   circuitBreakerName: 'tipsgg_fetch_cs2_matches',
   healthUrl: `https://tips.gg/csgo/matches/${ddmmyyyy()}/`,
 });
+
+// ── GET /live-scores/metrics — parser health & latency ──
+router.get('/live-scores/metrics', (c) => {
+  return c.json({
+    ...cstestLiveScoresStore.getMetrics(),
+    storeAge: Date.now() - (cstestLiveScoresStore.getResponse().lastUpdate || 0),
+    liveCount: cstestLiveScoresStore.getLiveCount(),
+  });
+});
+
+export default router;

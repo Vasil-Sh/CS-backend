@@ -26,6 +26,18 @@ const CACHE_TTL_FRESH = 5 * 60 * 1000;   // 5 min — normal TTL
 const CACHE_TTL_STALE = 60 * 60 * 1000;  // 1 hour — serve stale only if fresh fetch fails
 const CACHE_DIR = join(process.cwd(), '.cache');
 
+/**
+ * Rewrite external logo URLs to use our internal HTTP proxy.
+ * Applied server-side so ALL clients get CORS-safe, properly encoded URLs.
+ */
+function proxyLogoUrl(url: string | null, prefix: string): string | null {
+  if (!url) return null;
+  if (/fallback\.(webp|png|svg)/i.test(url)) return null;
+  if (url.startsWith('/api/')) return url;
+  const encoded = Buffer.from(url).toString('base64url');
+  return `/api/v1/${prefix}-matches/logo/external/${encoded}`;
+}
+
 // In-memory cache — avoids sync file reads on every request
 const memCache = new Map<string, { data: unknown; ts: number; day: string }>();
 const MEM_CACHE_TTL = 30_000; // 30s before stale-check falls back to disk
@@ -268,6 +280,12 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       const today = new Date().toISOString().split('T')[0];
       const filtered = data.filter(m => m.date >= today);
 
+      // ── Rewrite logo URLs to internal proxy (CORS-safe, no broken URLs) ──
+      for (const m of filtered) {
+        m.logoTeam1 = proxyLogoUrl(m.logoTeam1, prefix);
+        m.logoTeam2 = proxyLogoUrl(m.logoTeam2, prefix);
+      }
+
       c.header('X-Cache', fromCache ? 'HIT' : 'MISS');
       c.header('Cache-Control', `public, max-age=${CACHE_TTL_FRESH / 1000}`);
       return c.json(filtered);
@@ -287,6 +305,84 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
   // ── GET /live-scores/all — full snapshot (debug / initial load) ──
   router.get('/live-scores/all', (c) => {
     return c.json(scoresStore.getResponse());
+  });
+
+  // ── GET /logo/external/:b64url — proxy any external logo URL ──
+  // Encoded as base64url → our server fetches, caches, serves.
+  // Handles cstest.pp.ua, HLTV, and any other external CDN.
+  router.get('/logo/external/:b64url', async (c) => {
+    const b64url = c.req.param('b64url');
+    if (!b64url) return c.json({ error: 'Missing URL' }, 400);
+
+    let externalUrl: string;
+    try {
+      externalUrl = Buffer.from(b64url, 'base64url').toString('utf-8');
+      if (!externalUrl.startsWith('http')) throw new Error('Invalid URL');
+    } catch {
+      return c.json({ error: 'Invalid URL encoding' }, 400);
+    }
+
+    // Cache key: hash the URL
+    const crypto = await import('node:crypto');
+    const urlHash = crypto.createHash('sha256').update(externalUrl).digest('hex').slice(0, 16);
+    const ext = externalUrl.match(/\.(png|svg|webp|jpg|jpeg|gif)(\?|$)/i)?.[1] || 'png';
+    const binCacheFile = join(CACHE_DIR, `extlogo_${urlHash}.${ext}`);
+
+    // Serve from cache (24h TTL)
+    if (existsSync(binCacheFile)) {
+      const stat = statSync(binCacheFile);
+      if (Date.now() - stat.mtimeMs < 86400_000) {
+        const buf = readFileSync(binCacheFile);
+        const ct = ext === 'svg' ? 'image/svg+xml' : `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+        return new Response(buf, {
+          headers: {
+            'Content-Type': ct,
+            'Cache-Control': 'public, max-age=86400',
+            'Access-Control-Allow-Origin': '*',
+          },
+        });
+      }
+    }
+
+    // Fetch via HTTP (no Puppeteer — these are public CDN images)
+    try {
+      const resp = await fetch(externalUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept': 'image/*,*/*;q=0.8',
+        },
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const buf = Buffer.from(await resp.arrayBuffer());
+      if (buf.length < 100) throw new Error('Too small');
+
+      ensureCacheDir();
+      writeFileSync(binCacheFile, buf);
+
+      const ct = ext === 'svg' ? 'image/svg+xml' : `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+      return new Response(buf, {
+        headers: {
+          'Content-Type': ct,
+          'Cache-Control': 'public, max-age=86400',
+          'Access-Control-Allow-Origin': '*',
+        },
+      });
+    } catch {
+      // Serve stale cache if available
+      if (existsSync(binCacheFile)) {
+        const buf = readFileSync(binCacheFile);
+        const ct = ext === 'svg' ? 'image/svg+xml' : `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+        return new Response(buf, {
+          headers: {
+            'Content-Type': ct,
+            'Cache-Control': 'public, max-age=3600',
+            'Access-Control-Allow-Origin': '*',
+          },
+        });
+      }
+      return c.json({ error: 'Failed to fetch external logo' }, 502);
+    }
   });
 
   // ── GET /logo/:filename — proxy team logos via Puppeteer ──
