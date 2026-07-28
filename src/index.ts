@@ -295,6 +295,10 @@ function isSameMatch(a: { date: string; nameTeam1: string; nameTeam2: string },
 }
 
 function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: string): void {
+  // For CS2, cstest is primary — never add new matches from tips.gg (prevents duplicates).
+  // Only update scores & status for existing matches.
+  const isPrimarySource = game === 'cs2';
+
   const interval = setInterval(async () => {
     try {
       const todayMatches = await fetchTodayMatches(game);
@@ -309,39 +313,54 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
         } catch { /* stale cache */ }
       }
 
-      // Merge: update existing matches, add new ones (with fuzzy dedup)
+      // Build lookup: id → match + normalized name → match for fuzzy dedup
       const existingMap = new Map(existing.map((m: any) => [m.id, m]));
+      const fuzzyIndex: Map<string, { match: any; namePair: string }> = new Map();
+      for (const m of existing) {
+        const pair = `${normalizeTeam(m.nameTeam1)}|||${normalizeTeam(m.nameTeam2)}`;
+        fuzzyIndex.set(pair, { match: m, namePair: pair });
+      }
+
       let updates = 0;
       let added = 0;
       let skippedDupes = 0;
+      let skippedUnmatched = 0;
 
       for (const tm of todayMatches) {
+        // ── Try exact ID match first ──
         const prev = existingMap.get(tm.id);
         if (prev) {
-          // Update scores & status from today's page (fresh data)
           if (prev.status !== 'finished') {
             if (tm.score1 != null) prev.score1 = tm.score1;
             if (tm.score2 != null) prev.score2 = tm.score2;
             if (tm.status !== 'upcoming') prev.status = tm.status;
             updates++;
           }
-        } else {
-          // Fuzzy dedup: check if same match exists with different slug
-          const dupe = existing.find((m: any) => isSameMatch(m, tm));
-          if (dupe) {
-            // Update existing match's scores but keep its data (cstest logos etc.)
-            if (dupe.status !== 'finished') {
-              if (tm.score1 != null) dupe.score1 = tm.score1;
-              if (tm.score2 != null) dupe.score2 = tm.score2;
-              if (tm.status !== 'upcoming') dupe.status = tm.status;
-              updates++;
-            }
-            skippedDupes++;
-            continue;
+          continue;
+        }
+
+        // ── Fuzzy dedup: check normalized team names ──
+        const fwd = `${normalizeTeam(tm.nameTeam1)}|||${normalizeTeam(tm.nameTeam2)}`;
+        const rev = `${normalizeTeam(tm.nameTeam2)}|||${normalizeTeam(tm.nameTeam1)}`;
+        const fuzzyHit = fuzzyIndex.get(fwd) || fuzzyIndex.get(rev);
+        if (fuzzyHit) {
+          if (fuzzyHit.match.status !== 'finished') {
+            if (tm.score1 != null) fuzzyHit.match.score1 = tm.score1;
+            if (tm.score2 != null) fuzzyHit.match.score2 = tm.score2;
+            if (tm.status !== 'upcoming') fuzzyHit.match.status = tm.status;
+            updates++;
           }
+          skippedDupes++;
+          continue;
+        }
+
+        // ── New match — only add if this is the Dota2 primary source ──
+        if (!isPrimarySource) {
           existing.push(tm as any);
           existingMap.set(tm.id, tm as any);
           added++;
+        } else {
+          skippedUnmatched++;
         }
       }
 
@@ -350,7 +369,8 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
         const parts: string[] = [];
         if (added > 0) parts.push(`+${added} new`);
         if (skippedDupes > 0) parts.push(`${skippedDupes} deduped`);
-        if (updates > 0 && (added > 0 || updates > 3)) parts.push(`${updates} updated`);
+        if (skippedUnmatched > 0) parts.push(`${skippedUnmatched} unmatched`);
+        if (updates > 0) parts.push(`${updates} updated`);
         if (parts.length > 0) {
           console.log(`[incr:${tag}] ${parts.join(', ')} (${existing.length} total)`);
         }
@@ -360,7 +380,7 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
     }
   }, 60_000);
   if ('unref' in interval) (interval as NodeJS.Timeout).unref();
-  console.log(`[incr:${tag}] Incremental refresh worker started (60s)`);
+  console.log(`[incr:${tag}] Incremental refresh worker started (60s)` + (isPrimarySource ? ' (updates-only)' : ''));
 }
 
 // Start incremental refresh for both games (after warmup delay)
