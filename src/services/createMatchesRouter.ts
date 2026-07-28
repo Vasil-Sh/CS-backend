@@ -344,35 +344,65 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       }
     }
 
-    // Fetch via HTTP (works for cstest, HLTV). For tips.gg CDN, use Puppeteer.
+    // Fetch: tips.gg CDN uses Puppeteer + tries filename variants (CDN naming is inconsistent)
     try {
       const isTipsGgCdn = externalUrl.includes('files.tips.gg');
-      let buf: Buffer;
+      let buf: Buffer | null = null;
 
       if (isTipsGgCdn) {
-        // tips.gg CDN is behind Cloudflare — use Puppeteer's browser context
+        // Build variant URLs to try (tips.gg CDN filenames are unpredictable)
+        const baseUrl = externalUrl.replace(/\.(png|svg|webp)$/i, '');
+        const candidateUrls = [externalUrl];
+
+        // Strip game suffix: team-dota2.png → team.png, team-csgo.png → team.png
+        const noGame = baseUrl.replace(/-(csgo|cs2|dota2)$/i, '');
+        if (noGame !== baseUrl) {
+          candidateUrls.push(`${noGame}.png`);
+          candidateUrls.push(`${noGame}-csgo.png`);
+          candidateUrls.push(`${noGame}-cs2.png`);
+          candidateUrls.push(`${noGame}-dota2.png`);
+        }
+
+        // Swap underscores ↔ hyphens
+        const swapped = noGame.replace(/_/g, '-');
+        if (swapped !== noGame) {
+          candidateUrls.push(`${swapped}.png`);
+          candidateUrls.push(`${swapped}-dota2.png`);
+          candidateUrls.push(`${swapped}-csgo.png`);
+        }
+
+        // Deduplicate
+        const uniqueUrls = [...new Set(candidateUrls)];
+
         const browser = await getBrowser();
         const page = await browser.newPage();
         try {
-          const base64DataUrl = await page.evaluate(async (url: string): Promise<string | null> => {
-            try {
-              const res = await fetch(url, { headers: { 'Referer': 'https://tips.gg/' } });
-              if (!res.ok) return null;
-              const blob = await res.blob();
-              const arrayBuffer = await blob.arrayBuffer();
-              const bytes = new Uint8Array(arrayBuffer);
-              let binary = '';
-              for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-              return 'data:' + blob.type + ';base64,' + btoa(binary);
-            } catch { return null; }
-          }, externalUrl);
+          for (const url of uniqueUrls) {
+            const base64DataUrl = await page.evaluate(async (u: string): Promise<string | null> => {
+              try {
+                const res = await fetch(u, { headers: { 'Referer': 'https://tips.gg/' } });
+                if (!res.ok) return null;
+                const blob = await res.blob();
+                const arr = new Uint8Array(await blob.arrayBuffer());
+                let bin = '';
+                for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+                return 'data:' + blob.type + ';base64,' + btoa(bin);
+              } catch { return null; }
+            }, url);
 
-          if (!base64DataUrl) throw new Error('Puppeteer fetch failed');
-          const base64Data = base64DataUrl.replace(/^data:[^;]+;base64,/, '');
-          buf = Buffer.from(base64Data, 'base64');
+            if (base64DataUrl) {
+              const base64Data = base64DataUrl.replace(/^data:[^;]+;base64,/, '');
+              buf = Buffer.from(base64Data, 'base64');
+              if (url !== externalUrl) {
+                console.log(`[logo] ${externalUrl.split('/').pop()} → found at ${url.split('/').pop()}`);
+              }
+              break;
+            }
+          }
         } finally {
           await page.close().catch(() => {});
         }
+        if (!buf) throw new Error('All CDN variants failed');
       } else {
         // Non-tips.gg CDN — plain HTTP fetch is fine
         const resp = await fetch(externalUrl, {
