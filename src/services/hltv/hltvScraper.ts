@@ -129,29 +129,26 @@ async function fetchGameDetail(
  * Use this from routes that don't manage pages themselves.
  */
 /**
- * Fetch match score with its own stealth browser (bypasses HLTV Cloudflare).
- * Uses local puppeteer-extra + stealth plugin even when BROWSERLESS is configured.
+ * Fetch match score using a dedicated local puppeteer-extra-stealth browser.
+ * browserless + ?stealth does NOT bypass HLTV Cloudflare — we need real stealth.
+ * This launches a short-lived local Chrome process per enrichment batch.
  */
 export async function fetchMatchScore(
   matchUrl: string,
 ): Promise<{ score1: number; score2: number; type: string } | null> {
-  // Dynamic imports so this module doesn't force puppeteer-extra dependency on startup
-  const puppeteerExtra = (await import('puppeteer-extra')).default;
-  const StealthPlugin = (await import('puppeteer-extra-plugin-stealth')).default;
+  // Dynamic import — only loads on first enrichment, not on server startup
+  const { default: puppeteerExtra } = await import('puppeteer-extra');
+  const { default: StealthPlugin } = await import('puppeteer-extra-plugin-stealth');
   puppeteerExtra.use(StealthPlugin());
 
-  const browser = await puppeteerExtra.launch({
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-blink-features=AutomationControlled',
-    ],
-  });
-
   let page: Page | null = null;
+  let browser: import('puppeteer').Browser | null = null;
   try {
+    browser = await puppeteerExtra.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    });
+
     page = await browser.newPage();
     await page.setUserAgent(PUPPETEER_UA);
     await page.setViewport({ width: 1920, height: 1080 });
@@ -161,31 +158,26 @@ export async function fetchMatchScore(
     });
 
     const fullUrl = matchUrl.startsWith('http') ? matchUrl : `${HLTV_BASE}${matchUrl}`;
-
     await page.goto(fullUrl, { waitUntil: 'networkidle2', timeout: 30000 });
-    // Wait for HLTV Vue.js hydration
-    await new Promise(r => setTimeout(r, 4000));
+    // HLTV hydration delay
+    await new Promise(r => setTimeout(r, 5000));
 
     const script = loadJs('GameParser.js');
     const raw = await page.evaluate(script);
     const detail = raw && typeof raw === 'object' ? raw as HltvGameDetail : null;
 
-    if (!detail) {
-      console.warn(`[hltv:score] Parser returned null for ${fullUrl}`);
-      return null;
-    }
-
-    const hasPositiveScore = detail.score1 > 0 || detail.score2 > 0;
-    if (!hasPositiveScore) {
-      console.warn(`[hltv:score] No scores for ${fullUrl}: ${detail.score1}-${detail.score2}`);
+    if (!detail || detail.score1 <= 0 && detail.score2 <= 0) {
       return null;
     }
 
     console.log(`[hltv:score] ${detail.nameTeam1} ${detail.score1}-${detail.score2} ${detail.nameTeam2}`);
     return { score1: detail.score1, score2: detail.score2, type: detail.type };
+  } catch (err) {
+    console.error(`[hltv:score] Error for ${matchUrl}:`, (err as Error).message);
+    return null;
   } finally {
     if (page) await page.close().catch(() => {});
-    await browser.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
   }
 }
 
