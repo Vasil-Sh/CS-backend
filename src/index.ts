@@ -39,11 +39,12 @@ import cs2MatchesRoutes from './routes/cs2Matches';
 import publicProfileRoutes from './routes/publicProfile';
 import matchesHistoryRoutes from './routes/matchesHistory';
 import { closeBrowser } from './services/tipsggScraper';
-import { fetchDota2Matches, fetchCs2Matches } from './services/tipsggScraper';
+import { fetchDota2Matches, fetchCs2Matches, fetchTodayMatches } from './services/tipsggScraper';
 import { join } from 'node:path';
+import { readFileSync, existsSync } from 'node:fs';
 import { liveScoresStore } from './services/liveScoresStore';
-import { cs2LiveScoresStore } from './services/cs2LiveScoresStore';
 import { writeFileCacheInternal } from './services/createMatchesRouter';
+import { fetchCstestMatches, cstestLiveScoresStore } from './services/hltv/cstestClient';
 import { runWithRequestContext } from './utils/requestContext';
 import { AppError } from './utils/AppError';
 
@@ -232,20 +233,95 @@ setTimeout(() => {
     .catch(e => console.warn('[warmup] Dota2 fetch failed:', (e as Error).message));
 }, 500);
 
-// ── Cache warmup: pre-fetch CS2 matches (tips.gg) in background ──
-setTimeout(() => {
-  fetchCs2Matches()
-    .then(matches => {
-      writeFileCacheInternal(matches, join(process.cwd(), '.cache', 'cs2_matches.json'));
-      console.log(`[warmup] CS2 (tips.gg) cache primed: ${matches.length} matches`);
-    })
-    .catch(e => console.warn('[warmup] CS2 (tips.gg) fetch failed:', (e as Error).message));
+// ── Cache warmup: pre-fetch CS2 matches (cstest → tips.gg) in background ──
+setTimeout(async () => {
+  try {
+    // Try fast cstest API first
+    const cstestMatches = await fetchCstestMatches();
+    if (cstestMatches.length > 0) {
+      writeFileCacheInternal(cstestMatches, join(process.cwd(), '.cache', 'cs2_matches.json'));
+      console.log(`[warmup] CS2 (cstest) cache primed: ${cstestMatches.length} matches`);
+      return;
+    }
+    console.warn('[warmup] cstest returned 0 matches — falling back to tips.gg');
+  } catch (err) {
+    console.warn('[warmup] cstest failed:', (err as Error).message, '— falling back to tips.gg');
+  }
+  // Fallback: tips.gg Puppeteer
+  try {
+    const tipsggMatches = await fetchCs2Matches();
+    writeFileCacheInternal(tipsggMatches, join(process.cwd(), '.cache', 'cs2_matches.json'));
+    console.log(`[warmup] CS2 (tips.gg) cache primed: ${tipsggMatches.length} matches`);
+  } catch (err) {
+    console.warn('[warmup] CS2 (tips.gg) fetch failed:', (err as Error).message);
+  }
 }, 1000);
 
-// ── Live scores background workers: poll tips.gg every 30s ──
-// Keep in-memory stores fresh so /live-scores returns <1ms
-liveScoresStore.startBackgroundWorker(15_000);
-cs2LiveScoresStore.startBackgroundWorker(15_000);
+// ── Live scores background workers ──
+// Dota2: poll tips.gg every 7s (HTTP fetch, fast)
+// CS2: poll cstest API every 7s (matches the cstest match list directly)
+liveScoresStore.startBackgroundWorker(7_000);
+cstestLiveScoresStore.startBackgroundWorker(7_000);
+
+// ── Incremental refresh: fast HTTP fetch of today's page every 60s ──
+// Merges new matches & scores into the file cache without a full 8-day scrape.
+// This covers: new matches appearing on today's listing, score changes, status transitions.
+function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: string): void {
+  const interval = setInterval(async () => {
+    try {
+      const todayMatches = await fetchTodayMatches(game);
+      if (!todayMatches || todayMatches.length === 0) return;
+
+      // Read existing cache
+      let existing: Record<string, any>[] = [];
+      if (existsSync(cacheFile)) {
+        try {
+          const raw = JSON.parse(readFileSync(cacheFile, 'utf-8'));
+          existing = raw.data || [];
+        } catch { /* stale cache */ }
+      }
+
+      // Merge: update existing matches, add new ones
+      const existingMap = new Map(existing.map((m: any) => [m.id, m]));
+      let updates = 0;
+      let added = 0;
+
+      for (const tm of todayMatches) {
+        const prev = existingMap.get(tm.id);
+        if (prev) {
+          // Update scores & status from today's page (fresh data)
+          if (prev.status !== 'finished') {
+            if (tm.score1 != null) prev.score1 = tm.score1;
+            if (tm.score2 != null) prev.score2 = tm.score2;
+            if (tm.status !== 'upcoming') prev.status = tm.status;
+            updates++;
+          }
+        } else {
+          existing.push(tm as any);
+          existingMap.set(tm.id, tm as any);
+          added++;
+        }
+      }
+
+      if (updates > 0 || added > 0) {
+        writeFileCacheInternal(existing, cacheFile);
+        if (added > 0 || updates > 3) {
+          console.log(`[incr:${tag}] +${added} new, ${updates} updated (${existing.length} total)`);
+        }
+      }
+    } catch (err) {
+      // Silent — incremental refresh is best-effort
+    }
+  }, 60_000);
+  if ('unref' in interval) (interval as NodeJS.Timeout).unref();
+  console.log(`[incr:${tag}] Incremental refresh worker started (60s)`);
+}
+
+// Start incremental refresh for both games (after warmup delay)
+setTimeout(() => {
+  startIncrementalRefresh('dota2', join(process.cwd(), '.cache', 'dota2_matches.json'), 'dota2');
+  startIncrementalRefresh('cs2', join(process.cwd(), '.cache', 'cs2_matches.json'), 'cs2');
+}, 5_000);
 
 // ── Graceful shutdown ──
 const shutdown = async (signal: string) => {

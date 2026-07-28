@@ -211,7 +211,7 @@ function extractTipsCount(html: string, rawMatchUrl: string): number {
 /**
  * Parse match listing HTML into TipsGgMatch array.
  */
-async function parseMatchesFromHtml(html: string, game: 'dota2' | 'cs2' = 'dota2'): Promise<TipsGgMatch[]> {
+export async function parseMatchesFromHtml(html: string, game: 'dota2' | 'cs2' = 'dota2'): Promise<TipsGgMatch[]> {
   const logoMap = buildLogoMap(html, game);
   const jsonLdMatches = extractJsonLd(html, game);
   const matches: TipsGgMatch[] = [];
@@ -331,7 +331,12 @@ async function fetchTipsGgMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[]>
     const batchResults = await Promise.allSettled(
       batch.map(async (date) => {
         const url = `${TIPSGG_BASE}/${gamePath}/matches/${date}/`;
-        return { date, html: await fetchHtml(url) };
+        // Fast HTTP first (100-500ms), fallback to Puppeteer on Cloudflare
+        let html = await fetchLiveHtml(url, 1);
+        if (!html) {
+          try { html = await fetchHtml(url, 1); } catch { /* ignore */ }
+        }
+        return { date, html };
       }),
     );
     for (const r of batchResults) {
@@ -361,7 +366,9 @@ async function fetchTipsGgMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[]>
   // If all 7 days returned nothing, try the main listing page as last resort
   if (all.length === 0) {
     try {
-      const mainHtml = await fetchHtml(`${TIPSGG_BASE}/${gamePath}/matches/`);
+      const mainUrl = `${TIPSGG_BASE}/${gamePath}/matches/`;
+      let mainHtml = await fetchLiveHtml(mainUrl, 1);
+      if (!mainHtml) mainHtml = await fetchHtml(mainUrl);
       const mainMatches = await parseMatchesFromHtml(mainHtml, game);
       for (const m of mainMatches) {
         if (!seen.has(m.id)) {
@@ -442,12 +449,43 @@ export async function fetchCs2Matches(): Promise<TipsGgMatch[]> {
 }
 
 /**
+ * Incremental refresh: fetch only today's tips.gg page via fast HTTP.
+ * Used as a fast heartbeat (every 60s) to pick up new matches and score
+ * changes without the cost of a full 8-day Puppeteer scrape.
+ *
+ * Returns parsed matches from today only, or null on failure.
+ */
+export async function fetchTodayMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[] | null> {
+  const gamePath = game === 'dota2' ? 'dota2' : 'csgo';
+  const today = formatDateDdMmYyyy(new Date());
+  const url = `${TIPSGG_BASE}/${gamePath}/matches/${today}/`;
+
+  let html = await fetchLiveHtml(url, 1);
+  if (!html) {
+    try { html = await fetchHtml(url, 1); } catch { return null; }
+  }
+  if (!html) return null;
+
+  try {
+    return await parseMatchesFromHtml(html, game);
+  } catch (err) {
+    console.warn(`[tipsgg:${game}] Today fetch parse failed:`, (err as Error).message);
+    return null;
+  }
+}
+
+/**
  * Fetch a single match page for detailed info.
  */
 export async function fetchMatchDetail(matchUrl: string, game: 'dota2' | 'cs2' = 'dota2'): Promise<TipsGgMatch | null> {
   const fullUrl = matchUrl.startsWith('http') ? matchUrl : `${TIPSGG_BASE}${matchUrl}`;
 
-  const html = await fetchHtml(fullUrl);
+  // Fast HTTP first, fallback to Puppeteer
+  let html = await fetchLiveHtml(fullUrl, 1);
+  if (!html) {
+    try { html = await fetchHtml(fullUrl); } catch { return null; }
+  }
+  if (!html) return null;
   const logoMap = buildLogoMap(html, game);
   const jsonLdMatches = extractJsonLd(html, game);
 
@@ -527,7 +565,13 @@ async function fetchCoefficientsFromPredictions(link: string, retries = 2): Prom
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const predPath = link.endsWith('/') ? link + 'predictions/' : link + '/predictions/';
-      const html = await fetchHtml(`${TIPSGG_BASE}${predPath}`);
+      const predUrl = `${TIPSGG_BASE}${predPath}`;
+      // Fast HTTP first, fallback to Puppeteer
+      let html = await fetchLiveHtml(predUrl, 1);
+      if (!html) {
+        try { html = await fetchHtml(predUrl, 1); } catch { continue; }
+      }
+      if (!html) continue;
 
       // Find bookmakers analysis counters section
       // New tips.gg structure (2026-07): <div class="bookmakers-analysis-counters">
@@ -850,6 +894,55 @@ export async function getBrowser(): Promise<Browser> {
   });
   _browserAge = now;
   return _browser;
+}
+
+/**
+ * Lightweight HTTP fetch for live scores — no Puppeteer overhead.
+ * tips.gg serves the match listing as static HTML with JSON-LD embedded,
+ * so a plain HTTPS GET with browser headers is sufficient for score polling.
+ *
+ * Response time: 100-500ms (vs 3-10s for Puppeteer).
+ * Falls back to Puppeteer `fetchHtml` on failure (e.g. Cloudflare challenge).
+ */
+export async function fetchLiveHtml(url: string, retries = 1): Promise<string | null> {
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      if (attempt > 0) {
+        await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 500));
+      }
+      const resp = await fetch(url, {
+        headers: {
+          'User-Agent': UA,
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9,uk;q=0.8',
+          'Cache-Control': 'no-cache',
+        },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!resp.ok) {
+        if (resp.status === 403 || resp.status === 503) continue; // retry on Cloudflare
+        return null;
+      }
+      const html = await resp.text();
+      if (html.length < 2000) return null;
+      // Detect Cloudflare — fall through to Puppeteer
+      if (html.includes('_cf_chl_opt') || html.includes('Just a moment') || html.includes('cf-browser-verify')) {
+        console.warn('[fetchLiveHtml] Cloudflare challenge — will fall back to Puppeteer');
+        return null;
+      }
+      if (!html.includes('class="element match') && !html.includes('application/ld+json')) {
+        return null;
+      }
+      return html;
+    } catch (err) {
+      if (attempt === retries) {
+        console.warn(`[fetchLiveHtml] HTTP fetch failed for ${url}: ${(err as Error).message}`);
+        return null;
+      }
+    }
+  }
+  return null;
 }
 
 export async function fetchHtml(url: string, retries = 3): Promise<string> {

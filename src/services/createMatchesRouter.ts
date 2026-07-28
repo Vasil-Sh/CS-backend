@@ -10,13 +10,13 @@ import { fetchMatchDetail, getBrowser, fetchHtml, type TipsGgMatch } from '../se
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, renameSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordFailure } from '../services/circuitBreaker';
-import type { LiveScoresStore } from '../services/liveScoresStore';
+import type { ILiveScoresStore } from '../services/liveScoresStore';
 import { upsertMatchHistoryBatch } from '../services/matchHistoryService';
 
 interface MatchRouterConfig {
   game: 'dota2' | 'cs2';
   fetchFn: () => Promise<TipsGgMatch[]>;
-  liveScoresStore: LiveScoresStore;
+  liveScoresStore: ILiveScoresStore;
   cacheFile: string;
   circuitBreakerName: string;
   healthUrl?: string;
@@ -240,6 +240,28 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
 
     try {
       const { data, fromCache } = await getMatchesWithSWR();
+
+      // ── Overlay live scores on match list ──
+      // Even when the match list is cached (5min TTL), live scores from
+      // LiveScoresStore are at most 7s old. This gives near-real-time scores
+      // without needing to wait for a full Puppeteer re-scrape.
+      if (fromCache) {
+        const liveScores = scoresStore.getScores();
+        if (liveScores.length > 0) {
+          const scoreMap = new Map(liveScores.map(s => [s.id, s]));
+          for (const m of data) {
+            const ls = scoreMap.get(m.id);
+            if (!ls) continue;
+            if (m.status === 'finished') continue; // don't touch finished
+            // Apply live scores (allow 0→0 override for started-but-no-score matches)
+            if (ls.score1 != null) m.score1 = ls.score1;
+            if (ls.score2 != null) m.score2 = ls.score2;
+            // Status: only upgrade (upcoming→live, live→finished), never downgrade
+            if (ls.status === 'live' && m.status === 'upcoming') m.status = 'live';
+            else if (ls.status === 'finished') m.status = 'finished';
+          }
+        }
+      }
 
       // Filter out matches from past days (date < today).
       // Today's finished matches are still returned — frontend handles auto-hide.

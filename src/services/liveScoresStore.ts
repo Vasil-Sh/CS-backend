@@ -1,5 +1,5 @@
 import * as cheerio from 'cheerio';
-import { fetchHtml } from './tipsggScraper';
+import { fetchHtml, fetchLiveHtml } from './tipsggScraper';
 
 export interface LiveScoreState {
   id: string;
@@ -12,6 +12,14 @@ export interface LiveScoresResponse {
   scores: LiveScoreState[];
   lastUpdate: number;
   interval: number;
+}
+
+/** Shared interface — both LiveScoresStore and CstestLiveScoresStore implement this. */
+export interface ILiveScoresStore {
+  getScores(): LiveScoreState[];
+  getChangedScores(): LiveScoreState[];
+  getResponse(): LiveScoresResponse;
+  startBackgroundWorker(intervalMs?: number): void;
 }
 
 export class LiveScoresStore {
@@ -84,7 +92,14 @@ export class LiveScoresStore {
       const mm = String(today.getMonth()+1).padStart(2,'0');
       const yyyy = today.getFullYear();
       const url = `https://tips.gg/${this.gamePath}/matches/${dd}-${mm}-${yyyy}/`;
-      const html = await fetchHtml(url, 1);
+      // Fast HTTP path (100-500ms) — fallback to Puppeteer if Cloudflare blocks
+      let html = await fetchLiveHtml(url, 1);
+      const usedPuppeteer = !html;
+      if (!html) {
+        try {
+          html = await fetchHtml(url, 1);
+        } catch { /* ignore — handled below */ }
+      }
       if (!html) return;
       const $ = cheerio.load(html);
       const ns = new Map<string, LiveScoreState>();

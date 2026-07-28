@@ -12,6 +12,30 @@ import type { TipsGgMatch } from '../tipsggScraper';
 
 const CSTEST_BASE = 'https://api.cstest.pp.ua';
 
+/**
+ * Normalize team name to tips.gg-compatible slug segment.
+ * tips.gg slugs: lowercase alphanumeric + dashes only.
+ * Examples:
+ *   "Black Phoenix" → "black-phoenix"
+ *   "MOUZ NXT"     → "mouz-nxt"
+ *   "G2 Ares"      → "g2-ares"
+ */
+function teamNameToSlug(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .replace(/-+/g, '-');
+}
+
+/**
+ * Generate match slug in tips.gg format: "team1-vs-team2".
+ * This matches tips.gg live-score IDs exactly, enabling cross-source merging.
+ */
+function generateMatchSlug(team1: string, team2: string): string {
+  return `${teamNameToSlug(team1)}-vs-${teamNameToSlug(team2)}`;
+}
+
 interface CstestGame {
   id: number;
   date: string;
@@ -60,7 +84,7 @@ function cstestToTipsGgMatch(g: CstestGame): TipsGgMatch {
   const cleanType = g.type.replace(/\s*\(.*\)/i, '').toUpperCase();
 
   return {
-    id: String(g.id),
+    id: generateMatchSlug(g.nameTeam1, g.nameTeam2),
     date: g.date.split('T')[0],
     link: g.link.startsWith('http') ? g.link : `https://www.hltv.org${g.link}`,
     type: cleanType || 'BO3',
@@ -123,3 +147,131 @@ export async function fetchCstestMatches(): Promise<TipsGgMatch[]> {
     clearTimeout(timeout);
   }
 }
+
+// ── CstestLiveScoresStore — polls cstest API for live scores ──
+// Separate from tips.gg-based LiveScoresStore because cstest has different
+// match IDs (team-name slugs generated from HLTV data).
+
+export interface LiveScoreState {
+  id: string;
+  score1: number | null;
+  score2: number | null;
+  status: string;
+}
+
+export interface LiveScoresResponse {
+  scores: LiveScoreState[];
+  lastUpdate: number;
+  interval: number;
+}
+
+export class CstestLiveScoresStore {
+  private store = new Map<string, LiveScoreState>();
+  private lastStore = new Map<string, LiveScoreState>();
+  private isUpdating = false;
+  private intervalId: ReturnType<typeof setInterval> | null = null;
+  private lastUpdate = 0;
+  private currentInterval = 7_000;
+
+  startBackgroundWorker(intervalMs = 7_000): void {
+    if (this.intervalId) return;
+    this.currentInterval = intervalMs;
+    this.updateScores();
+    this.intervalId = setInterval(() => this.updateScores(), intervalMs);
+    if (this.intervalId && 'unref' in this.intervalId) (this.intervalId as NodeJS.Timeout).unref();
+    console.log(`[CstestLiveScoresStore] Worker started (${intervalMs}ms)`);
+  }
+
+  stopBackgroundWorker(): void {
+    if (this.intervalId) { clearInterval(this.intervalId); this.intervalId = null; }
+  }
+
+  getScores(): LiveScoreState[] {
+    return Array.from(this.store.values());
+  }
+
+  getResponse(): LiveScoresResponse {
+    return {
+      scores: this.getScores(),
+      lastUpdate: this.lastUpdate,
+      interval: this.currentInterval,
+    };
+  }
+
+  getChangedScores(): LiveScoreState[] {
+    const changed: LiveScoreState[] = [];
+    for (const [id, s] of this.store) {
+      const p = this.lastStore.get(id);
+      if (!p || s.score1 !== p.score1 || s.score2 !== p.score2 || s.status !== p.status) {
+        changed.push(s);
+      }
+    }
+    return changed;
+  }
+
+  getLiveCount(): number {
+    let n = 0;
+    for (const s of this.store.values()) { if (s.status === 'live') n++; }
+    return n;
+  }
+
+  private async updateScores(): Promise<void> {
+    if (this.isUpdating) return;
+    this.isUpdating = true;
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10_000);
+
+      try {
+        const response = await fetch(`${CSTEST_BASE}/api/Game/TodaysAndUpcoming`, {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+          signal: controller.signal,
+        });
+        clearTimeout(timeout);
+
+        if (!response.ok) return;
+        const raw = (await response.json()) as CstestGame[];
+        if (!Array.isArray(raw)) return;
+
+        const ns = new Map<string, LiveScoreState>();
+        for (const g of raw) {
+          const slug = generateMatchSlug(g.nameTeam1, g.nameTeam2);
+          let status = 'upcoming';
+          if (g.isLive) status = 'live';
+          else if (g.score1 > 0 || g.score2 > 0) {
+            // cstest has scores → determine if finished
+            const matchTime = new Date(g.date).getTime();
+            const hoursAgo = (Date.now() - matchTime) / (1000 * 60 * 60);
+            status = hoursAgo > 2 ? 'finished' : 'live';
+          } else {
+            const matchTime = new Date(g.date).getTime();
+            const hoursAgo = (Date.now() - matchTime) / (1000 * 60 * 60);
+            if (hoursAgo > 4) status = 'finished';
+          }
+
+          ns.set(slug, {
+            id: slug,
+            score1: g.score1 ?? null,
+            score2: g.score2 ?? null,
+            status,
+          });
+        }
+
+        if (ns.size > 0) {
+          this.lastStore = new Map(this.store);
+          this.store = ns;
+          this.lastUpdate = Date.now();
+        }
+      } finally {
+        clearTimeout(timeout);
+      }
+    } catch (err) {
+      console.error('[CstestLiveScoresStore] fail:', (err as Error).message);
+    } finally {
+      this.isUpdating = false;
+    }
+  }
+}
+
+export const cstestLiveScoresStore = new CstestLiveScoresStore();
