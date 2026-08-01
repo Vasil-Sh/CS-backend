@@ -63,18 +63,25 @@ interface CstestGame {
 
 /**
  * Sanitize external logo URL: skip fallbacks, fix broken URLs.
- * Returns null for invalid/fallback images so frontend can render placeholder.
+ * If the source CDN returns a fallback image, generate a tips.gg CDN URL
+ * from the team name instead — /logo/cached will download + cache it.
  */
-function sanitizeLogoUrl(url: string | null): string | null {
-  if (!url) return null;
-  // Skip generic fallback images
-  if (/fallback\.(webp|png|svg)/i.test(url)) return null;
-  // Encode spaces and other unsafe chars for valid HTTP URLs
-  try {
-    return encodeURI(url);
-  } catch {
-    return null;
+function sanitizeLogoUrl(url: string | null, teamName?: string): string | null {
+  if (url) {
+    if (/fallback\.(webp|png|svg)/i.test(url)) url = null;
+    else {
+      try { return encodeURI(url); }
+      catch { url = null; }
+    }
   }
+  // Generate tips.gg CDN fallback from team name slug
+  if (!url && teamName) {
+    const slug = teamName.toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
+    return `https://files.tips.gg/static/image/teams/${slug}.png`;
+  }
+  return null;
 }
 
 /**
@@ -111,8 +118,8 @@ function cstestToTipsGgMatch(g: CstestGame): TipsGgMatch {
     score2: hasRealScore || g.isLive ? (g.score2 ?? null) : null,
     nameTeam1: g.nameTeam1,
     nameTeam2: g.nameTeam2,
-    logoTeam1: sanitizeLogoUrl(g.logoTeam1),
-    logoTeam2: sanitizeLogoUrl(g.logoTeam2),
+    logoTeam1: sanitizeLogoUrl(g.logoTeam1, g.nameTeam1),
+    logoTeam2: sanitizeLogoUrl(g.logoTeam2, g.nameTeam2),
     tournament: '',
     stage: '',
     status,
