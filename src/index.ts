@@ -254,12 +254,27 @@ setTimeout(async () => {
         if (existing.coeff1 == null && tm.coeff1 != null) existing.coeff1 = tm.coeff1;
         if (existing.coeff2 == null && tm.coeff2 != null) existing.coeff2 = tm.coeff2;
       } else {
+        // Fuzzy dedup: same date + normalized team names → same match
+        const allExisting = [...merged.values()];
+        const fuzzyDupe = allExisting.find((m: any) =>
+          m.date === tm.date &&
+          (normalizeTeam(m.nameTeam1) === normalizeTeam(tm.nameTeam1) &&
+           normalizeTeam(m.nameTeam2) === normalizeTeam(tm.nameTeam2)) ||
+          (normalizeTeam(m.nameTeam1) === normalizeTeam(tm.nameTeam2) &&
+           normalizeTeam(m.nameTeam2) === normalizeTeam(tm.nameTeam1))
+        );
+        if (fuzzyDupe) {
+          if (!fuzzyDupe.tournament && tm.tournament) fuzzyDupe.tournament = tm.tournament;
+          if (!fuzzyDupe.stage && tm.stage) fuzzyDupe.stage = tm.stage;
+          if (fuzzyDupe.coeff1 == null && tm.coeff1 != null) fuzzyDupe.coeff1 = tm.coeff1;
+          if (fuzzyDupe.coeff2 == null && tm.coeff2 != null) fuzzyDupe.coeff2 = tm.coeff2;
+          continue;
+        }
         merged.set(tm.id, tm);
       }
     }
     writeFileCacheInternal([...merged.values()], join(process.cwd(), '.cache', 'cs2_matches.json'));
-    const fromTipsGg = [...merged.values()].length - cstest.length;
-    console.log(`[warmup] CS2 cache primed: ${merged.size} matches (cstest: ${cstest.length}, +tips.gg: ${fromTipsGg})`);
+    console.log(`[warmup] CS2 cache primed: ${merged.size} matches (cstest: ${cstest.length}, +tips.gg)`);
   } catch (err) {
     console.warn('[warmup] CS2 fetch failed:', (err as Error).message);
   }
