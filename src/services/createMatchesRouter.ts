@@ -441,13 +441,10 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
           },
         });
       }
-      // Return transparent 1×1 PNG instead of 502 error (avoids broken image icon)
-      return new Response(EMPTY_PNG, { headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=3600' } });
+      // Return 404 — frontend's img.onError will show placeholder SVG
+      return c.json({ error: 'Not found' }, 404);
     }
   });
-
-  // ── 1×1 transparent PNG — returned when logo can't be fetched ──
-  const EMPTY_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
 
   // ── GET /logo/:filename — proxy team logos via Puppeteer ──
   router.get('/logo/:filename', async (c) => {
@@ -553,7 +550,7 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
           }
         } catch {}
       }
-      return new Response(EMPTY_PNG, { headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=3600' } });
+      return c.json({ error: 'Not found' }, 404);
     }
   });
 
