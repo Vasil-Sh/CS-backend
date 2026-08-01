@@ -62,19 +62,28 @@ interface CstestGame {
 }
 
 /**
- * Sanitize external logo URL: skip fallbacks, fix broken URLs.
- * Returns null for fallback.webp (don't generate tips.gg CDN URL — Cloudflare blocks it).
+ * Sanitize external logo URL: skip fallbacks, generate tips.gg CDN fallback.
+ * cstest API returns real logo URLs for most teams; for fallback.webp we
+ * generate a tips.gg CDN URL from team name slug and route through
+ * /logo/external (proven Puppeteer pipeline with Cloudflare bypass).
  */
 function sanitizeLogoUrl(url: string | null, teamName?: string): string | null {
-  if (!url) return null;
-  // Skip generic fallback images
-  if (/fallback\.(webp|png|svg)/i.test(url)) return null;
-  // Encode spaces and other unsafe chars for valid HTTP URLs
-  try {
-    return encodeURI(url);
-  } catch {
-    return null;
+  if (url) {
+    // Got a real URL from cstest — encode and use directly
+    if (/fallback\.(webp|png|svg)/i.test(url)) url = null;
+    else {
+      try { return encodeURI(url); }
+      catch { url = null; }
+    }
   }
+  // No logo from source — generate tips.gg CDN URL from team name
+  if (!url && teamName) {
+    const slug = teamName.toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
+    return `https://files.tips.gg/static/image/teams/${slug}.png`;
+  }
+  return null;
 }
 
 /**
