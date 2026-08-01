@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { recordFailure } from '../services/circuitBreaker';
 import type { ILiveScoresStore } from '../services/liveScoresStore';
 import { upsertMatchHistoryBatch } from '../services/matchHistoryService';
+import { getHltvLogoCache } from '../services/hltv/hltvRankingScraper';
 
 interface MatchRouterConfig {
   game: 'dota2' | 'cs2';
@@ -80,6 +81,32 @@ function proxyLogoUrl(url: string | null, prefix: string): string | null {
 
   // All external URLs (tips.gg CDN, cstest, HLTV) → /logo/external
   const encoded = Buffer.from(url).toString('base64url');
+  return `/api/v1/${prefix}-matches/logo/external/${encoded}`;
+}
+
+/**
+ * Generate logo URL for a match that has null logo.
+ * Tries: HLTV ranking CDN → tips.gg CDN slug → null.
+ */
+export function generateLogoFallback(teamName: string, prefix: string): string | null {
+  // 1. HLTV ranking logo map (covers 222 CS2 teams)
+  const hltvMap = getHltvLogoCache();
+  if (hltvMap) {
+    const norm = teamName.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const raw = teamName.toLowerCase().trim();
+    const url = hltvMap.get(norm) || hltvMap.get(raw);
+    if (url) {
+      const encoded = Buffer.from(url).toString('base64url');
+      return `/api/v1/${prefix}-matches/logo/external/${encoded}`;
+    }
+  }
+
+  // 2. tips.gg CDN slug (last resort)
+  const slug = teamName.toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+  const tipsUrl = `https://files.tips.gg/static/image/teams/${slug}.png`;
+  const encoded = Buffer.from(tipsUrl).toString('base64url');
   return `/api/v1/${prefix}-matches/logo/external/${encoded}`;
 }
 
@@ -327,8 +354,8 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
 
       // ── Rewrite logo URLs to internal proxy (CORS-safe, no broken URLs) ──
       for (const m of filtered) {
-        m.logoTeam1 = proxyLogoUrl(m.logoTeam1, prefix);
-        m.logoTeam2 = proxyLogoUrl(m.logoTeam2, prefix);
+        m.logoTeam1 = m.logoTeam1 ? proxyLogoUrl(m.logoTeam1, prefix) : generateLogoFallback(m.nameTeam1, prefix);
+        m.logoTeam2 = m.logoTeam2 ? proxyLogoUrl(m.logoTeam2, prefix) : generateLogoFallback(m.nameTeam2, prefix);
       }
 
       c.header('X-Cache', fromCache ? 'HIT' : 'MISS');

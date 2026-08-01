@@ -45,6 +45,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { liveScoresStore } from './services/liveScoresStore';
 import { writeFileCacheInternal } from './services/createMatchesRouter';
 import { fetchCstestMatches, cstestLiveScoresStore } from './services/hltv/cstestClient';
+import { scrapeHltvRankingLogos } from './services/hltv/hltvRankingScraper';
 import { runWithRequestContext } from './utils/requestContext';
 import { AppError } from './utils/AppError';
 
@@ -285,6 +286,15 @@ setTimeout(async () => {
 // CS2: poll cstest API every 7s (matches the cstest match list directly)
 liveScoresStore.startBackgroundWorker(7_000);
 cstestLiveScoresStore.startBackgroundWorker(7_000);
+
+// ── HLTV ranking logo scraper — run once at startup ──
+// Fills the in-memory logo map for cstestClient to use as fallback
+// when a team has no logo from cstest CDN (fallback.webp → null → HLTV CDN)
+setTimeout(() => {
+  scrapeHltvRankingLogos().catch(e =>
+    console.warn('[hltvRanking] Startup scrape failed:', (e as Error).message)
+  );
+}, 3_000);
 
 // ── Incremental refresh: fast HTTP fetch of today's page every 60s ──
 // Merges new matches & scores into the file cache without a full 8-day scrape.

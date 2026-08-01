@@ -11,6 +11,7 @@
 import type { TipsGgMatch } from '../tipsggScraper';
 import { fetchLiveHtml } from '../tipsggScraper';
 import * as cheerio from 'cheerio';
+import { getHltvLogoCache } from './hltvRankingScraper';
 
 const CSTEST_BASE = 'https://api.cstest.pp.ua';
 
@@ -62,26 +63,25 @@ interface CstestGame {
 }
 
 /**
- * Sanitize external logo URL: skip fallbacks, generate tips.gg CDN fallback.
- * cstest API returns real logo URLs for most teams; for fallback.webp we
- * generate a tips.gg CDN URL from team name slug and route through
- * /logo/external (proven Puppeteer pipeline with Cloudflare bypass).
+ * Sanitize external logo URL: skip fallbacks, lookup in HLTV ranking as fallback.
  */
 function sanitizeLogoUrl(url: string | null, teamName?: string): string | null {
   if (url) {
-    // Got a real URL from cstest — encode and use directly
     if (/fallback\.(webp|png|svg)/i.test(url)) url = null;
     else {
       try { return encodeURI(url); }
       catch { url = null; }
     }
   }
-  // No logo from source — generate tips.gg CDN URL from team name
+  // No logo from source — lookup in HLTV ranking logo map (pre-loaded in memory)
   if (!url && teamName) {
-    const slug = teamName.toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, '');
-    return `https://files.tips.gg/static/image/teams/${slug}.png`;
+    const hltvMap = getHltvLogoCache();
+    if (hltvMap) {
+      const norm = teamName.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (hltvMap.has(norm)) return hltvMap.get(norm)!;
+      const raw = teamName.toLowerCase().trim();
+      if (hltvMap.has(raw)) return hltvMap.get(raw)!;
+    }
   }
   return null;
 }
