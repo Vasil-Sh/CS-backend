@@ -418,10 +418,8 @@ async function fetchTipsGgMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[]>
     `coeffs: ${totalTime - coeffsStart}ms total: ${totalTime - startTime}ms`
   );
 
-  // Download team logos and cache locally (best-effort, in background)
-  cacheTeamLogos(all, gameTag).then(downloaded => {
-    // Rewrite logo URLs to point to local cache on success
-  }).catch(() => {});
+  // Download team logos and cache locally (fire-and-forget, non-blocking)
+  cacheTeamLogos(all, gameTag).catch(() => {});
 
   recordSuccess(CIRCUIT_NAME);
   return all;
@@ -595,14 +593,15 @@ async function downloadLogo(cdnUrl: string, game: string): Promise<string | null
  * Batch-download team logos from tips.gg CDN for a list of matches.
  * Rewrites logoTeam1/logoTeam2 to local cache paths on success.
  */
-export async function cacheTeamLogos(matches: TipsGgMatch[], game: string): Promise<void> {
+export async function cacheTeamLogos(matches: TipsGgMatch[], game: string): Promise<{ downloaded: number; logoMap: Map<string, string> }> {
   // Collect unique logo URLs from tips.gg CDN only
   const logoUrls = new Set<string>();
   for (const m of matches) {
     if (m.logoTeam1?.includes('files.tips.gg')) logoUrls.add(m.logoTeam1);
     if (m.logoTeam2?.includes('files.tips.gg')) logoUrls.add(m.logoTeam2);
   }
-  if (logoUrls.size === 0) return;
+  const result = { downloaded: 0, logoMap: new Map<string, string>() };
+  if (logoUrls.size === 0) return result;
 
   const startTime = Date.now();
   const CONCURRENCY = 4;
@@ -612,14 +611,27 @@ export async function cacheTeamLogos(matches: TipsGgMatch[], game: string): Prom
   for (let i = 0; i < urls.length; i += CONCURRENCY) {
     const batch = urls.slice(i, i + CONCURRENCY);
     const results = await Promise.allSettled(
-      batch.map(url => downloadLogo(url, game))
+      batch.map(async (url) => {
+        const localPath = await downloadLogo(url, game);
+        return { cdnUrl: url, localPath };
+      })
     );
-    downloaded += results.filter(r => r.status === 'fulfilled' && r.value).length;
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value.localPath) {
+        downloaded++;
+        // Build relative URL: /api/v1/{game}-matches/logo/cached/{game}/{filename}
+        const filename = r.value.cdnUrl.split('/').pop() || 'unknown.png';
+        result.logoMap.set(r.value.cdnUrl, `/api/v1/${game === 'dota2' ? 'dota2' : 'cs2'}-matches/logo/cached/${game}/${filename}`);
+      }
+    }
   }
+  result.downloaded = downloaded;
 
   if (downloaded > 0) {
     console.log(`[logo:${game}] Downloaded ${downloaded}/${urls.length} logos (${Date.now() - startTime}ms)`);
   }
+
+  return result;
 }
 
 /**

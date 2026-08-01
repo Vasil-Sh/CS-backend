@@ -319,16 +319,17 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
   });
 
   // ── GET /logo/cached/:gameSlug/:filename — serve locally cached logos ──
-  router.get('/logo/cached/:gameSlug/:filename', (c) => {
+  // On cache miss, downloads from tips.gg CDN via Puppeteer and caches for next time.
+  router.get('/logo/cached/:gameSlug/:filename', async (c) => {
     const filename = c.req.param('filename');
     const gameSlug = c.req.param('gameSlug');
     if (!filename || !gameSlug) return c.json({ error: 'Not found' }, 404);
 
-    // Sanitize filename
     const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
     const logoDir = join(process.cwd(), '.cache', 'logos', gameSlug);
     const cacheFile = join(logoDir, safeName);
 
+    // Serve from cache if fresh
     if (existsSync(cacheFile)) {
       const stat = statSync(cacheFile);
       if (Date.now() - stat.mtimeMs < 86400_000) {
@@ -344,6 +345,73 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
         });
       }
     }
+
+    // Cache miss — try downloading from tips.gg CDN via Puppeteer.
+    // tips.gg CDN filenames are unpredictable — try stripping game suffix,
+    // adding -csgo/-cs2/-dota2 variants, swapping underscores/hyphens.
+    const bare = filename.replace(/\.(png|svg|webp)$/i, '');
+    const noGame = bare.replace(/-(csgo|cs2|dota2)$/i, '');
+    const candidates = [
+      filename,
+      `${noGame}.png`,
+      `${noGame}-csgo.png`,
+      `${noGame}-cs2.png`,
+      `${noGame}-dota2.png`,
+      `${noGame.replace(/_/g, '-')}.png`,
+      `${noGame.replace(/_/g, '-')}-csgo.png`,
+      `${noGame.replace(/_/g, '-')}-cs2.png`,
+      `${noGame.replace(/-/g, '_')}.png`,
+    ];
+    const uniqueNames = [...new Set(candidates)];
+
+    let buf: Buffer | null = null;
+    try {
+      const browser = await getBrowser();
+      const page = await browser.newPage();
+      try {
+        for (const candidate of uniqueNames) {
+          const cdnUrl = `https://files.tips.gg/static/image/teams/${candidate}`;
+          const base64DataUrl = await page.evaluate(async (url: string): Promise<string | null> => {
+            try {
+              const res = await fetch(url, { headers: { 'Referer': 'https://tips.gg/' } });
+              if (!res.ok) return null;
+              const blob = await res.blob();
+              const arr = new Uint8Array(await blob.arrayBuffer());
+              let bin = '';
+              for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+              return 'data:' + blob.type + ';base64,' + btoa(bin);
+            } catch { return null; }
+          }, cdnUrl);
+
+          if (base64DataUrl) {
+            const base64Data = base64DataUrl.replace(/^data:[^;]+;base64,/, '');
+            buf = Buffer.from(base64Data, 'base64');
+            // Cache under original request filename so next request finds it
+            if (!existsSync(logoDir)) mkdirSync(logoDir, { recursive: true });
+            writeFileSync(cacheFile, buf);
+            if (candidate !== filename) {
+              console.log(`[logo] ${filename} → found at ${candidate}`);
+            }
+            break;
+          }
+        }
+      } finally {
+        await page.close().catch(() => {});
+      }
+    } catch { /* fall through to 404 */ }
+
+    if (buf) {
+      const ext = safeName.split('.').pop() || 'png';
+      const ct = ext === 'svg' ? 'image/svg+xml' : `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+      return new Response(buf, {
+        headers: {
+          'Content-Type': ct,
+          'Cache-Control': 'public, max-age=86400',
+          'Access-Control-Allow-Origin': '*',
+        },
+      });
+    }
+
     return c.json({ error: 'Not found' }, 404);
   });
 
