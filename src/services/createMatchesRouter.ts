@@ -78,14 +78,7 @@ function proxyLogoUrl(url: string | null, prefix: string): string | null {
   if (/fallback\.(webp|png|svg)/i.test(url)) return null;
   if (url.startsWith('/api/')) return url;
 
-  // tips.gg CDN — use local cached logo endpoint (fast, no Puppeteer per-request)
-  if (url.includes('files.tips.gg')) {
-    const parts = url.split('/');
-    const filename = parts[parts.length - 1];
-    return `/api/v1/${prefix}-matches/logo/cached/${prefix}/${filename}`;
-  }
-
-  // External URL (cstest, HLTV) — encode as base64url for /logo/external
+  // All external URLs (tips.gg CDN, cstest, HLTV) → /logo/external
   const encoded = Buffer.from(url).toString('base64url');
   return `/api/v1/${prefix}-matches/logo/external/${encoded}`;
 }
