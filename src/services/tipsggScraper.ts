@@ -854,7 +854,7 @@ const LOGO_OVERRIDES: Record<string, string> = {
   'team-syntax-dota2': 'Team-Syntax-dota2',
 };
 
-/** Get team logo from map, overrides, or slug-derived URL */
+/** Get team logo from map or overrides. No guessing — only use what HTML provides. */
 function getTeamLogo(teamName: string, teamUrl: string, logoMap: Map<string, string>): string | null {
   // 1. Exact map match (from HTML <img> data-src — always correct when present)
   if (logoMap.has(teamName)) return logoMap.get(teamName) ?? null;
@@ -869,38 +869,9 @@ function getTeamLogo(teamName: string, teamUrl: string, logoMap: Map<string, str
   const overrideSlug = LOGO_OVERRIDES[slug];
   if (overrideSlug) return `https://files.tips.gg/static/image/teams/${overrideSlug}.png`;
 
-  // 4. Build candidates from team name AND slug (CDN naming is unpredictable)
-  const teamSlug = teamName.toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '');
-  const candidates = new Set<string>();
-
-  for (const base of [teamSlug, slug]) {
-    if (!base) continue;
-    candidates.add(base);
-    candidates.add(`${base}-csgo`);
-    candidates.add(`${base}-cs2`);
-    candidates.add(`${base}-dota2`);
-    // Strip game suffix
-    const noGame = base.replace(/-(csgo|cs2|dota2)$/i, '');
-    if (noGame !== base) {
-      candidates.add(noGame);
-      candidates.add(`${noGame}-csgo`);
-      candidates.add(`${noGame}-cs2`);
-      candidates.add(`${noGame}-dota2`);
-    }
-    // Swap underscores
-    const swapped = base.replace(/_/g, '-');
-    if (swapped !== base) {
-      candidates.add(swapped);
-      candidates.add(`${swapped}-csgo`);
-      candidates.add(`${swapped}-cs2`);
-      candidates.add(`${swapped}-dota2`);
-    }
-  }
-
-  // Return first candidate — /logo/external will try all variants via Puppeteer
-  return `https://files.tips.gg/static/image/teams/${[...candidates][0]}.png`;
+  // No match — return null. For CS2, cstest logos fill the gap.
+  // For Dota2, the HTML logoMap covers most teams correctly.
+  return null;
 }
 
 /**
