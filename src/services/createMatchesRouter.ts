@@ -26,6 +26,47 @@ const CACHE_TTL_FRESH = 5 * 60 * 1000;   // 5 min — normal TTL
 const CACHE_TTL_STALE = 60 * 60 * 1000;  // 1 hour — serve stale only if fresh fetch fails
 const CACHE_DIR = join(process.cwd(), '.cache');
 
+// ── Logo download queue — limit concurrent Puppeteer fetches ──
+const logoDownloadsInFlight = new Map<string, { promise: Promise<Buffer>; ts: number }>();
+
+async function fetchAndCacheLogo(cdnUrl: string, cacheFile: string): Promise<Buffer> {
+  // Deduplicate concurrent requests for the same file
+  const existing = logoDownloadsInFlight.get(cacheFile);
+  if (existing) return existing.promise;
+
+  const promise = (async () => {
+    const browser = await getBrowser();
+    const page = await browser.newPage();
+    try {
+      const base64DataUrl = await page.evaluate(async (url: string): Promise<string | null> => {
+        try {
+          const res = await fetch(url, { headers: { 'Referer': 'https://tips.gg/' } });
+          if (!res.ok) return null;
+          const blob = await res.blob();
+          const arr = new Uint8Array(await blob.arrayBuffer());
+          let bin = '';
+          for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+          return 'data:' + blob.type + ';base64,' + btoa(bin);
+        } catch { return null; }
+      }, cdnUrl);
+
+      if (!base64DataUrl) throw new Error('Puppeteer fetch returned null');
+      const base64Data = base64DataUrl.replace(/^data:[^;]+;base64,/, '');
+      const buf = Buffer.from(base64Data, 'base64');
+      const dir = cacheFile.substring(0, cacheFile.lastIndexOf('/'));
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(cacheFile, buf);
+      return buf;
+    } finally {
+      await page.close().catch(() => {});
+      logoDownloadsInFlight.delete(cacheFile);
+    }
+  })();
+
+  logoDownloadsInFlight.set(cacheFile, { promise, ts: Date.now() });
+  return promise;
+}
+
 /**
  * Rewrite external logo URLs to use our internal HTTP proxy.
  * Applied server-side so ALL clients get CORS-safe, properly encoded URLs.
@@ -365,40 +406,21 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
     const uniqueNames = [...new Set(candidates)];
 
     let buf: Buffer | null = null;
-    try {
-      const browser = await getBrowser();
-      const page = await browser.newPage();
-      try {
-        for (const candidate of uniqueNames) {
-          const cdnUrl = `https://files.tips.gg/static/image/teams/${candidate}`;
-          const base64DataUrl = await page.evaluate(async (url: string): Promise<string | null> => {
-            try {
-              const res = await fetch(url, { headers: { 'Referer': 'https://tips.gg/' } });
-              if (!res.ok) return null;
-              const blob = await res.blob();
-              const arr = new Uint8Array(await blob.arrayBuffer());
-              let bin = '';
-              for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
-              return 'data:' + blob.type + ';base64,' + btoa(bin);
-            } catch { return null; }
-          }, cdnUrl);
+    if (!existsSync(logoDir)) mkdirSync(logoDir, { recursive: true });
 
-          if (base64DataUrl) {
-            const base64Data = base64DataUrl.replace(/^data:[^;]+;base64,/, '');
-            buf = Buffer.from(base64Data, 'base64');
-            // Cache under original request filename so next request finds it
-            if (!existsSync(logoDir)) mkdirSync(logoDir, { recursive: true });
-            writeFileSync(cacheFile, buf);
-            if (candidate !== filename) {
-              console.log(`[logo] ${filename} → found at ${candidate}`);
-            }
-            break;
+    // Try each CDN filename variant through the dedup download queue
+    for (const candidate of uniqueNames) {
+      try {
+        const cdnUrl = `https://files.tips.gg/static/image/teams/${candidate}`;
+        buf = await fetchAndCacheLogo(cdnUrl, cacheFile);
+        if (buf) {
+          if (candidate !== filename) {
+            console.log(`[logo] ${filename} → found at ${candidate}`);
           }
+          break;
         }
-      } finally {
-        await page.close().catch(() => {});
-      }
-    } catch { /* fall through to 404 */ }
+      } catch { /* try next variant */ }
+    }
 
     if (buf) {
       const ext = safeName.split('.').pop() || 'png';
