@@ -45,6 +45,7 @@ import { readFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { liveScoresStore } from './services/liveScoresStore';
 import { writeFileCacheInternal } from './services/createMatchesRouter';
+import { upsertMatchHistoryBatch } from './services/matchHistoryService';
 import { fetchCstestMatches, cstestLiveScoresStore } from './services/hltv/cstestClient';
 import { scrapeHltvRankingLogos } from './services/hltv/hltvRankingScraper';
 import { buildLocalLogoStore } from './services/logoStore';
@@ -394,6 +395,7 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
       let added = 0;
       let skippedDupes = 0;
       let skippedUnmatched = 0;
+      const newlyFinished: any[] = [];
 
       for (const tm of todayMatches) {
         // ── Try exact ID match first ──
@@ -403,6 +405,7 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
             if (tm.score1 != null) prev.score1 = tm.score1;
             if (tm.score2 != null) prev.score2 = tm.score2;
             if (tm.status !== 'upcoming') prev.status = tm.status;
+            if (prev.status === 'finished') newlyFinished.push(prev);
             updates++;
           }
           continue;
@@ -417,6 +420,7 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
             if (tm.score1 != null) fuzzyHit.match.score1 = tm.score1;
             if (tm.score2 != null) fuzzyHit.match.score2 = tm.score2;
             if (tm.status !== 'upcoming') fuzzyHit.match.status = tm.status;
+            if (fuzzyHit.match.status === 'finished') newlyFinished.push(fuzzyHit.match);
             updates++;
           }
           skippedDupes++;
@@ -431,6 +435,28 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
         } else {
           skippedUnmatched++;
         }
+      }
+
+      // ── Persist newly-finished matches to history DB ──
+      // Incremental refresh detects score changes that mean a match just ended.
+      if (newlyFinished.length > 0) {
+        const historyEntries = newlyFinished.map(m => ({
+          id: m.id,
+          game,
+          team1: m.nameTeam1,
+          team2: m.nameTeam2,
+          date: m.date,
+          score1: m.score1 ?? 0,
+          score2: m.score2 ?? 0,
+          status: 'finished' as const,
+          tournament: m.tournament || m.stage || '',
+          matchType: m.type,
+          logoTeam1: m.logoTeam1,
+          logoTeam2: m.logoTeam2,
+        }));
+        upsertMatchHistoryBatch(historyEntries).catch(e =>
+          console.error(`[incr:${tag}] History sync failed:`, (e as Error).message)
+        );
       }
 
       // ── Write back only if we didn't shrink the cache ──
