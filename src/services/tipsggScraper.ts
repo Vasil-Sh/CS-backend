@@ -767,30 +767,38 @@ function getTeamLogo(teamName: string, teamUrl: string, logoMap: Map<string, str
   const overrideSlug = LOGO_OVERRIDES[slug];
   if (overrideSlug) return `https://files.tips.gg/static/image/teams/${overrideSlug}.png`;
 
-  // 4. Try multiple possible CDN filenames (CDN naming is unpredictable)
-  //    e.g. slug="m80" → try m80-csgo.png, m80.png, m80-cs2.png, etc.
-  const candidates = [slug];
-  if (!slug.endsWith('-csgo')) candidates.push(`${slug}-csgo`);
-  if (!slug.endsWith('-cs2')) candidates.push(`${slug}-cs2`);
-  if (!slug.endsWith('-dota2')) candidates.push(`${slug}-dota2`);
+  // 4. Build candidates from team name AND slug (CDN naming is unpredictable)
+  const teamSlug = teamName.toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+  const candidates = new Set<string>();
 
-  // Also try with underscores ↔ hyphens swapped (CDN uses both)
-  const swapped = slug.replace(/_/g, '-');
-  if (swapped !== slug) {
-    if (!swapped.endsWith('-csgo')) candidates.push(`${swapped}-csgo`);
-    candidates.push(`${swapped}-cs2`);
+  for (const base of [teamSlug, slug]) {
+    if (!base) continue;
+    candidates.add(base);
+    candidates.add(`${base}-csgo`);
+    candidates.add(`${base}-cs2`);
+    candidates.add(`${base}-dota2`);
+    // Strip game suffix
+    const noGame = base.replace(/-(csgo|cs2|dota2)$/i, '');
+    if (noGame !== base) {
+      candidates.add(noGame);
+      candidates.add(`${noGame}-csgo`);
+      candidates.add(`${noGame}-cs2`);
+      candidates.add(`${noGame}-dota2`);
+    }
+    // Swap underscores
+    const swapped = base.replace(/_/g, '-');
+    if (swapped !== base) {
+      candidates.add(swapped);
+      candidates.add(`${swapped}-csgo`);
+      candidates.add(`${swapped}-cs2`);
+      candidates.add(`${swapped}-dota2`);
+    }
   }
 
-  // Also try removing the last segment if it looks like a game suffix
-  const withoutGame = slug.replace(/-(csgo|cs2|dota2)$/i, '');
-  if (withoutGame !== slug) {
-    candidates.push(withoutGame);
-    candidates.push(`${withoutGame}-csgo`);
-    candidates.push(`${withoutGame}-dota2`);
-  }
-
-  // Return the first candidate — the logo proxy will fallback through alternatives on 502
-  return `https://files.tips.gg/static/image/teams/${candidates[0]}.png`;
+  // Return first candidate — /logo/external will try all variants via Puppeteer
+  return `https://files.tips.gg/static/image/teams/${[...candidates][0]}.png`;
 }
 
 /**

@@ -441,9 +441,13 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
           },
         });
       }
-      return c.json({ error: 'Failed to fetch external logo' }, 502);
+      // Return transparent 1×1 PNG instead of 502 error (avoids broken image icon)
+      return new Response(EMPTY_PNG, { headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=3600' } });
     }
   });
+
+  // ── 1×1 transparent PNG — returned when logo can't be fetched ──
+  const EMPTY_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
 
   // ── GET /logo/:filename — proxy team logos via Puppeteer ──
   router.get('/logo/:filename', async (c) => {
@@ -549,7 +553,7 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
           }
         } catch {}
       }
-      return c.json({ error: 'Failed to fetch logo' }, 502);
+      return new Response(EMPTY_PNG, { headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=3600' } });
     }
   });
 
