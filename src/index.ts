@@ -233,27 +233,35 @@ setTimeout(() => {
     .catch(e => console.warn('[warmup] Dota2 fetch failed:', (e as Error).message));
 }, 500);
 
-// ── Cache warmup: pre-fetch CS2 matches (cstest → tips.gg) in background ──
+// ── Cache warmup: pre-fetch CS2 matches (cstest + tips.gg merged) in background ──
 setTimeout(async () => {
   try {
-    // Try fast cstest API first
-    const cstestMatches = await fetchCstestMatches();
-    if (cstestMatches.length > 0) {
-      writeFileCacheInternal(cstestMatches, join(process.cwd(), '.cache', 'cs2_matches.json'));
-      console.log(`[warmup] CS2 (cstest) cache primed: ${cstestMatches.length} matches`);
-      return;
+    const [cstestMatches, tipsggMatches] = await Promise.allSettled([
+      fetchCstestMatches(),
+      fetchCs2Matches(),
+    ]);
+    const cstest = cstestMatches.status === 'fulfilled' ? cstestMatches.value : [];
+    const tipsgg = tipsggMatches.status === 'fulfilled' ? tipsggMatches.value : [];
+
+    // Merge: cstest primary, tips.gg enriches with tournament/coefficients
+    const merged = new Map<string, any>();
+    for (const m of cstest) merged.set(m.id, m);
+    for (const tm of tipsgg) {
+      const existing = merged.get(tm.id);
+      if (existing) {
+        if (!existing.tournament && tm.tournament) existing.tournament = tm.tournament;
+        if (!existing.stage && tm.stage) existing.stage = tm.stage;
+        if (existing.coeff1 == null && tm.coeff1 != null) existing.coeff1 = tm.coeff1;
+        if (existing.coeff2 == null && tm.coeff2 != null) existing.coeff2 = tm.coeff2;
+      } else {
+        merged.set(tm.id, tm);
+      }
     }
-    console.warn('[warmup] cstest returned 0 matches — falling back to tips.gg');
+    writeFileCacheInternal([...merged.values()], join(process.cwd(), '.cache', 'cs2_matches.json'));
+    const fromTipsGg = [...merged.values()].length - cstest.length;
+    console.log(`[warmup] CS2 cache primed: ${merged.size} matches (cstest: ${cstest.length}, +tips.gg: ${fromTipsGg})`);
   } catch (err) {
-    console.warn('[warmup] cstest failed:', (err as Error).message, '— falling back to tips.gg');
-  }
-  // Fallback: tips.gg Puppeteer
-  try {
-    const tipsggMatches = await fetchCs2Matches();
-    writeFileCacheInternal(tipsggMatches, join(process.cwd(), '.cache', 'cs2_matches.json'));
-    console.log(`[warmup] CS2 (tips.gg) cache primed: ${tipsggMatches.length} matches`);
-  } catch (err) {
-    console.warn('[warmup] CS2 (tips.gg) fetch failed:', (err as Error).message);
+    console.warn('[warmup] CS2 fetch failed:', (err as Error).message);
   }
 }, 1000);
 
