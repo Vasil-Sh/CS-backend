@@ -180,13 +180,22 @@ export function lookupLocalLogo(teamName: string): string | null {
   const store = buildLocalLogoStore();
   if (store.byName.size === 0) return null;
 
-  // 1. Normalized match
+  // 1. Normalized exact match
   const norm = normalizeTeamName(teamName);
   if (store.byName.has(norm)) return store.byName.get(norm)!;
 
   // 2. Exact filename match (just in case)
   const asFile = `${norm}.png`;
   if (store.files.has(asFile)) return asFile;
+
+  // 3. Fuzzy substring match — many files have short names (e.g. "SINNERS")
+  //    but the display name includes suffixes ("SINNERS Esports").
+  //    Check if stored key is contained in the lookup name, or vice versa.
+  for (const [key, filename] of store.byName) {
+    if (norm.includes(key) || key.includes(norm)) {
+      return filename;
+    }
+  }
 
   return null;
 }

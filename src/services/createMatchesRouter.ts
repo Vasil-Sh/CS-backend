@@ -93,7 +93,7 @@ export function generateLogoFallback(teamName: string, prefix: string): string |
   // 1. Local logo store — instant, no network
   const localFile = lookupLocalLogo(teamName);
   if (localFile) {
-    return `/api/v1/${prefix}-matches/logo/local/${localFile}`;
+    return `/api/v1/${prefix}-matches/logo/local/${encodeURIComponent(localFile)}`;
   }
 
   // 2. HLTV ranking CDN (img-cdn.hltv.org)
@@ -469,12 +469,16 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
     const filename = c.req.param('filename');
     if (!filename) return c.json({ error: 'Not found' }, 404);
 
-    const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+    // Prevent path traversal
+    if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+      return c.json({ error: 'Invalid filename' }, 400);
+    }
+
     const localDir = getLocalLogoDir();
-    const filePath = join(localDir, safeName);
+    const filePath = join(localDir, filename);
 
     if (existsSync(filePath)) {
-      const ext = safeName.split('.').pop()?.toLowerCase() || 'png';
+      const ext = filename.split('.').pop()?.toLowerCase() || 'png';
       const ct = ext === 'svg' ? 'image/svg+xml' : `image/${ext === 'jpg' ? 'jpeg' : ext}`;
       return new Response(readFileSync(filePath), {
         headers: {
