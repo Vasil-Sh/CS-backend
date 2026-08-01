@@ -16,12 +16,13 @@ router.get('/', async (c) => {
     // History stores raw CDN URLs from scraper; resolve to local when available
     for (const m of matches) {
       const prefix = m.game === 'cs2' ? 'cs2-matches' : 'dota2-matches';
+      const gameKey = m.game === 'cs2' ? 'cs2' : 'dota2';
       m.logoTeam1 = m.logoTeam1 && m.logoTeam1.startsWith('http')
         ? `/api/v1/${prefix}/logo/external/${Buffer.from(m.logoTeam1).toString('base64url')}`
-        : generateLogoFallback(m.team1, prefix);
+        : generateLogoFallback(m.team1, gameKey);
       m.logoTeam2 = m.logoTeam2 && m.logoTeam2.startsWith('http')
         ? `/api/v1/${prefix}/logo/external/${Buffer.from(m.logoTeam2).toString('base64url')}`
-        : generateLogoFallback(m.team2, prefix);
+        : generateLogoFallback(m.team2, gameKey);
     }
 
     return c.json(matches);
