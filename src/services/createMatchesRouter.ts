@@ -29,11 +29,22 @@ const CACHE_DIR = join(process.cwd(), '.cache');
 /**
  * Rewrite external logo URLs to use our internal HTTP proxy.
  * Applied server-side so ALL clients get CORS-safe, properly encoded URLs.
+ * tips.gg CDN → /logo/cached/ (local disk cache, fast)
+ * cstest/HLTV → /logo/external/{b64} (Puppeteer proxy)
  */
 function proxyLogoUrl(url: string | null, prefix: string): string | null {
   if (!url) return null;
   if (/fallback\.(webp|png|svg)/i.test(url)) return null;
   if (url.startsWith('/api/')) return url;
+
+  // tips.gg CDN — use local cached logo endpoint (fast, no Puppeteer per-request)
+  if (url.includes('files.tips.gg')) {
+    const parts = url.split('/');
+    const filename = parts[parts.length - 1];
+    return `/api/v1/${prefix}-matches/logo/cached/${prefix}/${filename}`;
+  }
+
+  // External URL (cstest, HLTV) — encode as base64url for /logo/external
   const encoded = Buffer.from(url).toString('base64url');
   return `/api/v1/${prefix}-matches/logo/external/${encoded}`;
 }
@@ -305,6 +316,35 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
   // ── GET /live-scores/all — full snapshot (debug / initial load) ──
   router.get('/live-scores/all', (c) => {
     return c.json(scoresStore.getResponse());
+  });
+
+  // ── GET /logo/cached/:gameSlug/:filename — serve locally cached logos ──
+  router.get('/logo/cached/:gameSlug/:filename', (c) => {
+    const filename = c.req.param('filename');
+    const gameSlug = c.req.param('gameSlug');
+    if (!filename || !gameSlug) return c.json({ error: 'Not found' }, 404);
+
+    // Sanitize filename
+    const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const logoDir = join(process.cwd(), '.cache', 'logos', gameSlug);
+    const cacheFile = join(logoDir, safeName);
+
+    if (existsSync(cacheFile)) {
+      const stat = statSync(cacheFile);
+      if (Date.now() - stat.mtimeMs < 86400_000) {
+        const buf = readFileSync(cacheFile);
+        const ext = safeName.split('.').pop() || 'png';
+        const ct = ext === 'svg' ? 'image/svg+xml' : `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+        return new Response(buf, {
+          headers: {
+            'Content-Type': ct,
+            'Cache-Control': 'public, max-age=86400',
+            'Access-Control-Allow-Origin': '*',
+          },
+        });
+      }
+    }
+    return c.json({ error: 'Not found' }, 404);
   });
 
   // ── GET /logo/external/:b64url — proxy any external logo URL ──

@@ -9,6 +9,8 @@
 
 import { z } from 'zod';
 import * as cheerio from 'cheerio';
+import { join } from 'node:path';
+import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { getCachedCoefficients, setCachedCoefficients } from './coefficientsCache';
 import { isOpen, recordSuccess, recordFailure } from './circuitBreaker';
 
@@ -416,6 +418,11 @@ async function fetchTipsGgMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[]>
     `coeffs: ${totalTime - coeffsStart}ms total: ${totalTime - startTime}ms`
   );
 
+  // Download team logos and cache locally (best-effort, in background)
+  cacheTeamLogos(all, gameTag).then(downloaded => {
+    // Rewrite logo URLs to point to local cache on success
+  }).catch(() => {});
+
   recordSuccess(CIRCUIT_NAME);
   return all;
 }
@@ -531,6 +538,89 @@ export async function fetchMatchDetail(matchUrl: string, game: 'dota2' | 'cs2' =
 
 // Backward-compatible alias
 export const fetchDota2MatchDetail = fetchMatchDetail;
+
+// ── Logo caching: download tips.gg CDN logos to local disk ──
+const LOGO_CACHE_DIR = join(process.cwd(), '.cache', 'logos');
+
+/**
+ * Download a tips.gg CDN logo via Puppeteer (bypasses Cloudflare) and cache locally.
+ * Returns the cached file path, or null on failure.
+ */
+async function downloadLogo(cdnUrl: string, game: string): Promise<string | null> {
+  if (!existsSync(LOGO_CACHE_DIR)) mkdirSync(LOGO_CACHE_DIR, { recursive: true });
+
+  // Cache key: first candidate filename
+  const filename = cdnUrl.split('/').pop() || 'unknown.png';
+  const gameDir = join(LOGO_CACHE_DIR, game);
+  if (!existsSync(gameDir)) mkdirSync(gameDir, { recursive: true });
+  const cacheFile = join(gameDir, filename);
+
+  // Already cached — skip
+  if (existsSync(cacheFile)) {
+    const stat = statSync(cacheFile);
+    if (Date.now() - stat.mtimeMs < 86400_000) return cacheFile;
+  }
+
+  try {
+    const browser = await getBrowser();
+    const page = await browser.newPage();
+    try {
+      const base64DataUrl = await page.evaluate(async (url: string): Promise<string | null> => {
+        try {
+          const res = await fetch(url, { headers: { 'Referer': 'https://tips.gg/' } });
+          if (!res.ok) return null;
+          const blob = await res.blob();
+          const arr = new Uint8Array(await blob.arrayBuffer());
+          let bin = '';
+          for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+          return 'data:' + blob.type + ';base64,' + btoa(bin);
+        } catch { return null; }
+      }, cdnUrl);
+
+      if (base64DataUrl) {
+        const base64Data = base64DataUrl.replace(/^data:[^;]+;base64,/, '');
+        writeFileSync(cacheFile, Buffer.from(base64Data, 'base64'));
+        return cacheFile;
+      }
+    } finally {
+      await page.close().catch(() => {});
+    }
+  } catch {
+    // best-effort — logo proxy will serve placeholder on miss
+  }
+  return null;
+}
+
+/**
+ * Batch-download team logos from tips.gg CDN for a list of matches.
+ * Rewrites logoTeam1/logoTeam2 to local cache paths on success.
+ */
+export async function cacheTeamLogos(matches: TipsGgMatch[], game: string): Promise<void> {
+  // Collect unique logo URLs from tips.gg CDN only
+  const logoUrls = new Set<string>();
+  for (const m of matches) {
+    if (m.logoTeam1?.includes('files.tips.gg')) logoUrls.add(m.logoTeam1);
+    if (m.logoTeam2?.includes('files.tips.gg')) logoUrls.add(m.logoTeam2);
+  }
+  if (logoUrls.size === 0) return;
+
+  const startTime = Date.now();
+  const CONCURRENCY = 4;
+  const urls = [...logoUrls];
+  let downloaded = 0;
+
+  for (let i = 0; i < urls.length; i += CONCURRENCY) {
+    const batch = urls.slice(i, i + CONCURRENCY);
+    const results = await Promise.allSettled(
+      batch.map(url => downloadLogo(url, game))
+    );
+    downloaded += results.filter(r => r.status === 'fulfilled' && r.value).length;
+  }
+
+  if (downloaded > 0) {
+    console.log(`[logo:${game}] Downloaded ${downloaded}/${urls.length} logos (${Date.now() - startTime}ms)`);
+  }
+}
 
 /**
  * Fetch predictions page → extract Bookmakers Analysis coefficients.
