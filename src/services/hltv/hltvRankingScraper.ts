@@ -8,6 +8,8 @@
  * Used by cstestClient.ts to fill in missing logos for teams without cstest CDN logos.
  */
 
+import { getBrowser } from '../tipsggScraper';
+
 const HLTV_RANKING_URL = 'https://www.hltv.org/ranking/teams';
 
 /** Map of normalized team name → logo CDN URL */

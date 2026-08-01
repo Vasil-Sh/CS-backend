@@ -13,6 +13,7 @@ import { recordFailure } from '../services/circuitBreaker';
 import type { ILiveScoresStore } from '../services/liveScoresStore';
 import { upsertMatchHistoryBatch } from '../services/matchHistoryService';
 import { getHltvLogoCache } from '../services/hltv/hltvRankingScraper';
+import { lookupLocalLogo, getLocalLogoDir } from '../services/logoStore';
 
 interface MatchRouterConfig {
   game: 'dota2' | 'cs2';
@@ -86,10 +87,16 @@ function proxyLogoUrl(url: string | null, prefix: string): string | null {
 
 /**
  * Generate logo URL for a match that has null logo.
- * Tries: HLTV ranking CDN → tips.gg CDN slug → null.
+ * Priority: 1. Local logo store 2. HLTV ranking CDN 3. tips.gg CDN source.
  */
 export function generateLogoFallback(teamName: string, prefix: string): string | null {
-  // 1. HLTV ranking logo map (covers 222 CS2 teams)
+  // 1. Local logo store — instant, no network
+  const localFile = lookupLocalLogo(teamName);
+  if (localFile) {
+    return `/api/v1/${prefix}-matches/logo/local/${localFile}`;
+  }
+
+  // 2. HLTV ranking CDN (img-cdn.hltv.org)
   const hltvMap = getHltvLogoCache();
   if (hltvMap) {
     const norm = teamName.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -101,7 +108,7 @@ export function generateLogoFallback(teamName: string, prefix: string): string |
     }
   }
 
-  // 2. tips.gg CDN slug (last resort)
+  // 3. tips.gg CDN source
   const slug = teamName.toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '');
@@ -454,6 +461,29 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       });
     }
 
+    return c.json({ error: 'Not found' }, 404);
+  });
+
+  // ── GET /logo/local/:filename — serve locally stored team logos ──
+  router.get('/logo/local/:filename', (c) => {
+    const filename = c.req.param('filename');
+    if (!filename) return c.json({ error: 'Not found' }, 404);
+
+    const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const localDir = getLocalLogoDir();
+    const filePath = join(localDir, safeName);
+
+    if (existsSync(filePath)) {
+      const ext = safeName.split('.').pop()?.toLowerCase() || 'png';
+      const ct = ext === 'svg' ? 'image/svg+xml' : `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+      return new Response(readFileSync(filePath), {
+        headers: {
+          'Content-Type': ct,
+          'Cache-Control': 'public, max-age=86400, immutable',
+          'Access-Control-Allow-Origin': '*',
+        },
+      });
+    }
     return c.json({ error: 'Not found' }, 404);
   });
 

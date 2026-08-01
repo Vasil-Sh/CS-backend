@@ -41,11 +41,12 @@ import matchesHistoryRoutes from './routes/matchesHistory';
 import { closeBrowser } from './services/tipsggScraper';
 import { fetchDota2Matches, fetchCs2Matches, fetchTodayMatches } from './services/tipsggScraper';
 import { join } from 'node:path';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { liveScoresStore } from './services/liveScoresStore';
 import { writeFileCacheInternal } from './services/createMatchesRouter';
 import { fetchCstestMatches, cstestLiveScoresStore } from './services/hltv/cstestClient';
 import { scrapeHltvRankingLogos } from './services/hltv/hltvRankingScraper';
+import { buildLocalLogoStore } from './services/logoStore';
 import { runWithRequestContext } from './utils/requestContext';
 import { AppError } from './utils/AppError';
 
@@ -295,6 +296,40 @@ setTimeout(() => {
     console.warn('[hltvRanking] Startup scrape failed:', (e as Error).message)
   );
 }, 3_000);
+
+// ── Local logo extraction — extract cs2_icon.zip on first startup ──
+setTimeout(() => {
+  const zipPath = join(process.cwd(), 'cs2_icon.zip');
+  const extractDir = join(process.cwd(), '.cache', 'logos', 'local');
+
+  if (!existsSync(zipPath)) {
+    console.log('[logoStore] cs2_icon.zip not found — skipping (place it in backend/)');
+    buildLocalLogoStore(); // scan whatever is already there
+    return;
+  }
+
+  if (!existsSync(extractDir)) mkdirSync(extractDir, { recursive: true });
+
+  try {
+    // Only extract if directory has fewer than 10 files (first run)
+    const existing = require('node:fs').readdirSync(extractDir);
+    if (existing.length > 10) {
+      console.log(`[logoStore] ${existing.length} local logos already extracted`);
+      buildLocalLogoStore();
+      return;
+    }
+
+    console.log('[logoStore] Extracting cs2_icon.zip...');
+    const { execSync } = require('node:child_process');
+    execSync(`powershell -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${extractDir}' -Force"`, { stdio: 'pipe' });
+    const count = require('node:fs').readdirSync(extractDir).length;
+    console.log(`[logoStore] Extracted ${count} files`);
+    buildLocalLogoStore();
+  } catch (err) {
+    console.warn('[logoStore] Extraction failed:', (err as Error).message);
+    buildLocalLogoStore(); // try anyway (maybe files already there)
+  }
+}, 4_000);
 
 // ── Incremental refresh: fast HTTP fetch of today's page every 60s ──
 // Merges new matches & scores into the file cache without a full 8-day scrape.
