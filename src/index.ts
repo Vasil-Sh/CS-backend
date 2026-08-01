@@ -41,7 +41,8 @@ import matchesHistoryRoutes from './routes/matchesHistory';
 import { closeBrowser } from './services/tipsggScraper';
 import { fetchDota2Matches, fetchCs2Matches, fetchTodayMatches } from './services/tipsggScraper';
 import { join } from 'node:path';
-import { readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { liveScoresStore } from './services/liveScoresStore';
 import { writeFileCacheInternal } from './services/createMatchesRouter';
 import { fetchCstestMatches, cstestLiveScoresStore } from './services/hltv/cstestClient';
@@ -312,7 +313,7 @@ setTimeout(() => {
 
   try {
     // Only extract if directory has fewer than 10 files (first run)
-    const existing = require('node:fs').readdirSync(extractDir);
+    const existing = readdirSync(extractDir);
     if (existing.length > 10) {
       console.log(`[logoStore] ${existing.length} local logos already extracted`);
       buildLocalLogoStore();
@@ -320,9 +321,8 @@ setTimeout(() => {
     }
 
     console.log('[logoStore] Extracting cs2_icon.zip...');
-    const { execSync } = require('node:child_process');
     execSync(`powershell -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${extractDir}' -Force"`, { stdio: 'pipe' });
-    const count = require('node:fs').readdirSync(extractDir).length;
+    const count = readdirSync(extractDir).length;
     console.log(`[logoStore] Extracted ${count} files`);
     buildLocalLogoStore();
   } catch (err) {
