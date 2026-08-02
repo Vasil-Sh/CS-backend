@@ -1,20 +1,16 @@
 /**
  * Local Logo Store — serves team logos from local directories.
  *
- * Priority:
- *   1. .cache/logos/local/*.png  (HLTV ranking, 222 files from cs2_icon.zip)
- *   2. .cache/logos/tipsgg/{cs2|dota2}/{name}.png  (4188 files, bulk download)
- *
- * Builds normalized-name → filename maps for fast lookups.
- * If no local logos exist, falls back gracefully (no error).
+ * CS2:  ../hltv_logos/  (2706 files, {rank}_{Team}.ext format)
+ * Dota2: .cache/logos/dota2_local/  (1259 files, {rank}_{Team}.ext format)
  */
 
 import { existsSync, readdirSync, statSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 
-const LOCAL_LOGO_DIR = join(process.cwd(), '.cache', 'logos', 'local');
-const TIPSGG_LOGO_DIR = join(process.cwd(), '.cache', 'logos', 'tipsgg');
+const LOCAL_LOGO_DIR = join(process.cwd(), '..', 'hltv_logos');
+const DOTA2_LOGO_DIR = join(process.cwd(), '.cache', 'logos', 'dota2_local');
 
 /**
  * Normalize team name for matching:
@@ -179,83 +175,64 @@ export function buildLocalLogoStore(): LogoStore {
 let _tipsggLocalStore: Map<string, string> | null = null;
 
 /**
- * Build store for locally-downloaded tips.gg logos.
- * Files are named: {rank}_{TeamName}.{ext} (e.g., "0001_Vitality.png", "0002_Natus_Vincere.png")
- * Map: normalized team name → "cs2/0001_Vitality.png"
- * Also indexed with game prefix: "cs2:vitality" → "cs2/0001_Vitality.png"
+ * Build store for local Dota2 logos (.cache/logos/dota2_local/).
+ * Files: {rank}_{Team}.ext (e.g., "0001_Team_Spirit.png")
  */
-export function buildTipsggLocalStore(): Map<string, string> {
+export function buildDota2LocalStore(): Map<string, string> {
   if (_tipsggLocalStore) return _tipsggLocalStore;
 
   _tipsggLocalStore = new Map();
 
   try {
-    if (!existsSync(TIPSGG_LOGO_DIR)) return _tipsggLocalStore;
+    if (!existsSync(DOTA2_LOGO_DIR)) return _tipsggLocalStore;
 
-    for (const game of ['cs2', 'dota2']) {
-      const gameDir = join(TIPSGG_LOGO_DIR, game);
-      if (!existsSync(gameDir)) continue;
+    const entries = readdirSync(DOTA2_LOGO_DIR);
+    for (const entry of entries) {
+      if (!/\.(png|svg|webp|jpg)$/i.test(entry)) continue;
 
-      const entries = readdirSync(gameDir);
-      for (const entry of entries) {
-        if (!/\.(png|svg|webp|jpg)$/i.test(entry)) continue;
-        const relPath = `${game}/${entry}`;
+      const noExt = entry.replace(/\.(png|svg|webp|jpg)$/i, '');
+      const underscoreIdx = noExt.indexOf('_');
+      const namePart = underscoreIdx >= 0 ? noExt.substring(underscoreIdx + 1) : noExt;
+      const norm = normalizeTeamName(namePart.replace(/_/g, ' '));
+      if (!norm) continue;
 
-        // Try to extract team name from filename: "0001_Vitality.png" → "vitality"
-        // Strip rank prefix: 0001_ → team name
-        const noExt = entry.replace(/\.(png|svg|webp|jpg)$/i, '');
-        const underscoreIdx = noExt.indexOf('_');
-        const namePart = underscoreIdx >= 0 ? noExt.substring(underscoreIdx + 1) : noExt;
-        // Convert underscores back to spaces, then normalize
-        const norm = normalizeTeamName(namePart.replace(/_/g, ' '));
-        if (!norm) continue;
-
-        // Generic lookup
-        if (!_tipsggLocalStore.has(norm)) {
-          _tipsggLocalStore.set(norm, relPath);
-        }
-        // Game-prefixed (for disambiguation)
-        const gameKey = `${game}:${norm}`;
-        _tipsggLocalStore.set(gameKey, relPath);
+      if (!_tipsggLocalStore.has(norm)) {
+        _tipsggLocalStore.set(norm, entry);
       }
     }
 
-    const cs2Count = existsSync(join(TIPSGG_LOGO_DIR, 'cs2')) ? readdirSync(join(TIPSGG_LOGO_DIR, 'cs2')).length : 0;
-    const dota2Count = existsSync(join(TIPSGG_LOGO_DIR, 'dota2')) ? readdirSync(join(TIPSGG_LOGO_DIR, 'dota2')).length : 0;
-    if (cs2Count + dota2Count > 0) {
-      console.log(`[logoStore] Loaded ${cs2Count}+${dota2Count} local tips.gg logos`);
-    }
+    console.log(`[logoStore] Loaded ${_tipsggLocalStore.size} Dota2 logos`);
   } catch (err) {
-    console.warn('[logoStore] Failed to scan tips.gg local logos:', (err as Error).message);
+    console.warn('[logoStore] Failed to scan Dota2 logos:', (err as Error).message);
   }
 
   return _tipsggLocalStore;
 }
 
 /**
- * Look up a team logo from the locally-downloaded tips.gg store.
- * Returns relative path like "cs2/vitality.png" or null.
+ * Look up a team logo from the local Dota2 store.
+ * Returns filename (e.g., "0005_Tundra.png") or null.
  */
-export function lookupTipsggLocalLogo(teamName: string, game: string): string | null {
-  const store = buildTipsggLocalStore();
+export function lookupDota2LocalLogo(teamName: string): string | null {
+  const store = buildDota2LocalStore();
   if (store.size === 0) return null;
 
   const norm = normalizeTeamName(teamName);
-
-  // 1. Game-prefixed lookup
-  const gameKey = `${game}:${norm}`;
-  if (store.has(gameKey)) return store.get(gameKey)!;
-
-  // 2. Generic lookup
   if (store.has(norm)) return store.get(norm)!;
 
-  // 3. Fuzzy substring
+  // Fuzzy substring
   for (const [key, path] of store) {
-    if (key.includes(':')) continue;
     if (norm.includes(key) || key.includes(norm)) return path;
   }
 
   return null;
+}
+
+/**
+ * Get the directory for serving Dota2 local logos.
+ */
+export function getDota2LogoDir(): string {
+  return DOTA2_LOGO_DIR;
 }
 
 /**

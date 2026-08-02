@@ -13,7 +13,7 @@ import { recordFailure } from '../services/circuitBreaker';
 import type { ILiveScoresStore } from '../services/liveScoresStore';
 import { upsertMatchHistoryBatch } from '../services/matchHistoryService';
 import { getHltvLogoCache } from '../services/hltv/hltvRankingScraper';
-import { lookupLocalLogo, getLocalLogoDir, lookupTipsggLogo, lookupTipsggLocalLogo } from '../services/logoStore';
+import { lookupLocalLogo, getLocalLogoDir, lookupTipsggLogo, lookupDota2LocalLogo, getDota2LogoDir } from '../services/logoStore';
 
 interface MatchRouterConfig {
   game: 'dota2' | 'cs2';
@@ -90,27 +90,29 @@ function proxyLogoUrl(url: string | null, prefix: string): string | null {
  * Priority: 1. HLTV local 2. tips.gg local 3. tips.gg CDN map 4. HLTV CDN 5. tips.gg slug.
  */
 export function generateLogoFallback(teamName: string, prefix: string): string | null {
-  // 1. Local logo store — instant, no network
+  // 1. HLTV local logo store — 2706 CS2 files, instant
   const localFile = lookupLocalLogo(teamName);
   if (localFile) {
     return `/api/v1/${prefix}-matches/logo/local/${encodeURIComponent(localFile)}`;
   }
 
-  // 2. Local tips.gg logos — bulk downloaded, instant, no network
-  const gameKey = prefix === 'cs2' ? 'cs2' : 'dota2';
-  const tipsggLocal = lookupTipsggLocalLogo(teamName, gameKey);
-  if (tipsggLocal) {
-    return `/api/v1/${prefix}-matches/logo/tipsgg/${tipsggLocal}`;
+  // 2. Dota2 local logo store — 1259 files (Dota2-only, skipped for CS2)
+  if (prefix === 'dota2') {
+    const dota2File = lookupDota2LocalLogo(teamName);
+    if (dota2File) {
+      return `/api/v1/${prefix}-matches/logo/dota2local/${encodeURIComponent(dota2File)}`;
+    }
   }
 
-  // 3. tips.gg CDN team logo map — exact URLs scraped from /teams/
+  // 3. tips.gg CDN team logo map — exact URLs scraped from /teams/ (fallback)
+  const gameKey = prefix === 'cs2' ? 'cs2' : 'dota2';
   const tipsggUrl = lookupTipsggLogo(teamName, gameKey);
   if (tipsggUrl) {
     const encoded = Buffer.from(tipsggUrl).toString('base64url');
     return `/api/v1/${prefix}-matches/logo/external/${encoded}`;
   }
 
-  // 4. HLTV ranking CDN (img-cdn.hltv.org)
+  // 4. HLTV ranking CDN (img-cdn.hltv.org) — usually blocked
   const hltvMap = getHltvLogoCache();
   if (hltvMap) {
     const norm = teamName.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -122,7 +124,7 @@ export function generateLogoFallback(teamName: string, prefix: string): string |
     }
   }
 
-  // 5. tips.gg CDN slug-based fallback (guesswork — often wrong)
+  // 5. tips.gg CDN slug-based fallback (guesswork)
   const slug = teamName.toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '');
@@ -490,6 +492,32 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
 
     const localDir = getLocalLogoDir();
     const filePath = join(localDir, filename);
+
+    if (existsSync(filePath)) {
+      const ext = filename.split('.').pop()?.toLowerCase() || 'png';
+      const ct = ext === 'svg' ? 'image/svg+xml' : `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+      return new Response(readFileSync(filePath), {
+        headers: {
+          'Content-Type': ct,
+          'Cache-Control': 'public, max-age=86400, immutable',
+          'Access-Control-Allow-Origin': '*',
+        },
+      });
+    }
+    return c.json({ error: 'Not found' }, 404);
+  });
+
+  // ── GET /logo/dota2local/:filename — serve locally stored Dota2 logos ──
+  router.get('/logo/dota2local/:filename', (c) => {
+    const filename = c.req.param('filename');
+    if (!filename) return c.json({ error: 'Not found' }, 404);
+
+    if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+      return c.json({ error: 'Invalid filename' }, 400);
+    }
+
+    const dota2Dir = getDota2LogoDir();
+    const filePath = join(dota2Dir, filename);
 
     if (existsSync(filePath)) {
       const ext = filename.split('.').pop()?.toLowerCase() || 'png';
