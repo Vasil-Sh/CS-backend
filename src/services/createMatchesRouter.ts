@@ -13,7 +13,7 @@ import { recordFailure } from '../services/circuitBreaker';
 import type { ILiveScoresStore } from '../services/liveScoresStore';
 import { upsertMatchHistoryBatch } from '../services/matchHistoryService';
 import { getHltvLogoCache } from '../services/hltv/hltvRankingScraper';
-import { lookupLocalLogo, getLocalLogoDir } from '../services/logoStore';
+import { lookupLocalLogo, getLocalLogoDir, lookupTipsggLogo } from '../services/logoStore';
 
 interface MatchRouterConfig {
   game: 'dota2' | 'cs2';
@@ -87,7 +87,7 @@ function proxyLogoUrl(url: string | null, prefix: string): string | null {
 
 /**
  * Generate logo URL for a match that has null logo.
- * Priority: 1. Local logo store 2. HLTV ranking CDN 3. tips.gg CDN source.
+ * Priority: 1. Local logo store 2. tips.gg CDN team map 3. HLTV ranking CDN 4. tips.gg CDN slug fallback.
  */
 export function generateLogoFallback(teamName: string, prefix: string): string | null {
   // 1. Local logo store — instant, no network
@@ -96,7 +96,16 @@ export function generateLogoFallback(teamName: string, prefix: string): string |
     return `/api/v1/${prefix}-matches/logo/local/${encodeURIComponent(localFile)}`;
   }
 
-  // 2. HLTV ranking CDN (img-cdn.hltv.org)
+  // 2. tips.gg CDN team logo map — scraped from /csgo/teams/ and /dota2/teams/
+  //    Exact CDN URLs are more reliable than slug-based guessing.
+  const gameKey = prefix === 'cs2' ? 'cs2' : 'dota2';
+  const tipsggUrl = lookupTipsggLogo(teamName, gameKey);
+  if (tipsggUrl) {
+    const encoded = Buffer.from(tipsggUrl).toString('base64url');
+    return `/api/v1/${prefix}-matches/logo/external/${encoded}`;
+  }
+
+  // 3. HLTV ranking CDN (img-cdn.hltv.org)
   const hltvMap = getHltvLogoCache();
   if (hltvMap) {
     const norm = teamName.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -108,12 +117,12 @@ export function generateLogoFallback(teamName: string, prefix: string): string |
     }
   }
 
-  // 3. tips.gg CDN source
+  // 4. tips.gg CDN slug-based fallback (guesswork — often wrong)
   const slug = teamName.toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '');
-  const tipsUrl = `https://files.tips.gg/static/image/teams/${slug}.png`;
-  const encoded = Buffer.from(tipsUrl).toString('base64url');
+  const fallbackUrl = `https://files.tips.gg/static/image/teams/${slug}.png`;
+  const encoded = Buffer.from(fallbackUrl).toString('base64url');
   return `/api/v1/${prefix}-matches/logo/external/${encoded}`;
 }
 

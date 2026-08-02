@@ -8,7 +8,7 @@
  * If no local logos exist, falls back gracefully (no error).
  */
 
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, statSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 
@@ -195,6 +195,100 @@ export function lookupLocalLogo(teamName: string): string | null {
     if (norm.includes(key) || key.includes(norm)) {
       return filename;
     }
+  }
+
+  return null;
+}
+
+// ═══ tips.gg CDN team logo map — scraped from /csgo/teams/ and /dota2/teams/ ═══
+
+interface TipsggTeamEntry {
+  name: string;
+  game: string;
+  cdnUrl: string;
+}
+
+let _tipsggMap: Map<string, string> | null = null;
+let _tipsggLoaded = false;
+
+/**
+ * Eagerly load tips.gg team logo map (called at startup).
+ */
+export function loadTipsggLogos(): void {
+  loadTipsggLogoMap();
+}
+
+const TIPSGG_LOGOS_FILE = join(process.cwd(), '.cache', 'tipsgg_team_logos.json');
+
+/**
+ * Load the tips.gg team logo map (name → CDN URL) from scraped JSON.
+ * Called lazily on first lookup. Returns null if file not found.
+ */
+function loadTipsggLogoMap(): Map<string, string> | null {
+  if (_tipsggLoaded) return _tipsggMap;
+  _tipsggLoaded = true;
+
+  try {
+    if (!existsSync(TIPSGG_LOGOS_FILE)) {
+      console.log('[logoStore] tipsgg_team_logos.json not found — run scripts/scrape-team-logos.ts');
+      return null;
+    }
+
+    const raw = readFileSync(TIPSGG_LOGOS_FILE, 'utf-8');
+    const data = JSON.parse(raw) as Record<string, TipsggTeamEntry[]>;
+
+    _tipsggMap = new Map();
+    for (const entries of Object.values(data)) {
+      for (const entry of entries) {
+        if (!entry.name || !entry.cdnUrl) continue;
+        // Skip malformed entries (e.g. "Marsborne –  Team")
+        if (entry.name.includes('–') && entry.name.length < 5) continue;
+        const norm = normalizeTeamName(entry.name);
+        if (norm && !_tipsggMap.has(norm)) {
+          _tipsggMap.set(norm, entry.cdnUrl);
+        }
+        // Also index by game for disambiguation: "cs2:teamspirit" → CS2 logo
+        const gameKey = `${entry.game}:${norm}`;
+        if (!_tipsggMap.has(gameKey)) {
+          _tipsggMap.set(gameKey, entry.cdnUrl);
+        }
+      }
+    }
+
+    console.log(`[logoStore] Loaded ${_tipsggMap.size} tips.gg CDN logo mappings`);
+    return _tipsggMap;
+  } catch (err) {
+    console.warn('[logoStore] Failed to load tips.gg logos:', (err as Error).message);
+    return null;
+  }
+}
+
+/**
+ * Look up a team logo CDN URL from the tips.gg team pages.
+ * Falls back to generic slug-based URL if exact match not found.
+ *
+ * @param teamName  Display name, e.g. "Team Spirit"
+ * @param game      "cs2" | "dota2" — for disambiguation
+ * @returns CDN URL or null
+ */
+export function lookupTipsggLogo(teamName: string, game: string): string | null {
+  const map = loadTipsggLogoMap();
+  if (!map) return null;
+
+  const norm = normalizeTeamName(teamName);
+
+  // 1. Game-prefixed lookup (most accurate)
+  const gameKey = `${game}:${norm}`;
+  if (map.has(gameKey)) return map.get(gameKey)!;
+
+  // 2. Generic name lookup
+  if (map.has(norm)) return map.get(norm)!;
+
+  // 3. Fuzzy substring match
+  for (const [key, url] of map) {
+    // Skip game-prefixed keys for fuzzy (they have the ':' separator)
+    if (key.includes(':')) continue;
+    if (norm.includes(key) || key.includes(norm)) return url;
   }
 
   return null;
