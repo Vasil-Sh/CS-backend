@@ -376,7 +376,12 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       const filtered = data.filter(m => m.date >= today);
 
       // ── Rewrite logo URLs to internal proxy (CORS-safe, no broken URLs) ──
+      // ── Cast team names to string — numeric names like "6666" become Int64 in JSON ──
       for (const m of filtered) {
+        m.nameTeam1 = String(m.nameTeam1);
+        m.nameTeam2 = String(m.nameTeam2);
+        m.tournament = String(m.tournament ?? '');
+        m.stage = String(m.stage ?? '');
         m.logoTeam1 = m.logoTeam1 ? proxyLogoUrl(m.logoTeam1, prefix) : generateLogoFallback(m.nameTeam1, prefix);
         m.logoTeam2 = m.logoTeam2 ? proxyLogoUrl(m.logoTeam2, prefix) : generateLogoFallback(m.nameTeam2, prefix);
       }

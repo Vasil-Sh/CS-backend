@@ -300,8 +300,9 @@ export class CstestLiveScoresStore {
             // Status: trust tips.gg more (they update CSS classes faster)
             if (ts.status !== 'upcoming') existing.status = ts.status;
             overlays++;
-          } else if (this.cstestFailCount >= 3) {
+          } else if (this.cstestFailCount >= 3 || ns.size === 0) {
             // Dead-man switch: cstest is down → add tips.gg entries directly
+            // Also triggers on cold start (ns.size === 0) when cstest unreachable
             ns.set(ts.id, ts);
             newEntries++;
           }
@@ -384,6 +385,7 @@ export class CstestLiveScoresStore {
   }
 
   // ── Fetch from tips.gg CS2 today page (HTTP, real scores via HTML parsing) ──
+  // Falls back to Puppeteer when Cloudflare blocks fast HTTP.
   private async fetchTipsggScores(): Promise<LiveScoreState[]> {
     const t0 = Date.now();
     try {
@@ -393,8 +395,26 @@ export class CstestLiveScoresStore {
       const yyyy = today.getFullYear();
       const url = `https://tips.gg/csgo/matches/${dd}-${mm}-${yyyy}/`;
 
-      const html = await fetchLiveHtml(url, 1);
+      // Try fast HTTP first, fall back to Puppeteer
+      let html = await fetchLiveHtml(url, 1);
+      if (!html) {
+        // Cloudflare blocked fast HTTP — use Puppeteer (same pool as main scraper)
+        try {
+          const { getBrowser } = await import('../tipsggScraper');
+          const browser = await getBrowser();
+          const page = await browser.newPage();
+          try {
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+            html = await page.content();
+          } finally {
+            await page.close().catch(() => {});
+          }
+        } catch (puppErr) {
+          console.warn('[CstestLiveScoresStore] tips.gg Puppeteer fallback failed:', (puppErr as Error).message);
+        }
+      }
       if (!html) return [];
+
       const $ = cheerio.load(html);
       const result: LiveScoreState[] = [];
 
@@ -440,9 +460,14 @@ export class CstestLiveScoresStore {
       });
 
       this.lastTipsggLatency = Date.now() - t0;
+      if (result.length > 0) {
+        const liveNow = result.filter(s => s.status === 'live').length;
+        console.log(`[CstestLiveScoresStore] tips.gg: ${result.length} scores (${liveNow} live, via ${html ? 'HTTP' : 'Puppeteer'})`);
+      }
       return result;
     } catch (err) {
       console.warn('[CstestLiveScoresStore] tips.gg fetch failed:', (err as Error).message);
+      this.tipsggFailCount++;
       return [];
     }
   }
