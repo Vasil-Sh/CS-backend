@@ -180,8 +180,9 @@ let _tipsggLocalStore: Map<string, string> | null = null;
 
 /**
  * Build store for locally-downloaded tips.gg logos.
- * Map: normalized team name → "cs2/normalizedname.png" or "dota2/normalizedname.png"
- * Also indexed with game prefix: "cs2:teamspirit" → "cs2/teamspirit.png"
+ * Files are named: {rank}_{TeamName}.{ext} (e.g., "0001_Vitality.png", "0002_Natus_Vincere.png")
+ * Map: normalized team name → "cs2/0001_Vitality.png"
+ * Also indexed with game prefix: "cs2:vitality" → "cs2/0001_Vitality.png"
  */
 export function buildTipsggLocalStore(): Map<string, string> {
   if (_tipsggLocalStore) return _tipsggLocalStore;
@@ -198,15 +199,23 @@ export function buildTipsggLocalStore(): Map<string, string> {
       const entries = readdirSync(gameDir);
       for (const entry of entries) {
         if (!/\.(png|svg|webp|jpg)$/i.test(entry)) continue;
-        const nameNoExt = entry.replace(/\.(png|svg|webp|jpg)$/i, '');
         const relPath = `${game}/${entry}`;
 
+        // Try to extract team name from filename: "0001_Vitality.png" → "vitality"
+        // Strip rank prefix: 0001_ → team name
+        const noExt = entry.replace(/\.(png|svg|webp|jpg)$/i, '');
+        const underscoreIdx = noExt.indexOf('_');
+        const namePart = underscoreIdx >= 0 ? noExt.substring(underscoreIdx + 1) : noExt;
+        // Convert underscores back to spaces, then normalize
+        const norm = normalizeTeamName(namePart.replace(/_/g, ' '));
+        if (!norm) continue;
+
         // Generic lookup
-        if (!_tipsggLocalStore.has(nameNoExt)) {
-          _tipsggLocalStore.set(nameNoExt, relPath);
+        if (!_tipsggLocalStore.has(norm)) {
+          _tipsggLocalStore.set(norm, relPath);
         }
         // Game-prefixed (for disambiguation)
-        const gameKey = `${game}:${nameNoExt}`;
+        const gameKey = `${game}:${norm}`;
         _tipsggLocalStore.set(gameKey, relPath);
       }
     }
