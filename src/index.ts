@@ -48,7 +48,7 @@ import { writeFileCacheInternal } from './services/createMatchesRouter';
 import { upsertMatchHistoryBatch } from './services/matchHistoryService';
 import { fetchCstestMatches, cstestLiveScoresStore } from './services/hltv/cstestClient';
 import { scrapeHltvRankingLogos } from './services/hltv/hltvRankingScraper';
-import { buildLocalLogoStore, loadTipsggLogos } from './services/logoStore';
+import { buildLocalLogoStore, loadTipsggLogos, buildTipsggLocalStore } from './services/logoStore';
 import { runWithRequestContext } from './utils/requestContext';
 import { AppError } from './utils/AppError';
 
@@ -333,8 +333,10 @@ setTimeout(() => {
 }, 4_000);
 
 // ── Load tips.gg CDN team logo map (scraped from /csgo/teams/ and /dota2/teams/) ──
+// ── Also scan locally-downloaded tips.gg logos (bulk download from CDN)          ──
 setTimeout(() => {
   loadTipsggLogos();
+  buildTipsggLocalStore();
 }, 4_500);
 
 // ── Incremental refresh: fast HTTP fetch of today's page every 60s ──
