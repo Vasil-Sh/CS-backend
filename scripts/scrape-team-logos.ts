@@ -33,90 +33,92 @@ async function scrapeGameLogos(
 ): Promise<TeamEntry[]> {
   const browser = await getBrowser();
   const page = await browser.newPage();
-  const url = `https://tips.gg/${gameSlug}/teams/`;
   
-  console.log(`[tipsgg:logos] Fetching ${url} ...`);
-  await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+  const allTeams: TeamEntry[] = [];
+  const seen = new Set<string>();
+  let pageNum = 1;
+  let emptyPages = 0;
+  const MAX_EMPTY = 3; // stop after 3 consecutive empty pages
 
-  // Scroll to trigger lazy-loading of all team logos
-  // Tips.gg shows ~20 teams at a time with infinite scroll
-  let prevCount = 0;
-  let scrollAttempts = 0;
-  const maxScrolls = 15; // ~300 teams
+  while (true) {
+    const url = pageNum === 1
+      ? `https://tips.gg/${gameSlug}/teams/`
+      : `https://tips.gg/${gameSlug}/teams/page/${pageNum}/`;
 
-  while (scrollAttempts < maxScrolls) {
-    const currentCount = await page.evaluate(() => {
-      const imgs = document.querySelectorAll('img.logo.lazy');
-      return imgs.length;
-    });
-
-    if (currentCount === prevCount && scrollAttempts > 2) break;
-    prevCount = currentCount;
-
-    // Trigger lazy images to load
-    await page.evaluate(() => {
-      const imgs = document.querySelectorAll('img.logo.lazy');
-      imgs.forEach(img => {
-        // Force load lazy images by setting src from data attributes
-        const dataSrc = img.getAttribute('data-src');
-        if (dataSrc) (img as HTMLImageElement).src = dataSrc;
-      });
-    });
-
-    // Scroll to bottom to trigger infinite scroll
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await new Promise(r => setTimeout(r, 1000));
-
-    scrollAttempts++;
-    console.log(`  ...scrolled ${scrollAttempts}x, ${currentCount} logos found`);
-  }
-
-  // Wait a moment for any final lazy loads
-  await new Promise(r => setTimeout(r, 2000));
-
-  // Extract all loaded team logos
-  const teams = await page.evaluate((game) => {
-    const results: { name: string; cdnUrl: string }[] = [];
-    const seen = new Set<string>();
-
-    // Primary: img.logo.lazy with alt containing team name
-    const logoImgs = document.querySelectorAll('img.logo.lazy');
-    logoImgs.forEach(img => {
-      const src = img.getAttribute('src') || img.getAttribute('data-src') || '';
-      const alt = img.getAttribute('alt') || '';
-
-      // Skip base64 placeholders
-      if (!src.startsWith('https://files.tips.gg')) return;
-
-      // Extract team name from alt: "Vitality – CS2 (CS:GO) Team" → "Vitality"
-      let name = alt.replace(/\s*[-–—]\s*CS2\s*\(CS:GO\)\s*Team\s*$/i, '')
-        .replace(/\s*[-–—]\s*Dota\s*2\s*Team\s*$/i, '')
-        .replace(/\s*[-–—]\s*CS2\s*Team\s*$/i, '')
-        .replace(/\s*[-–—]\s*Dota2\s*Team\s*$/i, '')
-        .trim();
-
-      if (!name || seen.has(src)) return;
-      seen.add(src);
-      results.push({ name, cdnUrl: src });
-    });
-
-    // Fallback: any img with files.tips.gg in src
-    if (results.length === 0) {
-      const allImgs = document.querySelectorAll('img[src*="files.tips.gg"]');
-      allImgs.forEach(img => {
-        const src = img.getAttribute('src') || '';
-        const alt = img.getAttribute('alt') || img.closest('a')?.getAttribute('title') || '';
-        if (!src || seen.has(src)) return;
-        seen.add(src);
-        results.push({ name: alt || 'unknown', cdnUrl: src });
-      });
+    console.log(`[tipsgg:logos] Page ${pageNum}: ${url}`);
+    
+    try {
+      await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+    } catch {
+      console.log(`  ...timeout on page ${pageNum}, stopping`);
+      break;
     }
 
-    return results;
-  }, gameKey);
+    // Force lazy images to load
+    await page.evaluate(() => {
+      document.querySelectorAll('img.logo.lazy, img[data-src]').forEach(img => {
+        const src = img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
+        if (src) (img as HTMLImageElement).src = src;
+      });
+    });
+    await new Promise(r => setTimeout(r, 800));
+
+    // Extract logos from current page
+    const pageTeams = await page.evaluate((game) => {
+      const results: { name: string; cdnUrl: string }[] = [];
+      const seenLocal = new Set<string>();
+
+      const logoImgs = document.querySelectorAll('img.logo.lazy, img[src*="files.tips.gg"]');
+      logoImgs.forEach(img => {
+        const src = img.getAttribute('src') || img.getAttribute('data-src') || '';
+        const alt = img.getAttribute('alt') || '';
+
+        if (!src.startsWith('https://files.tips.gg')) return;
+        if (seenLocal.has(src)) return;
+        seenLocal.add(src);
+
+        let name = alt
+          .replace(/\s*[-–—]\s*CS2\s*\(CS:GO\)\s*Team\s*$/i, '')
+          .replace(/\s*[-–—]\s*Dota\s*2\s*Team\s*$/i, '')
+          .replace(/\s*[-–—]\s*CS2\s*Team\s*$/i, '')
+          .replace(/\s*[-–—]\s*Dota2\s*Team\s*$/i, '')
+          .trim();
+
+        if (!name) return;
+        results.push({ name, cdnUrl: src });
+      });
+
+      return results;
+    }, gameKey);
+
+    // Deduplicate globally
+    let newCount = 0;
+    for (const t of pageTeams) {
+      if (!seen.has(t.cdnUrl)) {
+        seen.add(t.cdnUrl);
+        allTeams.push({ ...t, game: gameKey });
+        newCount++;
+      }
+    }
+
+    console.log(`  ...${newCount} new teams (${allTeams.length} total)`);
+
+    if (newCount === 0) {
+      emptyPages++;
+      if (emptyPages >= MAX_EMPTY) {
+        console.log(`  ...${MAX_EMPTY} empty pages, stopping`);
+        break;
+      }
+    } else {
+      emptyPages = 0;
+    }
+
+    pageNum++;
+  }
 
   await page.close();
-  return teams.map(t => ({ ...t, game: gameKey }));
+  console.log(`[tipsgg:logos] ${gameKey}: ${allTeams.length} total teams scraped`);
+  return allTeams;
 }
 
 async function main() {
