@@ -368,6 +368,29 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
             else if (ls.status === 'finished') m.status = 'finished';
           }
         }
+
+        // ── Safety net: auto-timeout stuck "live" matches ──
+        // When a match finishes, the source (cstest/tips.gg) stops returning it
+        // in the live endpoint, so the live score store drops it. Without this,
+        // the match would stay "live" forever because the overlay can't find it.
+        const now = Date.now();
+        const STUCK_LIVE_MS = 2.5 * 60 * 60 * 1000; // 2.5 hours (max CS2 BO3 + OT)
+        const todayStr = new Date().toISOString().split('T')[0];
+        for (const m of data) {
+          if (m.status !== 'live') continue;
+          // If the match is from a previous day, it's definitely finished
+          if (m.date < todayStr) {
+            m.status = 'finished';
+            continue;
+          }
+          // Try startDate (ISO 8601 with time), fallback to date (YYYY-MM-DD)
+          const startTs = (m as any).startDate
+            ? new Date((m as any).startDate).getTime()
+            : new Date(m.date + 'T00:00:00Z').getTime();
+          if (!isNaN(startTs) && now - startTs > STUCK_LIVE_MS) {
+            m.status = 'finished';
+          }
+        }
       }
 
       // Filter out matches from past days (date < today).
