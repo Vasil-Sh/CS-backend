@@ -349,46 +349,66 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       const { data, fromCache } = await getMatchesWithSWR();
 
       // ── Overlay live scores on match list ──
-      // Even when the match list is cached (5min TTL), live scores from
-      // LiveScoresStore are at most 7s old. This gives near-real-time scores
-      // without needing to wait for a full Puppeteer re-scrape.
-      if (fromCache) {
-        const liveScores = scoresStore.getScores();
-        if (liveScores.length > 0) {
-          const scoreMap = new Map(liveScores.map(s => [s.id, s]));
-          for (const m of data) {
-            const ls = scoreMap.get(m.id);
-            if (!ls) continue;
-            if (m.status === 'finished') continue; // don't touch finished
-            // Apply live scores (allow 0→0 override for started-but-no-score matches)
-            if (ls.score1 != null) m.score1 = ls.score1;
-            if (ls.score2 != null) m.score2 = ls.score2;
-            // Status: only upgrade (upcoming→live, live→finished), never downgrade
-            if (ls.status === 'live' && m.status === 'upcoming') m.status = 'live';
-            else if (ls.status === 'finished') m.status = 'finished';
+      // Live scores from the in-memory store are at most 7s old and correctly
+      // count map wins. Only overlay matches that the live store considers
+      // "live" or "upcoming" — finished matches in the live store are heldover
+      // from a past state and may have incomplete scores (e.g. 1-0 map score
+      // vs 2-1 series score from the full scrape).
+      const liveScores = scoresStore.getScores();
+      if (liveScores.length > 0) {
+        const scoreMap = new Map(liveScores.map(s => [s.id, s]));
+        for (const m of data) {
+          const ls = scoreMap.get(m.id);
+          if (!ls) continue;
+          // Only overlay scores & status for matches that are still in progress
+          if (ls.status === 'finished') continue;
+          // Apply live scores (allow 0→0 override for started-but-no-score matches)
+          if (ls.score1 != null) m.score1 = ls.score1;
+          if (ls.score2 != null) m.score2 = ls.score2;
+          // Status: trust live store for in-progress matches
+          if (ls.status !== m.status) {
+            m.status = ls.status as typeof m.status;
           }
         }
+      }
 
-        // ── Safety net: auto-timeout stuck "live" matches ──
-        // When a match finishes, the source (cstest/tips.gg) stops returning it
-        // in the live endpoint, so the live score store drops it. Without this,
-        // the match would stay "live" forever because the overlay can't find it.
-        const now = Date.now();
-        const STUCK_LIVE_MS = 2.5 * 60 * 60 * 1000; // 2.5 hours (max CS2 BO3 + OT)
-        const todayStr = new Date().toISOString().split('T')[0];
-        for (const m of data) {
-          if (m.status !== 'live') continue;
+      // ── Safety net: auto-timeout stuck "live" / fix falsely "finished" matches ──
+      const now = Date.now();
+      const STUCK_LIVE_MS = 6 * 60 * 60 * 1000; // 6 hours (safe for CS2 BO5 + OT)
+      const todayStr = new Date().toISOString().split('T')[0];
+      for (const m of data) {
+        const hasStartDate = !!(m as any).startDate;
+        const startTs = hasStartDate
+          ? new Date((m as any).startDate).getTime()
+          : new Date(m.date + 'T00:00:00Z').getTime();
+        const msSinceStart = now - startTs;
+
+        if (m.status === 'live') {
           // If the match is from a previous day, it's definitely finished
           if (m.date < todayStr) {
             m.status = 'finished';
             continue;
           }
-          // Try startDate (ISO 8601 with time), fallback to date (YYYY-MM-DD)
-          const startTs = (m as any).startDate
-            ? new Date((m as any).startDate).getTime()
-            : new Date(m.date + 'T00:00:00Z').getTime();
-          if (!isNaN(startTs) && now - startTs > STUCK_LIVE_MS) {
-            m.status = 'finished';
+          if (!isNaN(startTs)) {
+            if (hasStartDate && msSinceStart > STUCK_LIVE_MS) {
+              m.status = 'finished';
+            } else if (!hasStartDate && msSinceStart > 8 * 60 * 60 * 1000) {
+              m.status = 'finished';
+            }
+          }
+        } else if (m.status === 'finished' && m.date >= todayStr) {
+          // Reverse safety net: a "finished" match on today that started recently
+          // is almost certainly still live (source dropped it between BO3 maps).
+          if (!isNaN(startTs) && msSinceStart > 0 && msSinceStart < STUCK_LIVE_MS) {
+            const s1 = m.score1 ?? 0;
+            const s2 = m.score2 ?? 0;
+            const maxScore = Math.max(s1, s2);
+            // BO3+: max < 2 means match not finished yet (1-0, 0-1, 1-1)
+            // BO1: always re-check (0-0 after start is suspicious)
+            const isBo3Plus = /bo[3-9]/i.test((m as any).type || (m as any).format || '');
+            if (isBo3Plus ? maxScore < 2 : maxScore === 0) {
+              m.status = 'live';
+            }
           }
         }
       }

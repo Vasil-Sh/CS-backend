@@ -159,11 +159,23 @@ function extractScoresFromHtml(
     if (!isNaN(val)) scores.push(val);
   });
 
-  // team1 = even indices, team2 = odd indices (map-level cumulative)
-  let score1 = 0, score2 = 0;
-  for (let i = 0; i < scores.length; i++) {
-    if (i % 2 === 0) score1 += scores[i];
-    else score2 += scores[i];
+  // Heuristic: if ALL values ≤ 5, they're series scores (e.g. [2, 1] for BO3).
+  // If ANY value > 5, they're per-map round scores (e.g. [16, 14, 12, 16]).
+  // Count map wins only for per-map scores; use series scores as-is.
+  const allLow = scores.length > 0 && scores.every(v => v <= 5);
+  let score1: number, score2: number;
+  if (allLow) {
+    // Series scores — use directly (team1 and team2 already in correct positions)
+    score1 = scores[0] ?? 0;
+    score2 = scores[1] ?? 0;
+  } else {
+    // Per-map round scores — count pairwise map wins
+    score1 = 0;
+    score2 = 0;
+    for (let i = 0; i + 1 < scores.length; i += 2) {
+      if (scores[i] > scores[i + 1]) score1++;
+      else if (scores[i + 1] > scores[i]) score2++;
+    }
   }
 
   // Score-based status inference: if tips.gg shows score elements but hasn't
@@ -366,17 +378,26 @@ async function fetchTipsGgMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[]>
     }
   }
 
-  // ── Second pass: fill missing scores for finished matches ──
+  // ── Second pass: fill missing / suspicious scores for finished matches ──
   // When tips.gg removes a finished match from the listing page, scores come back
-  // as null. Fetch each match's detail page to get the final result.
-  const noScoreFinished = all.filter(
-    m => m.status === 'finished' && (m.score1 == null || m.score2 == null),
-  );
-  if (noScoreFinished.length > 0) {
+  // as null. For BO3+ matches, the listing page sometimes shows just map 1 score
+  // (1-0 or 0-1) instead of the series score (2-1). Fetch each match's detail page
+  // to get the verified final result.
+  const needsBackfill = all.filter(m => {
+    if (m.status !== 'finished') return false;
+    if (m.score1 == null || m.score2 == null) return true; // null scores
+    const isBo3Plus = /bo[3-9]/i.test(m.type || '');
+    if (!isBo3Plus) return false; // BO1/BO2 — single-number scores are fine
+    const maxScore = Math.max(m.score1, m.score2);
+    // If max score is only 1 in a BO3+, the listing page probably shows map 1 only
+    if (maxScore < 2) return true;
+    return false;
+  });
+  if (needsBackfill.length > 0) {
     const scoreBackfillStart = Date.now();
     const DETAIL_CONCURRENCY = 4;
-    for (let i = 0; i < noScoreFinished.length; i += DETAIL_CONCURRENCY) {
-      const batch = noScoreFinished.slice(i, i + DETAIL_CONCURRENCY);
+    for (let i = 0; i < needsBackfill.length; i += DETAIL_CONCURRENCY) {
+      const batch = needsBackfill.slice(i, i + DETAIL_CONCURRENCY);
       const batchResults = await Promise.allSettled(
         batch.map(async (m) => {
           const detail = await fetchMatchDetail(m.link, game);
@@ -393,12 +414,12 @@ async function fetchTipsGgMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[]>
         }
       }
     }
-    const filled = noScoreFinished.filter(m => {
+    const filled = needsBackfill.filter(m => {
       const updated = all.find(x => x.id === m.id);
       return updated && updated.score1 != null;
     }).length;
     console.log(
-      `[tipsgg:${gameTag}] Score backfill: ${filled}/${noScoreFinished.length} ` +
+      `[tipsgg:${gameTag}] Score backfill: ${filled}/${needsBackfill.length} ` +
       `(${Date.now() - scoreBackfillStart}ms)`,
     );
   }

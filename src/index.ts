@@ -343,6 +343,7 @@ setTimeout(() => {
 // This covers: new matches appearing on today's listing, score changes, status transitions.
 
 import { normalizeTeam, isSameMatch } from './utils/matchUtils.js';
+import { validateScores, needsScoreBackfill } from './utils/scoreValidation.js';
 
 function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: string): void {
   // For CS2, cstest is primary — never add new matches from tips.gg (prevents duplicates).
@@ -383,11 +384,24 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
         const prev = existingMap.get(tm.id);
         if (prev) {
           if (prev.status !== 'finished') {
-            if (tm.score1 != null) prev.score1 = tm.score1;
-            if (tm.score2 != null) prev.score2 = tm.score2;
+            // Validate scores before writing — reject impossible values
+            const err = validateScores(tm.score1, tm.score2, tm.type || prev.type || '');
+            if (!err) {
+              if (tm.score1 != null) prev.score1 = tm.score1;
+              if (tm.score2 != null) prev.score2 = tm.score2;
+            }
             if (tm.status !== 'upcoming') prev.status = tm.status;
             if (prev.status === 'finished') newlyFinished.push(prev);
             updates++;
+          } else {
+            // For finished matches: only update if the current score is suspicious
+            // and today's page shows a better one (prevents good 2-1 → 1-0 regression).
+            if (needsScoreBackfill(prev.score1, prev.score2, prev.type || '')) {
+              const err = validateScores(tm.score1, tm.score2, prev.type || '');
+              if (!err && tm.score1 != null) prev.score1 = tm.score1;
+              if (!err && tm.score2 != null) prev.score2 = tm.score2;
+              // Don't downgrade status from finished
+            }
           }
           continue;
         }

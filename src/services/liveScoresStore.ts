@@ -122,9 +122,17 @@ export class LiveScoresStore {
         });
 
         let w1 = 0, w2 = 0;
-        for (let i = 0; i+1 < rs.length; i+=2) {
-          if (rs[i] > rs[i+1]) w1++;
-          else if (rs[i+1] > rs[i]) w2++;
+        const allLow = rs.length > 0 && rs.every(v => v <= 5);
+        if (allLow) {
+          // Series scores (e.g. [2, 1] for finished BO3) — use directly
+          w1 = rs[0] ?? 0;
+          w2 = rs[1] ?? 0;
+        } else {
+          // Per-map round scores (e.g. [16, 14, 12, 16]) — count map wins
+          for (let i = 0; i+1 < rs.length; i+=2) {
+            if (rs[i] > rs[i+1]) w1++;
+            else if (rs[i+1] > rs[i]) w2++;
+          }
         }
 
         if (status === 'upcoming' && (w1>0||w2>0)) status = 'live';
