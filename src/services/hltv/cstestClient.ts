@@ -333,10 +333,11 @@ export class CstestLiveScoresStore {
         }
       }
 
-      // For live matches with scores, also scrape individual match detail pages.
+      // For matches with scores on the date pages, also scrape individual match detail pages.
       // Date-based archive pages may show stale scores after midnight.
+      // Target: all scored matches (live or finished) — detail page has the real final score.
       const liveMatches = [...ns.values()].filter(
-        (s) => s.status === 'live' && s.score1 != null && s.score2 != null && s.href,
+        (s) => s.href && s.score1 != null && s.score2 != null,
       );
       if (liveMatches.length > 0) {
         const detailResults = await Promise.allSettled(
