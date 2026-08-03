@@ -92,63 +92,46 @@ export class LiveScoresStore {
       const mm = String(today.getMonth()+1).padStart(2,'0');
       const yyyy = today.getFullYear();
       const url = `https://tips.gg/${this.gamePath}/matches/${dd}-${mm}-${yyyy}/`;
-      // Fast HTTP path (100-500ms) — fallback to Puppeteer if Cloudflare blocks
-      let html = await fetchLiveHtml(url, 1);
-      const usedPuppeteer = !html;
-      if (!html) {
-        try {
-          html = await fetchHtml(url, 1);
-        } catch { /* ignore — handled below */ }
-      }
-      if (!html) return;
-      const $ = cheerio.load(html);
+
+      // Also scrape yesterday's page — live matches that started yesterday
+      // still appear there after midnight.
+      const yesterday = new Date(today);
+      yesterday.setDate(yesterday.getDate() - 1);
+      const ydd = String(yesterday.getDate()).padStart(2,'0');
+      const ymm = String(yesterday.getMonth()+1).padStart(2,'0');
+      const yyyy2 = yesterday.getFullYear();
+      const yesterdayUrl = `https://tips.gg/${this.gamePath}/matches/${ydd}-${ymm}-${yyyy2}/`;
+
+      const scrapePage = async (pageUrl: string): Promise<Map<string, LiveScoreState>> => {
+        let html = await fetchLiveHtml(pageUrl, 1);
+        if (!html) {
+          try { html = await fetchHtml(pageUrl, 1); } catch { /* ignore */ }
+        }
+        if (!html) return new Map();
+        const $ = cheerio.load(html);
+        const result = new Map<string, LiveScoreState>();
+        this.parseScores($, result);
+        return result;
+      };
+
+      // Scrape today and yesterday in parallel
+      const [todayScores, yesterdayScores] = await Promise.all([
+        scrapePage(url),
+        scrapePage(yesterdayUrl),
+      ]);
+
+      // Merge: today wins for same IDs, yesterday fills gaps
       const ns = new Map<string, LiveScoreState>();
+      for (const [id, s] of yesterdayScores) ns.set(id, s);
+      for (const [id, s] of todayScores) ns.set(id, s);
 
-      $('.element.match').each((_, el) => {
-        const $m = $(el);
-        let status = 'upcoming';
-        if ($m.hasClass('finished')) status = 'finished';
-        else if ($m.hasClass('live')) status = 'live';
-
-        const href = $m.find('a.match-link').attr('href') || '';
-        const p = href.replace(/\/$/,'').split('/');
-        const id = p[p.length-2] || p[p.length-1] || '';
-        if (!id) return;
-
-        const rs: number[] = [];
-        $m.find('.scores .score').each((_, se) => {
-          const v = parseInt($(se).text().trim(), 10);
-          if (!isNaN(v)) rs.push(v);
-        });
-
-        let w1 = 0, w2 = 0;
-        const allLow = rs.length > 0 && rs.every(v => v <= 5);
-        if (allLow) {
-          // Series scores (e.g. [2, 1] for finished BO3) — use directly
-          w1 = rs[0] ?? 0;
-          w2 = rs[1] ?? 0;
-        } else {
-          // Per-map round scores (e.g. [16, 14, 12, 16]) — count map wins
-          for (let i = 0; i+1 < rs.length; i+=2) {
-            if (rs[i] > rs[i+1]) w1++;
-            else if (rs[i+1] > rs[i]) w2++;
-          }
+      // Also keep any existing live entries that weren't found on either page
+      // (e.g., match page returns 404 temporarily)
+      for (const [id, s] of this.store) {
+        if (!ns.has(id) && s.status === 'live') {
+          ns.set(id, s);
         }
-
-        if (status === 'upcoming' && (w1>0||w2>0)) status = 'live';
-
-        // Date-based finished detection (mirrors tipsggScraper logic).
-        // If HTML says 'live' but match started too long ago, mark as finished.
-        if (status === 'live') {
-          const startAttr = $m.attr('data-start') || $m.find('time').attr('datetime') || '';
-          if (startAttr) {
-            const hoursSinceStart = (Date.now() - new Date(startAttr).getTime()) / 3600000;
-            if (hoursSinceStart > 4) status = 'finished'; // 4h conservative cutoff for live scores
-          }
-        }
-
-        ns.set(id, { id, score1: rs.length>0?w1:null, score2: rs.length>0?w2:null, status });
-      });
+      }
 
       if (ns.size > 0) {
         this.lastStore = new Map(this.store);
@@ -158,6 +141,51 @@ export class LiveScoresStore {
     } catch (err) {
       console.error(`[${this.tag}LiveScoresStore] fail:`, (err as Error).message);
     } finally { this.isUpdating = false; }
+  }
+
+  /** Parse scores from cheerio $ into a LiveScoreState map. Extracted for reuse. */
+  private parseScores($: cheerio.CheerioAPI, ns: Map<string, LiveScoreState>): void {
+    $('.element.match').each((_, el) => {
+      const $m = $(el);
+      let status = 'upcoming';
+      if ($m.hasClass('finished')) status = 'finished';
+      else if ($m.hasClass('live')) status = 'live';
+
+      const href = $m.find('a.match-link').attr('href') || '';
+      const p = href.replace(/\/$/,'').split('/');
+      const id = p[p.length-2] || p[p.length-1] || '';
+      if (!id) return;
+
+      const rs: number[] = [];
+      $m.find('.scores .score').each((_, se) => {
+        const v = parseInt($(se).text().trim(), 10);
+        if (!isNaN(v)) rs.push(v);
+      });
+
+      let w1 = 0, w2 = 0;
+      const allLow = rs.length > 0 && rs.every(v => v <= 5);
+      if (allLow) {
+        w1 = rs[0] ?? 0;
+        w2 = rs[1] ?? 0;
+      } else {
+        for (let i = 0; i+1 < rs.length; i+=2) {
+          if (rs[i] > rs[i+1]) w1++;
+          else if (rs[i+1] > rs[i]) w2++;
+        }
+      }
+
+      if (status === 'upcoming' && (w1>0||w2>0)) status = 'live';
+
+      if (status === 'live') {
+        const startAttr = $m.attr('data-start') || $m.find('time').attr('datetime') || '';
+        if (startAttr) {
+          const hoursSinceStart = (Date.now() - new Date(startAttr).getTime()) / 3600000;
+          if (hoursSinceStart > 4) status = 'finished';
+        }
+      }
+
+      ns.set(id, { id, score1: rs.length>0?w1:null, score2: rs.length>0?w2:null, status });
+    });
   }
 }
 

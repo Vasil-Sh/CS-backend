@@ -323,6 +323,14 @@ export class CstestLiveScoresStore {
         this.tipsggFailCount++;
       }
 
+      // Preserve live entries from previous store that weren't found in current fetch
+      // (e.g., cross-midnight live matches not yet finished)
+      for (const [id, s] of this.store) {
+        if (!ns.has(id) && s.status === 'live') {
+          ns.set(id, s);
+        }
+      }
+
       if (ns.size > 0) {
         this.lastStore = new Map(this.store);
         this.store = ns;
@@ -384,8 +392,10 @@ export class CstestLiveScoresStore {
     }
   }
 
-  // ── Fetch from tips.gg CS2 today page (HTTP, real scores via HTML parsing) ──
+  // ── Fetch from tips.gg CS2 today + yesterday pages (HTTP, real scores via HTML parsing) ──
   // Falls back to Puppeteer when Cloudflare blocks fast HTTP.
+  // Also fetches yesterday's page — live matches that started yesterday
+  // still appear there after midnight.
   private async fetchTipsggScores(): Promise<LiveScoreState[]> {
     const t0 = Date.now();
     try {
@@ -395,80 +405,97 @@ export class CstestLiveScoresStore {
       const yyyy = today.getFullYear();
       const url = `https://tips.gg/csgo/matches/${dd}-${mm}-${yyyy}/`;
 
-      // Try fast HTTP first, fall back to Puppeteer
-      let html = await fetchLiveHtml(url, 1);
-      if (!html) {
-        // Cloudflare blocked fast HTTP — use Puppeteer (same pool as main scraper)
-        try {
-          const { getBrowser } = await import('../tipsggScraper');
-          const browser = await getBrowser();
-          const page = await browser.newPage();
+      const yesterday = new Date(today);
+      yesterday.setDate(yesterday.getDate() - 1);
+      const ydd = String(yesterday.getDate()).padStart(2, '0');
+      const ymm = String(yesterday.getMonth() + 1).padStart(2, '0');
+      const yyyy2 = yesterday.getFullYear();
+      const yesterdayUrl = `https://tips.gg/csgo/matches/${ydd}-${ymm}-${yyyy2}/`;
+
+      const scrapePage = async (pageUrl: string): Promise<LiveScoreState[]> => {
+        let html = await fetchLiveHtml(pageUrl, 1);
+        if (!html) {
           try {
-            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-            html = await page.content();
-          } finally {
-            await page.close().catch(() => {});
-          }
-        } catch (puppErr) {
-          console.warn('[CstestLiveScoresStore] tips.gg Puppeteer fallback failed:', (puppErr as Error).message);
+            const { getBrowser } = await import('../tipsggScraper');
+            const browser = await getBrowser();
+            const page = await browser.newPage();
+            try {
+              await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+              html = await page.content();
+            } finally {
+              await page.close().catch(() => {});
+            }
+          } catch { /* ignore */ }
         }
-      }
-      if (!html) return [];
+        if (!html) return [];
 
-      const $ = cheerio.load(html);
-      const result: LiveScoreState[] = [];
+        const $ = cheerio.load(html);
+        const result: LiveScoreState[] = [];
 
-      $('.element.match').each((_, el) => {
-        const $m = $(el);
-        let status = 'upcoming';
-        if ($m.hasClass('finished')) status = 'finished';
-        else if ($m.hasClass('live')) status = 'live';
+        $('.element.match').each((_, el) => {
+          const $m = $(el);
+          let status = 'upcoming';
+          if ($m.hasClass('finished')) status = 'finished';
+          else if ($m.hasClass('live')) status = 'live';
 
-        const href = $m.find('a.match-link').attr('href') || '';
-        const p = href.replace(/\/$/, '').split('/');
-        const id = p[p.length - 2] || p[p.length - 1] || '';
-        if (!id) return;
+          const href = $m.find('a.match-link').attr('href') || '';
+          const p = href.replace(/\/$/, '').split('/');
+          const id = p[p.length - 2] || p[p.length - 1] || '';
+          if (!id) return;
 
-        const rs: number[] = [];
-        $m.find('.scores .score').each((_, se) => {
-          const v = parseInt($(se).text().trim(), 10);
-          if (!isNaN(v)) rs.push(v);
+          const rs: number[] = [];
+          $m.find('.scores .score').each((_, se) => {
+            const v = parseInt($(se).text().trim(), 10);
+            if (!isNaN(v)) rs.push(v);
+          });
+
+          let w1 = 0, w2 = 0;
+          const allLow = rs.length > 0 && rs.every(v => v <= 5);
+          if (allLow) {
+            w1 = rs[0] ?? 0;
+            w2 = rs[1] ?? 0;
+          } else {
+            for (let i = 0; i + 1 < rs.length; i += 2) {
+              if (rs[i] > rs[i + 1]) w1++;
+              else if (rs[i + 1] > rs[i]) w2++;
+            }
+          }
+
+          if (status === 'upcoming' && (w1 > 0 || w2 > 0)) status = 'live';
+
+          if (status === 'live') {
+            const startAttr = $m.attr('data-start') || $m.find('time').attr('datetime') || '';
+            if (startAttr) {
+              const hoursSinceStart = (Date.now() - new Date(startAttr).getTime()) / 3600000;
+              if (hoursSinceStart > 4) status = 'finished';
+            }
+          }
+
+          result.push({
+            id,
+            score1: rs.length > 0 ? w1 : null,
+            score2: rs.length > 0 ? w2 : null,
+            status,
+          });
         });
+        return result;
+      };
 
-        let w1 = 0, w2 = 0;
-        const allLow = rs.length > 0 && rs.every(v => v <= 5);
-        if (allLow) {
-          w1 = rs[0] ?? 0;
-          w2 = rs[1] ?? 0;
-        } else {
-          for (let i = 0; i + 1 < rs.length; i += 2) {
-            if (rs[i] > rs[i + 1]) w1++;
-            else if (rs[i + 1] > rs[i]) w2++;
-          }
-        }
+      const [todayScores, yesterdayScores] = await Promise.all([
+        scrapePage(url),
+        scrapePage(yesterdayUrl),
+      ]);
 
-        if (status === 'upcoming' && (w1 > 0 || w2 > 0)) status = 'live';
+      // Merge: today wins for same IDs, yesterday fills gaps
+      const merged = new Map<string, LiveScoreState>();
+      for (const s of yesterdayScores) merged.set(s.id, s);
+      for (const s of todayScores) merged.set(s.id, s);
 
-        if (status === 'live') {
-          const startAttr = $m.attr('data-start') || $m.find('time').attr('datetime') || '';
-          if (startAttr) {
-            const hoursSinceStart = (Date.now() - new Date(startAttr).getTime()) / 3600000;
-            if (hoursSinceStart > 4) status = 'finished';
-          }
-        }
-
-        result.push({
-          id,
-          score1: rs.length > 0 ? w1 : null,
-          score2: rs.length > 0 ? w2 : null,
-          status,
-        });
-      });
-
+      const result = [...merged.values()];
       this.lastTipsggLatency = Date.now() - t0;
       if (result.length > 0) {
         const liveNow = result.filter(s => s.status === 'live').length;
-        console.log(`[CstestLiveScoresStore] tips.gg: ${result.length} scores (${liveNow} live, via ${html ? 'HTTP' : 'Puppeteer'})`);
+        console.log(`[CstestLiveScoresStore] tips.gg: ${result.length} scores (${liveNow} live, via HTTP/Puppeteer)`);
       }
       return result;
     } catch (err) {
