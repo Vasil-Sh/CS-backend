@@ -10,6 +10,7 @@ import { createMatchesRouter } from '../services/createMatchesRouter';
 import { fetchCs2Matches, type TipsGgMatch } from '../services/tipsggScraper';
 import { cstestLiveScoresStore } from '../services/hltv/cstestClient';
 import { fetchCstestMatches } from '../services/hltv/cstestClient';
+import { normalizeTeam, isSameMatch } from '../utils/matchUtils.js';
 import { join } from 'node:path';
 
 function ddmmyyyy(): string {
@@ -18,22 +19,6 @@ function ddmmyyyy(): string {
 }
 
 const CACHE_DIR = join(process.cwd(), '.cache');
-
-/** Normalize team name for fuzzy matching: lowercase, strip common suffixes. */
-function normalizeTeam(name: string): string {
-  return name.toLowerCase()
-    .replace(/\b(esports|gaming|team|academy|acad)\b/gi, '')
-    .replace(/[^a-z0-9]/g, '')
-    .trim();
-}
-
-/** Check if two matches are likely the same (same date + fuzzy team names). */
-function isSameMatch(a: TipsGgMatch, b: TipsGgMatch): boolean {
-  if (a.date !== b.date) return false;
-  const a1 = normalizeTeam(a.nameTeam1), a2 = normalizeTeam(a.nameTeam2);
-  const b1 = normalizeTeam(b.nameTeam1), b2 = normalizeTeam(b.nameTeam2);
-  return (a1 === b1 && a2 === b2) || (a1 === b2 && a2 === b1);
-}
 
 /**
  * Composite CS2 fetch: merge cstest (HLTV) + tips.gg for max coverage.

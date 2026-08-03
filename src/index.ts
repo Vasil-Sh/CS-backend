@@ -342,32 +342,7 @@ setTimeout(() => {
 // Merges new matches & scores into the file cache without a full 8-day scrape.
 // This covers: new matches appearing on today's listing, score changes, status transitions.
 
-/**
- * Normalize a team name for fuzzy matching: lowercase, strip suffixes like
- * "esports"/"gaming", remove non-alphanumeric chars.
- * "UNiTY esports" and "UNiTY" both → "unity"
- */
-function normalizeTeam(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/\b(esports|gaming|team|academy|acad)\b/gi, '')
-    .replace(/[^a-z0-9]/g, '')
-    .trim();
-}
-
-/**
- * Check if two matches are likely the same: same date + fuzzy team name match.
- */
-function isSameMatch(a: { date: string; nameTeam1: string; nameTeam2: string },
-                     b: { date: string; nameTeam1: string; nameTeam2: string }): boolean {
-  if (a.date !== b.date) return false;
-  const a1 = normalizeTeam(a.nameTeam1);
-  const a2 = normalizeTeam(a.nameTeam2);
-  const b1 = normalizeTeam(b.nameTeam1);
-  const b2 = normalizeTeam(b.nameTeam2);
-  // Same teams in same order, OR swapped
-  return (a1 === b1 && a2 === b2) || (a1 === b2 && a2 === b1);
-}
+import { normalizeTeam, isSameMatch } from './utils/matchUtils.js';
 
 function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: string): void {
   // For CS2, cstest is primary — never add new matches from tips.gg (prevents duplicates).

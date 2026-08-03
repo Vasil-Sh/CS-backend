@@ -88,16 +88,6 @@ bets.get('/stats', requireAuth, async (c) => {
   });
 });
 
-// ── PATCH /api/bets/:id (same as PUT) ──
-bets.on('PATCH', '/:id', requireAuth, async (c) => {
-  const user = c.get('user');
-  const id = c.req.param('id') || '';
-  let body;
-  try { body = updateBetSchema.parse(await c.req.json()); }
-  catch (e: any) { return c.json({ error: 'Invalid input', details: e.errors }, 400); }
-  const updated = await betService.updateBet(id, user.userId, body);
-  if (!updated) return c.json({ error: 'Bet not found' }, 404);
-  return c.json(updated);
-});
+
 
 export default bets;
