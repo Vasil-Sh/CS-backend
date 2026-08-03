@@ -9,7 +9,7 @@
  */
 
 import type { TipsGgMatch } from '../tipsggScraper';
-import { fetchLiveHtml } from '../tipsggScraper';
+import { fetchLiveHtml, fetchHtml } from '../tipsggScraper';
 import * as cheerio from 'cheerio';
 import { getHltvLogoCache } from './hltvRankingScraper';
 
@@ -180,6 +180,7 @@ export interface LiveScoreState {
   score1: number | null;
   score2: number | null;
   status: string;
+  href?: string;
 }
 
 export interface LiveScoresResponse {
@@ -299,6 +300,7 @@ export class CstestLiveScoresStore {
             if (ts.score2 != null) existing.score2 = ts.score2;
             // Status: trust tips.gg more (they update CSS classes faster)
             if (ts.status !== 'upcoming') existing.status = ts.status;
+            if (ts.href) existing.href = ts.href;
             overlays++;
           } else if (this.cstestFailCount >= 3 || ns.size === 0) {
             // Dead-man switch: cstest is down → add tips.gg entries directly
@@ -328,6 +330,70 @@ export class CstestLiveScoresStore {
       for (const [id, s] of this.store) {
         if (!ns.has(id) && s.status === 'live') {
           ns.set(id, s);
+        }
+      }
+
+      // For live matches with scores, also scrape individual match detail pages.
+      // Date-based archive pages may show stale scores after midnight.
+      const liveMatches = [...ns.values()].filter(
+        (s) => s.status === 'live' && s.score1 != null && s.score2 != null && s.href,
+      );
+      if (liveMatches.length > 0) {
+        const detailResults = await Promise.allSettled(
+          liveMatches.map(async (s) => {
+            const href = s.href!;
+            const detailUrl = href.startsWith('http') ? href : `https://tips.gg${href}`;
+            const html = (await fetchLiveHtml(detailUrl, 1)) || (await fetchHtml(detailUrl, 1).catch(() => null));
+            if (!html) return null;
+            const $ = cheerio.load(html);
+            // Parse the single match page
+            const scores: LiveScoreState[] = [];
+            $('.element.match').each((_, el) => {
+              const $m = $(el);
+              let status = 'upcoming';
+              if ($m.hasClass('finished')) status = 'finished';
+              else if ($m.hasClass('live')) status = 'live';
+
+              const href = $m.find('a.match-link').attr('href') || '';
+              const p = href.replace(/\/$/, '').split('/');
+              const id = p[p.length - 2] || p[p.length - 1] || '';
+              if (!id) return;
+
+              const rs: number[] = [];
+              $m.find('.scores .score').each((_, se) => {
+                const v = parseInt($(se).text().trim(), 10);
+                if (!isNaN(v)) rs.push(v);
+              });
+
+              let w1 = 0, w2 = 0;
+              const allLow = rs.length > 0 && rs.every(v => v <= 5);
+              if (allLow) { w1 = rs[0] ?? 0; w2 = rs[1] ?? 0; }
+              else {
+                for (let i = 0; i + 1 < rs.length; i += 2) {
+                  if (rs[i] > rs[i + 1]) w1++;
+                  else if (rs[i + 1] > rs[i]) w2++;
+                }
+              }
+
+              if (status === 'upcoming' && (w1 > 0 || w2 > 0)) status = 'live';
+              if (status === 'live') {
+                const startAttr = $m.attr('data-start') || $m.find('time').attr('datetime') || '';
+                if (startAttr) {
+                  const hoursSinceStart = (Date.now() - new Date(startAttr).getTime()) / 3600000;
+                  if (hoursSinceStart > 4) status = 'finished';
+                }
+              }
+
+              scores.push({ id, score1: rs.length > 0 ? w1 : null, score2: rs.length > 0 ? w2 : null, status });
+            });
+            return scores.length > 0 ? scores[0] : null;
+          }),
+        );
+        for (const result of detailResults) {
+          if (result.status === 'fulfilled' && result.value) {
+            const fresh = result.value;
+            ns.set(fresh.id, fresh);
+          }
         }
       }
 
@@ -476,6 +542,7 @@ export class CstestLiveScoresStore {
             score1: rs.length > 0 ? w1 : null,
             score2: rs.length > 0 ? w2 : null,
             status,
+            href,
           });
         });
         return result;

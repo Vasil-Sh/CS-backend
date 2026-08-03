@@ -6,6 +6,7 @@ export interface LiveScoreState {
   score1: number | null;
   score2: number | null;
   status: string;
+  href?: string; // relative match page URL (e.g. /dota2/matches/03-08-2026/team-liquid-vs-vici-gaming/07-00/)
 }
 
 export interface LiveScoresResponse {
@@ -133,6 +134,32 @@ export class LiveScoresStore {
         }
       }
 
+      // For live matches with scores, also scrape individual match detail pages.
+      // Date-based archive pages may show stale scores after midnight.
+      const liveMatches = [...ns.values()].filter(
+        (s) => s.status === 'live' && s.score1 != null && s.score2 != null && s.href,
+      );
+      if (liveMatches.length > 0) {
+        const detailResults = await Promise.allSettled(
+          liveMatches.map(async (s) => {
+            const href = s.href!;
+            const detailUrl = href.startsWith('http') ? href : `https://tips.gg${href}`;
+            const html = (await fetchLiveHtml(detailUrl, 1)) || (await fetchHtml(detailUrl, 1).catch(() => null));
+            if (!html) return null;
+            const $ = cheerio.load(html);
+            const temp = new Map<string, LiveScoreState>();
+            this.parseScores($, temp);
+            return temp.get(s.id) || null;
+          }),
+        );
+        for (const result of detailResults) {
+          if (result.status === 'fulfilled' && result.value) {
+            const fresh = result.value;
+            ns.set(fresh.id, fresh);
+          }
+        }
+      }
+
       if (ns.size > 0) {
         this.lastStore = new Map(this.store);
         this.store = ns;
@@ -184,7 +211,7 @@ export class LiveScoresStore {
         }
       }
 
-      ns.set(id, { id, score1: rs.length>0?w1:null, score2: rs.length>0?w2:null, status });
+      ns.set(id, { id, score1: rs.length>0?w1:null, score2: rs.length>0?w2:null, status, href });
     });
   }
 }
