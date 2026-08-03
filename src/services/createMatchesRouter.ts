@@ -394,6 +394,13 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
               m.status = 'finished';
             } else if (!hasStartDate && msSinceStart > 8 * 60 * 60 * 1000) {
               m.status = 'finished';
+            } else if (hasStartDate && msSinceStart > 30 * 60 * 1000) {
+              // Auto-postponed: live match with no scores 30min past start
+              const s1 = m.score1 ?? null;
+              const s2 = m.score2 ?? null;
+              if (s1 == null && s2 == null) {
+                m.status = 'finished'; // effectively cancelled — won't play today
+              }
             }
           }
         } else if (m.status === 'finished' && m.date >= todayStr) {
