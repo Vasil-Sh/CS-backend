@@ -925,10 +925,15 @@ import puppeteerExtra from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import type { Browser, Page } from 'puppeteer';
 
-puppeteerExtra.use(StealthPlugin());
-
 const BROWSERLESS_URL = process.env.BROWSERLESS_URL || '';
 const USE_BROWSERLESS = !!BROWSERLESS_URL;
+
+// Only apply stealth plugin in local (in-process) mode.
+// In browserless mode, the container provides stealth via ?stealth query param.
+// Applying stealth plugin on top of browserless causes crashes with puppeteer-core@25.
+if (!USE_BROWSERLESS) {
+  puppeteerExtra.use(StealthPlugin());
+}
 
 const PUPPETEER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
 
