@@ -12,6 +12,8 @@ import type { TipsGgMatch } from '../tipsggScraper';
 import { fetchLiveHtml, fetchHtml } from '../tipsggScraper';
 import * as cheerio from 'cheerio';
 import { getHltvLogoCache } from './hltvRankingScraper';
+import { readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
 
 const CSTEST_BASE = 'https://api.cstest.pp.ua';
 
@@ -326,11 +328,42 @@ export class CstestLiveScoresStore {
       }
 
       // Preserve live entries from previous store that weren't found in current fetch
-      // (e.g., cross-midnight live matches not yet finished)
+      // (e.g., cross-midnight live matches not yet finished).
+      // Only keep entries from today or yesterday — clean up stale ones.
+      const now = Date.now();
       for (const [id, s] of this.store) {
         if (!ns.has(id) && s.status === 'live') {
-          ns.set(id, s);
+          // Don't preserve orphan live entries older than 12 hours
+          if (now - this.lastUpdate < 12 * 60 * 60 * 1000) {
+            ns.set(id, s);
+          }
         }
+      }
+
+      // If both sources failed and store is empty on cold start, seed from cache.
+      // This avoids showing stuck "live" matches with no score updates at all.
+      if (ns.size === 0 && this.store.size === 0) {
+        try {
+          const cacheFile = join(process.cwd(), '.cache', 'cs2_matches.json');
+          if (existsSync(cacheFile)) {
+            const raw = JSON.parse(readFileSync(cacheFile, 'utf-8'));
+            const cacheData: TipsGgMatch[] = raw?.data ?? [];
+            for (const m of cacheData) {
+              if (m.date < new Date().toISOString().split('T')[0]) continue;
+              const s: LiveScoreState = {
+                id: m.id,
+                score1: m.score1 ?? null,
+                score2: m.score2 ?? null,
+                status: m.status ?? 'upcoming',
+              };
+              ns.set(m.id, s);
+            }
+            if (ns.size > 0) {
+              const liveNow = [...ns.values()].filter(s => s.status === 'live').length;
+              console.log(`[CstestLiveScoresStore] Seeded from cache: ${ns.size} matches (${liveNow} live)`);
+            }
+          }
+        } catch { /* ignore */ }
       }
 
       // For matches with scores on the date pages, also scrape individual match detail pages.
@@ -481,7 +514,10 @@ export class CstestLiveScoresStore {
 
       const scrapePage = async (pageUrl: string): Promise<LiveScoreState[]> => {
         let html = await fetchLiveHtml(pageUrl, 1);
-        if (!html) {
+        // Cloudflare blocks direct HTTP for tips.gg csgo pages — if HTML has no
+        // match elements, it's either a challenge page or a broken fetch.
+        // Fall back to Puppeteer in both cases.
+        if (!html || !html.includes('element match')) {
           try {
             const { getBrowser } = await import('../tipsggScraper');
             const browser = await getBrowser();

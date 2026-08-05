@@ -127,10 +127,13 @@ export class LiveScoresStore {
       for (const [id, s] of todayScores) ns.set(id, s);
 
       // Also keep any existing live entries that weren't found on either page
-      // (e.g., match page returns 404 temporarily)
+      // (e.g., match page returns 404 temporarily).
+      // Only preserve entries from the last 12 hours — clean up stale orphans.
       for (const [id, s] of this.store) {
         if (!ns.has(id) && s.status === 'live') {
-          ns.set(id, s);
+          if (Date.now() - this.lastUpdate < 12 * 60 * 60 * 1000) {
+            ns.set(id, s);
+          }
         }
       }
 

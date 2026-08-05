@@ -390,15 +390,30 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
             continue;
           }
           if (!isNaN(startTs)) {
+            // Score-based auto-finish: if the score is decided (BO3: 2-0, 2-1, etc.)
+            // and match started >2h ago, it's definitely finished.
+            const s1 = m.score1 ?? 0;
+            const s2 = m.score2 ?? 0;
+            const maxScore = Math.max(s1, s2);
+            const isBo3Plus = /bo[3-9]/i.test((m as any).type || (m as any).format || '');
+            const isBo1 = /bo1/i.test((m as any).type || (m as any).format || '');
+            const scoreDecided = isBo1 ? (s1 + s2 >= 1 && Math.abs(s1 - s2) >= 1)
+              : isBo3Plus ? maxScore >= 2
+              : maxScore >= 2; // BO2: 2-0 decided, 1-1 draw possible
+            const hasScores = s1 > 0 || s2 > 0;
+
+            if (hasScores && scoreDecided && msSinceStart > 2 * 60 * 60 * 1000) {
+              m.status = 'finished';
+              continue;
+            }
+
             if (hasStartDate && msSinceStart > STUCK_LIVE_MS) {
               m.status = 'finished';
             } else if (!hasStartDate && msSinceStart > 8 * 60 * 60 * 1000) {
               m.status = 'finished';
             } else if (hasStartDate && msSinceStart > 30 * 60 * 1000) {
               // Auto-postponed: live match with no scores 30min past start
-              const s1 = m.score1 ?? null;
-              const s2 = m.score2 ?? null;
-              if (s1 == null && s2 == null) {
+              if (!hasScores) {
                 m.status = 'finished'; // effectively cancelled — won't play today
               }
             }
