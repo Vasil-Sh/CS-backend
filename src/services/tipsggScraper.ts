@@ -362,21 +362,21 @@ async function fetchTipsGgMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[]>
 
   const htmlTime = Date.now();
 
-  // Parse each day's HTML
-  const seen = new Set<string>();
-  const all: TipsGgMatch[] = [];
+  // Parse each day's HTML.
+  // Use Map to deduplicate by ID — later dates (today/tomorrow) overwrite earlier
+  // dates (yesterday). This handles rematches where the same teams play again
+  // (e.g. double-elimination finals) and tips.gg reuses the same slug.
+  const byId = new Map<string, TipsGgMatch>();
   const dayCounts: string[] = [];
   for (const { date, html } of results) {
     if (!html) continue;
     const dayMatches = await parseMatchesFromHtml(html, game);
     dayCounts.push(`${dayMatches.length} ${date}`);
     for (const m of dayMatches) {
-      if (!seen.has(m.id)) {
-        seen.add(m.id);
-        all.push(m);
-      }
+      byId.set(m.id, m);
     }
   }
+  const all = [...byId.values()];
 
   // ── Second pass: fill missing / suspicious scores for finished matches ──
   // When tips.gg removes a finished match from the listing page, scores come back
