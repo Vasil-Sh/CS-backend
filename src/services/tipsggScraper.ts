@@ -97,18 +97,15 @@ function parseEventStatus(statusUrl: string, startDate?: string): 'upcoming' | '
   if (statusUrl.includes('EventRescheduled')) return 'upcoming';
   if (statusUrl.includes('EventCompleted')) return 'finished';
 
-  // Date-based fallback: determine upcoming vs live vs finished.
-  // IMPORTANT: do NOT assume "started = live". Only mark as finished if
-  // clearly past (>6h), otherwise keep upcoming. The HTML CSS class detection
-  // in extractScoresFromHtml provides the real live/upcoming signal.
+  // Date-based fallback: without HTML signal, use time to guess.
+  // >6h ago → finished. Started within last 6h → assume live
+  // (safety net in createMatchesRouter will correct if scores confirm finish).
   if (startDate) {
     try {
       const start = new Date(startDate).getTime();
       const hoursSinceStart = (Date.now() - start) / (1000 * 60 * 60);
       if (hoursSinceStart > 6) return 'finished';
-      if (hoursSinceStart < -1) return 'upcoming'; // starts >1h from now
-      // Started <6h ago but we have no HTML signal — keep upcoming.
-      // The safety net in createMatchesRouter will auto-finish if scores confirm.
+      if (start < Date.now()) return 'live';
     } catch { /* ignore */ }
   }
 
@@ -260,6 +257,16 @@ export async function parseMatchesFromHtml(html: string, game: 'dota2' | 'cs2' =
       } else if (hasScores && status === 'upcoming') {
         // Has scores but no CSS class signal — match is in progress
         status = 'live';
+      } else if (!hasScores && status === 'live') {
+        // Time-based "live" guess with no scores — verify it's not a stale match.
+        // If started >1h ago with no scores at all, it probably finished already;
+        // keep as upcoming and let safety net in createMatchesRouter decide.
+        try {
+          const start = new Date(ld.startDate).getTime();
+          if ((Date.now() - start) > 60 * 60 * 1000) {
+            status = 'upcoming';
+          }
+        } catch { /* keep live */ }
       }
 
       // Date-based safety override: if HTML says "live" but match started too long ago,
