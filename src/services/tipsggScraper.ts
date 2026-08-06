@@ -480,6 +480,10 @@ export async function fetchTodayMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMa
   const url = `${TIPSGG_BASE}/${gamePath}/matches/${today}/`;
 
   let html = await fetchLiveHtml(url, 1);
+  // Detect Cloudflare challenge — HTML is not null but contains no match data
+  if (html && !html.includes('element match') && !html.includes('application/ld+json')) {
+    html = null; // force Puppeteer fallback
+  }
   if (!html) {
     try { html = await fetchHtml(url, 1); } catch { return null; }
   }
