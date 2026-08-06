@@ -98,16 +98,17 @@ function parseEventStatus(statusUrl: string, startDate?: string): 'upcoming' | '
   if (statusUrl.includes('EventCompleted')) return 'finished';
 
   // Date-based fallback: determine upcoming vs live vs finished.
+  // IMPORTANT: do NOT assume "started = live". Only mark as finished if
+  // clearly past (>6h), otherwise keep upcoming. The HTML CSS class detection
+  // in extractScoresFromHtml provides the real live/upcoming signal.
   if (startDate) {
     try {
       const start = new Date(startDate).getTime();
-      const now = Date.now();
-      const hoursSinceStart = (now - start) / (1000 * 60 * 60);
-      // Match started >6h ago and no longer live → assume finished
+      const hoursSinceStart = (Date.now() - start) / (1000 * 60 * 60);
       if (hoursSinceStart > 6) return 'finished';
-      // Match started within 6h → live
-      // (6h covers Dota2 BO5 worst case; BO3 typically 2-3h)
-      if (start < now) return 'live';
+      if (hoursSinceStart < -1) return 'upcoming'; // starts >1h from now
+      // Started <6h ago but we have no HTML signal — keep upcoming.
+      // The safety net in createMatchesRouter will auto-finish if scores confirm.
     } catch { /* ignore */ }
   }
 
@@ -256,6 +257,9 @@ export async function parseMatchesFromHtml(html: string, game: 'dota2' | 'cs2' =
 
       if (isScoreDecided) {
         status = 'finished';
+      } else if (hasScores && status === 'upcoming') {
+        // Has scores but no CSS class signal — match is in progress
+        status = 'live';
       }
 
       // Date-based safety override: if HTML says "live" but match started too long ago,
