@@ -251,6 +251,9 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
   const imgCachePrefix = game === 'dota2' ? 'logo_' : 'logo_cs2_';
 
   async function getMatchesWithSWR(): Promise<{ data: TipsGgMatch[]; fromCache: boolean }> {
+    // Always read from disk — memCache can be stale when incremental refresh
+    // updates the file without going through this function.
+    memCache.delete(cacheFile);
     const memResult = readFileCache<TipsGgMatch[]>(CACHE_TTL_FRESH, cacheFile);
     if (memResult && !memResult.stale) {
       return { data: memResult.data, fromCache: true };
