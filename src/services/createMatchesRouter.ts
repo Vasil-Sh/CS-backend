@@ -351,6 +351,10 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
     try {
       const { data, fromCache } = await getMatchesWithSWR();
 
+      // DEBUG: log status distribution
+      const liveBefore = data.filter(m => m.status === 'live').length;
+      console.log(`[${prefix}Matches] Before overlay: ${data.length} matches, ${liveBefore} live`);
+
       // ── Overlay live scores on match list ──
       // Live scores from the in-memory store are at most 7s old and correctly
       // count map wins. Only overlay matches that the live store considers
@@ -440,6 +444,10 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       // Today's finished matches are still returned — frontend handles auto-hide.
       const today = new Date().toISOString().split('T')[0];
       const filtered = data.filter(m => m.date >= today);
+
+      // DEBUG: log status after all processing
+      const liveAfter = filtered.filter(m => m.status === 'live').length;
+      console.log(`[${prefix}Matches] After filter: ${filtered.length} matches, ${liveAfter} live`);
 
       // ── Rewrite logo URLs to internal proxy (CORS-safe, no broken URLs) ──
       // ── Cast team names to string — numeric names like "6666" become Int64 in JSON ──
