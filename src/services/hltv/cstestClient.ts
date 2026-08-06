@@ -304,9 +304,11 @@ export class CstestLiveScoresStore {
             if (ts.status !== 'upcoming') existing.status = ts.status;
             if (ts.href) existing.href = ts.href;
             overlays++;
-          } else if (this.cstestFailCount >= 3 || ns.size === 0) {
-            // Dead-man switch: cstest is down → add tips.gg entries directly
-            // Also triggers on cold start (ns.size === 0) when cstest unreachable
+          } else {
+            // Always add tips.gg entries not found in cstest — these are matches
+            // from tournaments that cstest/HLTV doesn't cover (e.g. Tipsport Open Cup,
+            // CCT Europe). Without them, these matches stay scoreless and the
+            // frontend auto-postpones them after 30 min.
             ns.set(ts.id, ts);
             newEntries++;
           }
