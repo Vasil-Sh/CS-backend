@@ -360,18 +360,13 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
         for (const m of data) {
           const ls = scoreMap.get(m.id);
           if (!ls) continue;
-          // Only overlay scores & status for matches that are still in progress.
-          // Do NOT overwrite status if live store says 'upcoming' — it might be
-          // stale seed data from cache that hasn't been refreshed.
+          // Only overlay scores — status comes from the full scrape.
+          // Live store status is unreliable when sourced from stale seed data.
           if (ls.status === 'finished') continue;
-          if (ls.status === 'upcoming' && m.status !== 'upcoming') continue;
+          if (ls.status === 'upcoming') continue;
           // Apply live scores (allow 0→0 override for started-but-no-score matches)
           if (ls.score1 != null) m.score1 = ls.score1;
           if (ls.score2 != null) m.score2 = ls.score2;
-          // Status: trust live store only when it has a definitive signal
-          if (ls.status !== m.status) {
-            m.status = ls.status as typeof m.status;
-          }
         }
       }
 
