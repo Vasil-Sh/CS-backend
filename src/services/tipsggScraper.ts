@@ -1001,45 +1001,78 @@ export async function getBrowser(): Promise<Browser> {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Shared rate limiter + ban detection for ALL tips.gg HTTP requests.
-// Prevents aggressive polling from triggering Cloudflare bans.
+// Shared rate limiter + ban detection + schedule control for tips.gg.
 // ═══════════════════════════════════════════════════════════════════
 
 let _lastTipsggRequest = 0;
 const TIPSGG_MIN_DELAY_MS = 800; // minimum 800ms between HTTP requests to tips.gg
 
-// Ban cooldown: if Cloudflare challenge detected, pause ALL traffic for N minutes.
-// Exponential backoff: 5 → 10 → 20 min, reset on first successful request.
-let _banCooldownUntil = 0;
-let _banBackoffMinutes = 5;
+// ═══════════════════════════════════════════════════════════════
+// Fallback-only mode (#16): once banned, don't touch tips.gg
+// until next morning (6am UTC). Prevents repeated ban/unban cycles
+// from exponential backoff hitting the wall over and over.
+// ═══════════════════════════════════════════════════════════════
+
+let _fallbackUntil = 0; // timestamp — freeze all tips.gg traffic until then
+
+function nextMorningTs(): number {
+  const now = new Date();
+  // 6am UTC tomorrow
+  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 6, 0, 0));
+  return next.getTime();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Quiet hours (#14): skip tips.gg between 2am-8am local time.
+// Matches rarely change overnight — save requests for active hours.
+// ═══════════════════════════════════════════════════════════════
+
+function isQuietHours(): boolean {
+  const hour = new Date().getHours(); // local time
+  return hour >= 2 && hour < 8;
+}
+
+/**
+ * Master switch — returns true if tips.gg should NOT be contacted right now.
+ * Reasons: ban fallback, quiet hours, active cooldown.
+ */
+export function shouldSkipTipsgg(): boolean {
+  // Fallback mode (#16): banned until next morning
+  if (Date.now() < _fallbackUntil) return true;
+  // Quiet hours (#14): no scraping at night
+  if (isQuietHours()) return true;
+  return false;
+}
 
 export function isBanned(): boolean {
-  return Date.now() < _banCooldownUntil;
+  return shouldSkipTipsgg();
 }
 
 function triggerBanCooldown(): void {
-  _banCooldownUntil = Date.now() + _banBackoffMinutes * 60_000;
-  console.warn(
-    `[tipsgg] Cloudflare ban detected — pausing all tips.gg traffic for ${_banBackoffMinutes} min`,
-  );
-  _banBackoffMinutes = Math.min(_banBackoffMinutes * 2, 60); // cap at 60 min
+  // #16: freeze until next morning instead of exponential backoff.
+  // One ban is enough signal — don't try again until tomorrow.
+  if (_fallbackUntil === 0) {
+    _fallbackUntil = nextMorningTs();
+    const hours = Math.round((_fallbackUntil - Date.now()) / 3600000);
+    console.warn(
+      `[tipsgg] Cloudflare ban detected — fallback-only mode until 6am UTC (${hours}h). ` +
+      `Using cstest/OpenDota until then.`,
+    );
+  }
 }
 
 function resetBanBackoff(): void {
-  if (_banBackoffMinutes > 5) {
-    console.log(`[tipsgg] Ban cooldown reset (back to 5min)`);
+  if (_fallbackUntil > 0) {
+    console.log(`[tipsgg] Ban cleared — resuming tips.gg traffic`);
   }
-  _banBackoffMinutes = 5;
-  _banCooldownUntil = 0;
+  _fallbackUntil = 0;
 }
 
 async function tipsggRateLimit(): Promise<void> {
-  // If banned, wait until cooldown expires
-  if (isBanned()) {
-    const waitMs = _banCooldownUntil - Date.now();
-    if (waitMs > 0) {
-      throw new Error(`TIPSGG_BANNED:${waitMs}`);
-    }
+  // If banned or quiet hours, throw to abort the request
+  if (shouldSkipTipsgg()) {
+    const reason = isQuietHours() ? 'quiet-hours' : 'fallback';
+    throw new Error(`TIPSGG_SKIP:${reason}`);
   }
   const elapsed = Date.now() - _lastTipsggRequest;
   if (elapsed < TIPSGG_MIN_DELAY_MS) {
@@ -1138,10 +1171,17 @@ export async function fetchLiveHtml(url: string, retries = 1): Promise<string | 
       return html;
     } catch (err) {
       const msg = (err as Error).message;
-      // Detect ban cooldown throw from rate limiter
+      // Detect skip/ban throw from rate limiter or Puppeteer guard
+      if (msg.startsWith('TIPSGG_SKIP:')) {
+        const reason = msg.split(':')[1];
+        // quiet-hours: don't log every cycle
+        if (reason !== 'quiet-hours') {
+          console.warn(`[fetchLiveHtml] Skipping — ${reason}`);
+        }
+        return null;
+      }
       if (msg.startsWith('TIPSGG_BANNED:')) {
-        const waitMs = parseInt(msg.split(':')[1], 10);
-        console.warn(`[fetchLiveHtml] Skipping — banned for ${Math.round(waitMs / 1000)}s more`);
+        console.warn(`[fetchLiveHtml] Skipping — banned`);
         return null;
       }
       if (attempt === retries) {
@@ -1154,11 +1194,10 @@ export async function fetchLiveHtml(url: string, retries = 1): Promise<string | 
 }
 
 export async function fetchHtml(url: string, retries = 3): Promise<string> {
-  // If Cloudflare is challenging us, don't even open a browser —
-  // Puppeteer with a ban page wastes resources and amplifies the ban signal.
-  if (isBanned()) {
-    const remaining = Math.round((_banCooldownUntil - Date.now()) / 1000);
-    throw new Error(`TIPSGG_BANNED: Puppeteer blocked for ${remaining}s`);
+  // If banned or in quiet hours, don't open a browser —
+  // Puppeteer is heavy and amplifies the ban signal.
+  if (shouldSkipTipsgg()) {
+    throw new Error('TIPSGG_SKIP:fallback');
   }
 
   for (let attempt = 0; attempt <= retries; attempt++) {
