@@ -252,6 +252,7 @@ setTimeout(async () => {
     const tipsggMatches = await fetchDota2Matches();
     if (tipsggMatches.length > 0) {
       writeFileCacheInternal(tipsggMatches, cacheFile);
+      persistFinishedToHistory(tipsggMatches, 'dota2', 'warmup:dota2');
       console.log(`[warmup] Dota2 cache primed: ${tipsggMatches.length} matches (tips.gg)`);
       return;
     }
@@ -262,11 +263,56 @@ setTimeout(async () => {
   try {
     const odMatches = await fetchDota2FromOpenDota();
     writeFileCacheInternal(odMatches, cacheFile);
+    persistFinishedToHistory(odMatches, 'dota2', 'warmup:dota2-od');
     console.log(`[warmup] Dota2 cache primed: ${odMatches.length} matches (OpenDota)`);
   } catch (e) {
     console.warn('[warmup] Dota2 OpenDota fetch also failed:', (e as Error).message);
   }
 }, 500);
+
+// ── Helper: persist finished matches from data array to history DB ──
+function persistFinishedToHistory(
+  matches: any[],
+  game: 'dota2' | 'cs2',
+  tag: string,
+): void {
+  const finished = matches
+    .filter((m) => m.status === 'finished')
+    .map((m) => ({
+      id: m.id,
+      game,
+      team1: m.nameTeam1,
+      team2: m.nameTeam2,
+      date: m.date,
+      score1: m.score1 ?? 0,
+      score2: m.score2 ?? 0,
+      status: 'finished' as const,
+      tournament: m.tournament || m.stage || '',
+      matchType: m.type,
+      logoTeam1: m.logoTeam1,
+      logoTeam2: m.logoTeam2,
+    }));
+  if (finished.length > 0) {
+    upsertMatchHistoryBatch(finished).catch((e) =>
+      console.error(`[${tag}] History sync failed:`, (e as Error).message),
+    );
+  }
+}
+
+// ── Seed: persist all finished matches from existing caches to DB on startup ──
+setTimeout(() => {
+  for (const [file, game] of [
+    [join(process.cwd(), '.cache', 'dota2_matches.json'), 'dota2' as const],
+    [join(process.cwd(), '.cache', 'cs2_matches.json'), 'cs2' as const],
+  ]) {
+    try {
+      if (!existsSync(file)) continue;
+      const raw = JSON.parse(readFileSync(file, 'utf-8'));
+      const items: any[] = raw.data || [];
+      persistFinishedToHistory(items, game, `seed:${game}`);
+    } catch { /* best effort */ }
+  }
+}, 3_000);
 
 // ── Dedup existing caches on startup (fix stale duplicates from OpenDota) ──
 function dedupCache(cacheFile: string, tag: string): void {
@@ -354,7 +400,9 @@ setTimeout(async () => {
         merged.set(tm.id, tm);
       }
     }
-    writeFileCacheInternal([...merged.values()], join(process.cwd(), '.cache', 'cs2_matches.json'));
+    const mergedArr = [...merged.values()];
+    writeFileCacheInternal(mergedArr, join(process.cwd(), '.cache', 'cs2_matches.json'));
+    persistFinishedToHistory(mergedArr, 'cs2', 'warmup:cs2');
     console.log(`[warmup] CS2 cache primed: ${merged.size} matches (cstest: ${cstest.length}, +tips.gg)`);
   } catch (err) {
     console.warn('[warmup] CS2 fetch failed:', (err as Error).message);

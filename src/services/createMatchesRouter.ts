@@ -251,6 +251,36 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
   const gameLabel = game === 'dota2' ? 'Dota 2' : 'CS2';
   const imgCachePrefix = game === 'dota2' ? 'logo_' : 'logo_cs2_';
 
+  // Debounce history persistence: track already-persisted match IDs to avoid
+  // hammering the DB with duplicate upserts on every cache read.
+  const _historyPersisted = new Set<string>();
+
+  function persistFinishedIfNeeded(data: TipsGgMatch[], cfg: MatchRouterConfig): void {
+    const finished = data.filter(
+      (m) => m.status === 'finished' && !_historyPersisted.has(m.id),
+    );
+    if (finished.length === 0) return;
+    for (const m of finished) _historyPersisted.add(m.id);
+
+    const entries = finished.map((m) => ({
+      id: m.id,
+      game: cfg.game,
+      team1: m.nameTeam1,
+      team2: m.nameTeam2,
+      date: m.date,
+      score1: m.score1 ?? 0,
+      score2: m.score2 ?? 0,
+      status: 'finished' as const,
+      tournament: m.tournament || m.stage || '',
+      matchType: m.type,
+      logoTeam1: m.logoTeam1,
+      logoTeam2: m.logoTeam2,
+    }));
+    upsertMatchHistoryBatch(entries).catch((e) =>
+      console.error(`[${prefix}Matches] History persist failed:`, (e as Error).message),
+    );
+  }
+
   async function getMatchesWithSWR(): Promise<{ data: TipsGgMatch[]; fromCache: boolean }> {
     // Always read from disk — memCache can be stale when incremental refresh
     // updates the file without going through this function.
@@ -259,6 +289,9 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
 
     // Cache is fresh (<1h) — serve immediately, no network requests.
     if (memResult && !memResult.stale) {
+      // Fire-and-forget: persist finished matches to history DB.
+      // This catches matches from warmup that never went through SWR refresh.
+      persistFinishedIfNeeded(memResult.data, cfg);
       return { data: memResult.data, fromCache: true };
     }
 
@@ -266,6 +299,7 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
     // Incremental refresh (120s) + live scores (20s) already keep data current.
     // Full re-scrape is heavy (8-day Puppeteer) and risks Cloudflare bans on tips.gg.
     if (memResult) {
+      persistFinishedIfNeeded(memResult.data, cfg);
       return { data: memResult.data, fromCache: true };
     }
 
