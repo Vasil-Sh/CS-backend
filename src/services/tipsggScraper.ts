@@ -1087,6 +1087,11 @@ export async function fetchLiveHtml(url: string, retries = 1): Promise<string | 
         await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 500));
       }
       const ua = nextUA();
+      // Build Referer: match listing → game root, detail → listing page
+      const urlObj = new URL(url);
+      const referer = url.includes('/matches/')
+        ? `https://tips.gg/${urlObj.pathname.split('/')[1] || ''}/`
+        : 'https://tips.gg/';
       const resp = await fetch(url, {
         headers: {
           'User-Agent': ua,
@@ -1094,6 +1099,7 @@ export async function fetchLiveHtml(url: string, retries = 1): Promise<string | 
           'Accept-Language': 'en-US,en;q=0.9,uk;q=0.8',
           'Accept-Encoding': 'gzip, deflate, br',
           'Cache-Control': 'no-cache',
+          'Referer': referer,
           'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
           'Sec-Ch-Ua-Mobile': '?0',
           'Sec-Ch-Ua-Platform': '"Windows"',
@@ -1148,6 +1154,13 @@ export async function fetchLiveHtml(url: string, retries = 1): Promise<string | 
 }
 
 export async function fetchHtml(url: string, retries = 3): Promise<string> {
+  // If Cloudflare is challenging us, don't even open a browser —
+  // Puppeteer with a ban page wastes resources and amplifies the ban signal.
+  if (isBanned()) {
+    const remaining = Math.round((_banCooldownUntil - Date.now()) / 1000);
+    throw new Error(`TIPSGG_BANNED: Puppeteer blocked for ${remaining}s`);
+  }
+
   for (let attempt = 0; attempt <= retries; attempt++) {
     let page: Page | null = null;
     try {

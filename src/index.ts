@@ -231,9 +231,24 @@ console.log(`🚀 MatchIQ API server starting on http://localhost:${port}`);
 // ── Cache warmup: pre-fetch Dota2 matches in background ──
 // Strategy: try tips.gg first, fallback to OpenDota if blocked (0 matches).
 // OpenDota is NOT behind Cloudflare — serves as reliable backup.
+//
+// SKIP warmup if today's cache already exists on disk — incremental refresh
+// will fill any gaps. Avoids a full 8-day scrape on every restart.
 setTimeout(async () => {
   const cacheFile = join(process.cwd(), '.cache', 'dota2_matches.json');
   try {
+    // Check if today's cache already exists (from previous run)
+    if (existsSync(cacheFile)) {
+      try {
+        const raw = JSON.parse(readFileSync(cacheFile, 'utf-8'));
+        const today = new Date().toISOString().split('T')[0];
+        if (raw.day === today && (raw.data?.length || 0) > 0) {
+          console.log(`[warmup] Dota2 cache exists (${raw.data.length} matches, today) — skipping warmup`);
+          return;
+        }
+      } catch { /* corrupt cache — fetch fresh */ }
+    }
+
     const tipsggMatches = await fetchDota2Matches();
     if (tipsggMatches.length > 0) {
       writeFileCacheInternal(tipsggMatches, cacheFile);
@@ -284,11 +299,27 @@ setTimeout(() => {
 }, 2_000);
 
 // ── Cache warmup: pre-fetch CS2 matches (cstest + tips.gg merged) in background ──
+// SKIP tips.gg if today's cache already exists. cstest is safe (not behind CF).
 setTimeout(async () => {
+  const cacheFile = join(process.cwd(), '.cache', 'cs2_matches.json');
+  const today = new Date().toISOString().split('T')[0];
+
+  // Check if today's cache already exists (from previous run)
+  let skipTipsgg = false;
+  if (existsSync(cacheFile)) {
+    try {
+      const raw = JSON.parse(readFileSync(cacheFile, 'utf-8'));
+      if (raw.day === today && (raw.data?.length || 0) > 0) {
+        console.log(`[warmup] CS2 cache exists (${raw.data.length} matches, today) — skipping tips.gg scrape`);
+        skipTipsgg = true;
+      }
+    } catch { /* corrupt */ }
+  }
+
   try {
     const [cstestMatches, tipsggMatches] = await Promise.allSettled([
       fetchCstestMatches(),
-      fetchCs2Matches(),
+      skipTipsgg ? Promise.resolve([] as any[]) : fetchCs2Matches(),
     ]);
     const cstest = cstestMatches.status === 'fulfilled' ? cstestMatches.value : [];
     const tipsgg = tipsggMatches.status === 'fulfilled' ? tipsggMatches.value : [];
@@ -452,13 +483,23 @@ setTimeout(() => {
 
 import { normalizeTeam, isSameMatch } from './utils/matchUtils.js';
 import { validateScores, needsScoreBackfill } from './utils/scoreValidation.js';
+import { isIdle, IDLE_POLL_MS } from './services/activityTracker.js';
+import { isBanned } from './services/tipsggScraper.js';
 
 function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: string): void {
   // For CS2, cstest is primary — never add new matches from tips.gg (prevents duplicates).
   // Only update scores & status for existing matches.
   const isPrimarySource = game === 'cs2';
+  const ACTIVE_INTERVAL = 120_000;
 
-  const interval = setInterval(async () => {
+  const tick = async () => {
+    // Skip tips.gg fetch if idle or banned — don't waste requests
+    if (isIdle() || isBanned()) {
+      // Still schedule next tick, but at slower rate
+      setTimeout(tick, IDLE_POLL_MS).unref();
+      return;
+    }
+
     try {
       const todayMatches = await fetchTodayMatches(game);
       if (!todayMatches || todayMatches.length === 0) return;
@@ -583,9 +624,15 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
     } catch (err) {
       // Silent — incremental refresh is best-effort
     }
-  }, 120_000);
-  if ('unref' in interval) (interval as NodeJS.Timeout).unref();
-  console.log(`[incr:${tag}] Incremental refresh worker started (120s)` + (isPrimarySource ? ' (updates-only)' : ''));
+
+    // Schedule next tick at active rate
+    setTimeout(tick, ACTIVE_INTERVAL).unref();
+  };
+
+  // Fire first tick, then chain
+  tick();
+  console.log(`[incr:${tag}] Incremental refresh started (${ACTIVE_INTERVAL / 1000}s active, ${IDLE_POLL_MS / 1000}s idle)` +
+    (isPrimarySource ? ' (updates-only)' : ''));
 }
 
 // Start incremental refresh for both games (after warmup delay, staggered)
