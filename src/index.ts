@@ -253,6 +253,36 @@ setTimeout(async () => {
   }
 }, 500);
 
+// ── Dedup existing caches on startup (fix stale duplicates from OpenDota) ──
+function dedupCache(cacheFile: string, tag: string): void {
+  try {
+    if (!existsSync(cacheFile)) return;
+    const raw = JSON.parse(readFileSync(cacheFile, 'utf-8'));
+    const items: any[] = raw.data || [];
+    if (items.length === 0) return;
+
+    const seen = new Map<string, any>();
+    let removed = 0;
+    for (const m of items) {
+      // Try exact ID first
+      if (seen.has(m.id)) { removed++; continue; }
+      // Fuzzy: same date + same normalized teams → duplicate
+      const isDup = [...seen.values()].some((s: any) => isSameMatch(s, m));
+      if (isDup) { removed++; continue; }
+      seen.set(m.id, m);
+    }
+    if (removed > 0) {
+      writeFileCacheInternal([...seen.values()], cacheFile);
+      console.log(`[dedup] ${tag}: removed ${removed} duplicates (${seen.size} kept)`);
+    }
+  } catch { /* best effort */ }
+}
+
+setTimeout(() => {
+  dedupCache(join(process.cwd(), '.cache', 'dota2_matches.json'), 'dota2');
+  dedupCache(join(process.cwd(), '.cache', 'cs2_matches.json'), 'cs2');
+}, 2_000);
+
 // ── Cache warmup: pre-fetch CS2 matches (cstest + tips.gg merged) in background ──
 setTimeout(async () => {
   try {
@@ -349,6 +379,11 @@ const openDotaLiveInterval = setInterval(async () => {
           updated++;
         }
       } else {
+        // Fuzzy dedup: OpenDota and tips.gg use different ID formats.
+        // Check by date + normalized team names to avoid duplicates.
+        const isDuplicate = existing.some((m: any) => isSameMatch(m, lm));
+        if (isDuplicate) continue;
+
         // New live match — add to cache
         existing.push(lm as any);
         existingMap.set(lm.id, lm as any);
