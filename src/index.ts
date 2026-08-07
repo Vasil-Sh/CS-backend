@@ -40,6 +40,7 @@ import publicProfileRoutes from './routes/publicProfile';
 import matchesHistoryRoutes from './routes/matchesHistory';
 import { closeBrowser } from './services/tipsggScraper';
 import { fetchDota2Matches, fetchCs2Matches, fetchTodayMatches } from './services/tipsggScraper';
+import { fetchDota2FromOpenDota, fetchLiveMatches } from './services/opendotaClient';
 import { join } from 'node:path';
 import { readFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { execSync } from 'node:child_process';
@@ -228,13 +229,28 @@ const port = parseInt(process.env.PORT || '3001', 10);
 console.log(`🚀 MatchIQ API server starting on http://localhost:${port}`);
 
 // ── Cache warmup: pre-fetch Dota2 matches in background ──
-setTimeout(() => {
-  fetchDota2Matches()
-    .then(matches => {
-      writeFileCacheInternal(matches, join(process.cwd(), '.cache', 'dota2_matches.json'));
-      console.log(`[warmup] Dota2 cache primed: ${matches.length} matches`);
-    })
-    .catch(e => console.warn('[warmup] Dota2 fetch failed:', (e as Error).message));
+// Strategy: try tips.gg first, fallback to OpenDota if blocked (0 matches).
+// OpenDota is NOT behind Cloudflare — serves as reliable backup.
+setTimeout(async () => {
+  const cacheFile = join(process.cwd(), '.cache', 'dota2_matches.json');
+  try {
+    const tipsggMatches = await fetchDota2Matches();
+    if (tipsggMatches.length > 0) {
+      writeFileCacheInternal(tipsggMatches, cacheFile);
+      console.log(`[warmup] Dota2 cache primed: ${tipsggMatches.length} matches (tips.gg)`);
+      return;
+    }
+    console.warn('[warmup] tips.gg returned 0 Dota2 matches — falling back to OpenDota');
+  } catch (e) {
+    console.warn('[warmup] Dota2 tips.gg fetch failed:', (e as Error).message, '— falling back to OpenDota');
+  }
+  try {
+    const odMatches = await fetchDota2FromOpenDota();
+    writeFileCacheInternal(odMatches, cacheFile);
+    console.log(`[warmup] Dota2 cache primed: ${odMatches.length} matches (OpenDota)`);
+  } catch (e) {
+    console.warn('[warmup] Dota2 OpenDota fetch also failed:', (e as Error).message);
+  }
 }, 500);
 
 // ── Cache warmup: pre-fetch CS2 matches (cstest + tips.gg merged) in background ──
@@ -285,10 +301,67 @@ setTimeout(async () => {
 }, 1000);
 
 // ── Live scores background workers ──
-// Dota2: poll tips.gg every 7s (HTTP fetch, fast)
-// CS2: poll cstest API every 7s (matches the cstest match list directly)
-liveScoresStore.startBackgroundWorker(7_000);
-cstestLiveScoresStore.startBackgroundWorker(7_000);
+// Dota2: OpenDota /live API (not behind Cloudflare) — primary
+//         tips.gg scraper kept as backup (rate-limited to avoid bans)
+// CS2: poll cstest API + tips.gg scores
+//
+// Rate-limiting strategy for tips.gg:
+//   - Minimum 800ms between all fetchLiveHtml calls (shared limiter)
+//   - Polling interval: 20s (was 7s — too aggressive, triggered CF bans)
+//   - Jitter: ±20% random offset per cycle to avoid predictable patterns
+//   - Staggered startup: Dota2 at 0s, CS2 at 5s offset
+const TIPSGG_POLL_MS = 20_000;
+
+liveScoresStore.startBackgroundWorker(TIPSGG_POLL_MS);
+
+// Stagger CS2 worker by 5s so it doesn't fire simultaneously with Dota2
+setTimeout(() => {
+  cstestLiveScoresStore.startBackgroundWorker(TIPSGG_POLL_MS);
+}, 5_000);
+
+// ── OpenDota live scores — light HTTP poll, no Cloudflare ──
+const OPENODOTA_LIVE_INTERVAL = 15_000; // 15s (OpenDota free tier: 60 req/min)
+const openDotaLiveInterval = setInterval(async () => {
+  try {
+    const liveMatches = await fetchLiveMatches();
+    if (liveMatches.length === 0) return;
+
+    // Write live matches into the Dota2 cache file (merge with existing)
+    const cacheFile = join(process.cwd(), '.cache', 'dota2_matches.json');
+    let existing: Record<string, any>[] = [];
+    try {
+      if (existsSync(cacheFile)) {
+        const raw = JSON.parse(readFileSync(cacheFile, 'utf-8'));
+        existing = raw.data || [];
+      }
+    } catch { /* stale cache */ }
+
+    const existingMap = new Map(existing.map((m: any) => [m.id, m]));
+    let updated = 0;
+    for (const lm of liveMatches) {
+      const prev = existingMap.get(lm.id);
+      if (prev) {
+        // Update scores/status for existing match
+        if (prev.score1 !== lm.score1 || prev.score2 !== lm.score2 || prev.status !== lm.status) {
+          prev.score1 = lm.score1;
+          prev.score2 = lm.score2;
+          prev.status = lm.status;
+          updated++;
+        }
+      } else {
+        // New live match — add to cache
+        existing.push(lm as any);
+        existingMap.set(lm.id, lm as any);
+        updated++;
+      }
+    }
+    if (updated > 0) {
+      writeFileCacheInternal(existing, cacheFile);
+    }
+  } catch { /* silent — best effort */ }
+}, OPENODOTA_LIVE_INTERVAL);
+if ('unref' in openDotaLiveInterval) (openDotaLiveInterval as NodeJS.Timeout).unref();
+console.log('[opendota] Live scores worker started (15s)');
 
 // ── HLTV ranking logo scraper — run once at startup ──
 // Fills the in-memory logo map for cstestClient to use as fallback
@@ -475,15 +548,18 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
     } catch (err) {
       // Silent — incremental refresh is best-effort
     }
-  }, 60_000);
+  }, 120_000);
   if ('unref' in interval) (interval as NodeJS.Timeout).unref();
-  console.log(`[incr:${tag}] Incremental refresh worker started (60s)` + (isPrimarySource ? ' (updates-only)' : ''));
+  console.log(`[incr:${tag}] Incremental refresh worker started (120s)` + (isPrimarySource ? ' (updates-only)' : ''));
 }
 
-// Start incremental refresh for both games (after warmup delay)
+// Start incremental refresh for both games (after warmup delay, staggered)
 setTimeout(() => {
   startIncrementalRefresh('dota2', join(process.cwd(), '.cache', 'dota2_matches.json'), 'dota2');
-  startIncrementalRefresh('cs2', join(process.cwd(), '.cache', 'cs2_matches.json'), 'cs2');
+  // Stagger CS2 incr refresh by 5s to avoid simultaneous tips.gg page fetches
+  setTimeout(() => {
+    startIncrementalRefresh('cs2', join(process.cwd(), '.cache', 'cs2_matches.json'), 'cs2');
+  }, 5_000);
 }, 5_000);
 
 // ── Graceful shutdown ──

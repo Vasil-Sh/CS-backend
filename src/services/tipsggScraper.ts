@@ -348,10 +348,10 @@ async function fetchTipsGgMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[]>
     dates.push(formatDateDdMmYyyy(new Date(Date.now() + i * 86400000)));
   }
 
-  // Fetch ALL 8 days with concurrency limit of 5.
+  // Fetch ALL 8 days with concurrency limit of 2 (reduced from 5 to avoid Cloudflare rate-limiting).
   // HTTP first (fast), Puppeteer fallback for Cloudflare-blocked pages.
   // Future dates are often behind Cloudflare → Puppeteer stealth bypasses it.
-  const CONCURRENCY = 5;
+  const CONCURRENCY = 2;
   const results: { date: string; html: string | null }[] = [];
   for (let i = 0; i < dates.length; i += CONCURRENCY) {
     const batch = dates.slice(i, i + CONCURRENCY);
@@ -406,7 +406,7 @@ async function fetchTipsGgMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[]>
   });
   if (needsBackfill.length > 0) {
     const scoreBackfillStart = Date.now();
-    const DETAIL_CONCURRENCY = 4;
+    const DETAIL_CONCURRENCY = 2;
     for (let i = 0; i < needsBackfill.length; i += DETAIL_CONCURRENCY) {
       const batch = needsBackfill.slice(i, i + DETAIL_CONCURRENCY);
       const batchResults = await Promise.allSettled(
@@ -640,7 +640,7 @@ export async function cacheTeamLogos(matches: TipsGgMatch[], game: string): Prom
   if (logoUrls.size === 0) return result;
 
   const startTime = Date.now();
-  const CONCURRENCY = 4;
+  const CONCURRENCY = 2;
   const urls = [...logoUrls];
   let downloaded = 0;
 
@@ -752,8 +752,8 @@ async function fetchCoefficientsFromPredictions(link: string, retries = 2): Prom
 }
 
 async function enrichCoefficients(matches: TipsGgMatch[]): Promise<void> {
-  const CONCURRENCY = 4;
-  const BATCH_PAUSE_MS = 200; // 200ms between batches — enough to not overwhelm tips.gg
+  const CONCURRENCY = 2;
+  const BATCH_PAUSE_MS = 2000; // 2s between batches — reduced aggressiveness to avoid Cloudflare rate-limiting
   const PER_MATCH_TIMEOUT_MS = 25000; // 25s hard cap per match
   const now = Date.now();
   const MAX_FUTURE_MS = 12 * 60 * 60 * 1000; // 12h — skip matches starting too far into the future
@@ -1000,6 +1000,23 @@ export async function getBrowser(): Promise<Browser> {
   return _browser;
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// Shared rate limiter for ALL tips.gg HTTP requests.
+// Prevents aggressive polling from triggering Cloudflare bans.
+// Enforces a minimum delay between consecutive fetchLiveHtml calls.
+// ═══════════════════════════════════════════════════════════════════
+
+let _lastTipsggRequest = 0;
+const TIPSGG_MIN_DELAY_MS = 800; // minimum 800ms between HTTP requests to tips.gg
+
+async function tipsggRateLimit(): Promise<void> {
+  const elapsed = Date.now() - _lastTipsggRequest;
+  if (elapsed < TIPSGG_MIN_DELAY_MS) {
+    await new Promise(r => setTimeout(r, TIPSGG_MIN_DELAY_MS - elapsed));
+  }
+  _lastTipsggRequest = Date.now();
+}
+
 /**
  * Lightweight HTTP fetch for live scores — no Puppeteer overhead.
  * tips.gg serves the match listing as static HTML with JSON-LD embedded,
@@ -1007,8 +1024,11 @@ export async function getBrowser(): Promise<Browser> {
  *
  * Response time: 100-500ms (vs 3-10s for Puppeteer).
  * Falls back to Puppeteer `fetchHtml` on failure (e.g. Cloudflare challenge).
+ *
+ * Rate-limited: minimum 800ms between calls (shared across all workers).
  */
 export async function fetchLiveHtml(url: string, retries = 1): Promise<string | null> {
+  await tipsggRateLimit();
   const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {

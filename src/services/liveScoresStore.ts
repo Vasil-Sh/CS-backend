@@ -27,7 +27,7 @@ export class LiveScoresStore {
   private store = new Map<string, LiveScoreState>();
   private lastStore = new Map<string, LiveScoreState>();
   private isUpdating = false;
-  private intervalId: ReturnType<typeof setInterval> | null = null;
+  private timeoutId: ReturnType<typeof setTimeout> | null = null;
   private lastUpdate = 0;
   private currentInterval = 15_000;
   private readonly gamePath: string;
@@ -39,16 +39,26 @@ export class LiveScoresStore {
   }
 
   startBackgroundWorker(intervalMs = 15_000): void {
-    if (this.intervalId) return;
+    if (this.timeoutId) return;
     this.currentInterval = intervalMs;
-    this.updateScores();
-    this.intervalId = setInterval(() => this.updateScores(), intervalMs);
-    if (this.intervalId && 'unref' in this.intervalId) (this.intervalId as NodeJS.Timeout).unref();
-    console.log(`[${this.tag}LiveScoresStore] Worker started (${intervalMs}ms)`);
+
+    // Use setTimeout chain with jitter instead of setInterval —
+    // avoids predictable timing patterns that trigger rate limiting.
+    const jitter = () => Math.round(intervalMs * (0.8 + Math.random() * 0.4)); // ±20%
+
+    const tick = async () => {
+      await this.updateScores();
+      this.timeoutId = setTimeout(tick, jitter());
+      if (this.timeoutId && 'unref' in this.timeoutId) (this.timeoutId as NodeJS.Timeout).unref();
+    };
+
+    // Fire first update immediately, then schedule next with jitter
+    tick();
+    console.log(`[${this.tag}LiveScoresStore] Worker started (${intervalMs}ms ±20% jitter)`);
   }
 
   stopBackgroundWorker(): void {
-    if (this.intervalId) { clearInterval(this.intervalId); this.intervalId = null; }
+    if (this.timeoutId) { clearTimeout(this.timeoutId); this.timeoutId = null; }
   }
 
   getScores(): LiveScoreState[] {

@@ -24,7 +24,7 @@ interface MatchRouterConfig {
   healthUrl?: string;
 }
 
-const CACHE_TTL_FRESH = 5 * 60 * 1000;   // 5 min — normal TTL
+const CACHE_TTL_FRESH = 60 * 60 * 1000;  // 1 hour — normal TTL (incremental refresh keeps it current)
 const CACHE_TTL_STALE = 60 * 60 * 1000;  // 1 hour — serve stale only if fresh fetch fails
 const CACHE_DIR = join(process.cwd(), '.cache');
 
@@ -190,7 +190,7 @@ export function writeFileCacheInternal(data: unknown, key: string): void {
 
 // ── Rate limiter ──
 const RATE_LIMIT_WINDOW = 30000;
-const RATE_LIMIT_MAX = 5;
+const RATE_LIMIT_MAX = 15; // increased from 5 — frontend retries during backend cold start
 const RATE_CLEANUP_INTERVAL = 60_000;
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
 
@@ -255,9 +255,20 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
     // updates the file without going through this function.
     memCache.delete(cacheFile);
     const memResult = readFileCache<TipsGgMatch[]>(CACHE_TTL_FRESH, cacheFile);
+
+    // Cache is fresh (<1h) — serve immediately, no network requests.
     if (memResult && !memResult.stale) {
       return { data: memResult.data, fromCache: true };
     }
+
+    // Cache is stale but from today — serve it without triggering a full re-scrape.
+    // Incremental refresh (120s) + live scores (20s) already keep data current.
+    // Full re-scrape is heavy (8-day Puppeteer) and risks Cloudflare bans on tips.gg.
+    if (memResult) {
+      return { data: memResult.data, fromCache: true };
+    }
+
+    // No cache at all (cold start or expired from yesterday) — must fetch.
 
     const state = getRefreshState(cacheFile);
     if (!state.lock) {
