@@ -1001,20 +1001,72 @@ export async function getBrowser(): Promise<Browser> {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Shared rate limiter for ALL tips.gg HTTP requests.
+// Shared rate limiter + ban detection for ALL tips.gg HTTP requests.
 // Prevents aggressive polling from triggering Cloudflare bans.
-// Enforces a minimum delay between consecutive fetchLiveHtml calls.
 // ═══════════════════════════════════════════════════════════════════
 
 let _lastTipsggRequest = 0;
 const TIPSGG_MIN_DELAY_MS = 800; // minimum 800ms between HTTP requests to tips.gg
 
+// Ban cooldown: if Cloudflare challenge detected, pause ALL traffic for N minutes.
+// Exponential backoff: 5 → 10 → 20 min, reset on first successful request.
+let _banCooldownUntil = 0;
+let _banBackoffMinutes = 5;
+
+export function isBanned(): boolean {
+  return Date.now() < _banCooldownUntil;
+}
+
+function triggerBanCooldown(): void {
+  _banCooldownUntil = Date.now() + _banBackoffMinutes * 60_000;
+  console.warn(
+    `[tipsgg] Cloudflare ban detected — pausing all tips.gg traffic for ${_banBackoffMinutes} min`,
+  );
+  _banBackoffMinutes = Math.min(_banBackoffMinutes * 2, 60); // cap at 60 min
+}
+
+function resetBanBackoff(): void {
+  if (_banBackoffMinutes > 5) {
+    console.log(`[tipsgg] Ban cooldown reset (back to 5min)`);
+  }
+  _banBackoffMinutes = 5;
+  _banCooldownUntil = 0;
+}
+
 async function tipsggRateLimit(): Promise<void> {
+  // If banned, wait until cooldown expires
+  if (isBanned()) {
+    const waitMs = _banCooldownUntil - Date.now();
+    if (waitMs > 0) {
+      throw new Error(`TIPSGG_BANNED:${waitMs}`);
+    }
+  }
   const elapsed = Date.now() - _lastTipsggRequest;
   if (elapsed < TIPSGG_MIN_DELAY_MS) {
     await new Promise(r => setTimeout(r, TIPSGG_MIN_DELAY_MS - elapsed));
   }
   _lastTipsggRequest = Date.now();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Rotating User-Agent pool — avoid fingerprinting as a single bot.
+// Real Chrome/Firefox UAs from recent versions.
+// ═══════════════════════════════════════════════════════════════════
+
+const UA_POOL = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0',
+];
+
+let _uaIndex = 0;
+function nextUA(): string {
+  const ua = UA_POOL[_uaIndex % UA_POOL.length];
+  _uaIndex++;
+  return ua;
 }
 
 /**
@@ -1029,28 +1081,39 @@ async function tipsggRateLimit(): Promise<void> {
  */
 export async function fetchLiveHtml(url: string, retries = 1): Promise<string | null> {
   await tipsggRateLimit();
-  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       if (attempt > 0) {
         await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 500));
       }
+      const ua = nextUA();
       const resp = await fetch(url, {
         headers: {
-          'User-Agent': UA,
+          'User-Agent': ua,
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           'Accept-Language': 'en-US,en;q=0.9,uk;q=0.8',
+          'Accept-Encoding': 'gzip, deflate, br',
           'Cache-Control': 'no-cache',
+          'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+          'Sec-Ch-Ua-Mobile': '?0',
+          'Sec-Ch-Ua-Platform': '"Windows"',
+          'Upgrade-Insecure-Requests': '1',
         },
         signal: AbortSignal.timeout(8000),
       });
       if (!resp.ok) {
-        if (resp.status === 403 || resp.status === 503) continue; // retry on Cloudflare
+        if (resp.status === 403 || resp.status === 429 || resp.status === 503) {
+          if (resp.status === 429) {
+            // Rate limited — definitely banned
+            triggerBanCooldown();
+          }
+          continue; // retry on Cloudflare / rate limit
+        }
         return null;
       }
       const html = await resp.text();
       if (html.length < 2000) return null;
-      // Detect Cloudflare — any of: legacy markers, new minimal CF, or small page with no match HTML
+      // Detect Cloudflare challenge
       const isCloudflare =
         html.includes('_cf_chl_opt') || html.includes('Just a moment') ||
         html.includes('cf-browser-verify') || html.includes('cf-captcha') ||
@@ -1058,15 +1121,25 @@ export async function fetchLiveHtml(url: string, retries = 1): Promise<string | 
         (html.length < 5000 && !html.includes('class="element match') && !html.includes('application/ld+json'));
       if (isCloudflare) {
         console.warn('[fetchLiveHtml] Cloudflare challenge detected');
+        triggerBanCooldown();
         return null;
       }
       if (!html.includes('class="element match') && !html.includes('application/ld+json')) {
         return null;
       }
+      // Success! Reset ban backoff
+      resetBanBackoff();
       return html;
     } catch (err) {
+      const msg = (err as Error).message;
+      // Detect ban cooldown throw from rate limiter
+      if (msg.startsWith('TIPSGG_BANNED:')) {
+        const waitMs = parseInt(msg.split(':')[1], 10);
+        console.warn(`[fetchLiveHtml] Skipping — banned for ${Math.round(waitMs / 1000)}s more`);
+        return null;
+      }
       if (attempt === retries) {
-        console.warn(`[fetchLiveHtml] HTTP fetch failed for ${url}: ${(err as Error).message}`);
+        console.warn(`[fetchLiveHtml] HTTP fetch failed for ${url}: ${msg}`);
         return null;
       }
     }

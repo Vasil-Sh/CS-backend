@@ -14,6 +14,7 @@ import type { ILiveScoresStore } from '../services/liveScoresStore';
 import { upsertMatchHistoryBatch } from '../services/matchHistoryService';
 import { getHltvLogoCache } from '../services/hltv/hltvRankingScraper';
 import { lookupLocalLogo, getLocalLogoDir, lookupTipsggLogo, lookupDota2LocalLogo, getDota2LogoDir } from '../services/logoStore';
+import { touchActivity } from './activityTracker';
 
 interface MatchRouterConfig {
   game: 'dota2' | 'cs2';
@@ -360,6 +361,9 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
     }
 
     try {
+      // Track user activity — signals to live score workers that someone is watching.
+      // Workers reduce polling frequency when idle to save tips.gg requests.
+      touchActivity();
       const { data, fromCache } = await getMatchesWithSWR();
 
       // ── Overlay live scores on match list ──

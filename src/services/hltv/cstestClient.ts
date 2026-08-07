@@ -9,7 +9,8 @@
  */
 
 import type { TipsGgMatch } from '../tipsggScraper';
-import { fetchLiveHtml, fetchHtml } from '../tipsggScraper';
+import { fetchLiveHtml, isBanned } from '../tipsggScraper';
+import { isIdle, IDLE_POLL_MS } from '../activityTracker';
 import * as cheerio from 'cheerio';
 import { getHltvLogoCache } from './hltvRankingScraper';
 import { readFileSync, existsSync } from 'node:fs';
@@ -217,19 +218,22 @@ export class CstestLiveScoresStore {
     if (this.timeoutId) return;
     this.currentInterval = intervalMs;
 
-    // Use setTimeout chain with jitter instead of setInterval —
-    // avoids predictable timing patterns that trigger rate limiting.
-    const jitter = () => Math.round(intervalMs * (0.8 + Math.random() * 0.4)); // ±20%
+    // Dynamic interval: fast when users are watching, slow when idle.
+    // Uses setTimeout chain with jitter to avoid predictable patterns.
+    const nextDelay = (): number => {
+      const base = (isIdle() || isBanned()) ? IDLE_POLL_MS : this.currentInterval;
+      return Math.round(base * (0.8 + Math.random() * 0.4)); // ±20% jitter
+    };
 
     const tick = async () => {
       await this.updateScores();
-      this.timeoutId = setTimeout(tick, jitter());
+      this.timeoutId = setTimeout(tick, nextDelay());
       if (this.timeoutId && 'unref' in this.timeoutId) (this.timeoutId as NodeJS.Timeout).unref();
     };
 
-    // Fire first update immediately, then schedule next with jitter
+    // Fire first update immediately, then schedule next
     tick();
-    console.log(`[CstestLiveScoresStore] Worker started (${intervalMs}ms ±20% jitter)`);
+    console.log(`[CstestLiveScoresStore] Worker started (${intervalMs}ms active, ${IDLE_POLL_MS}ms idle ±20% jitter)`);
   }
 
   getScores(): LiveScoreState[] {
@@ -389,7 +393,7 @@ export class CstestLiveScoresStore {
           liveMatches.map(async (s) => {
             const href = s.href!;
             const detailUrl = href.startsWith('http') ? href : `https://tips.gg${href}`;
-            const html = (await fetchLiveHtml(detailUrl, 1)) || (await fetchHtml(detailUrl, 1).catch(() => null));
+            const html = await fetchLiveHtml(detailUrl, 1); // no Puppeteer fallback for safety
             if (!html) return null;
             const $ = cheerio.load(html);
             // Parse the single match page
@@ -511,6 +515,9 @@ export class CstestLiveScoresStore {
   private async fetchTipsggScores(): Promise<LiveScoreState[]> {
     const t0 = Date.now();
     try {
+      // Skip if tips.gg is in ban cooldown
+      if (isBanned()) return [];
+
       const today = new Date();
       const dd = String(today.getDate()).padStart(2, '0');
       const mm = String(today.getMonth() + 1).padStart(2, '0');
@@ -525,24 +532,9 @@ export class CstestLiveScoresStore {
       const yesterdayUrl = `https://tips.gg/csgo/matches/${ydd}-${ymm}-${yyyy2}/`;
 
       const scrapePage = async (pageUrl: string): Promise<LiveScoreState[]> => {
-        let html = await fetchLiveHtml(pageUrl, 1);
-        // Cloudflare blocks direct HTTP for tips.gg csgo pages — if HTML has no
-        // match elements, it's either a challenge page or a broken fetch.
-        // Fall back to Puppeteer in both cases.
-        if (!html || !html.includes('element match')) {
-          try {
-            const { getBrowser } = await import('../tipsggScraper');
-            const browser = await getBrowser();
-            const page = await browser.newPage();
-            try {
-              await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-              html = await page.content();
-            } finally {
-              await page.close().catch(() => {});
-            }
-          } catch { /* ignore */ }
-        }
-        if (!html) return [];
+        const html = await fetchLiveHtml(pageUrl, 1);
+        // No Puppeteer fallback — live polling with browser is too aggressive
+        if (!html || !html.includes('element match')) return [];
 
         const $ = cheerio.load(html);
         const result: LiveScoreState[] = [];

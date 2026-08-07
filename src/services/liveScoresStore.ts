@@ -1,5 +1,6 @@
 import * as cheerio from 'cheerio';
-import { fetchHtml, fetchLiveHtml } from './tipsggScraper';
+import { fetchLiveHtml, isBanned } from './tipsggScraper';
+import { isIdle, IDLE_POLL_MS } from './activityTracker';
 
 export interface LiveScoreState {
   id: string;
@@ -42,19 +43,22 @@ export class LiveScoresStore {
     if (this.timeoutId) return;
     this.currentInterval = intervalMs;
 
-    // Use setTimeout chain with jitter instead of setInterval —
-    // avoids predictable timing patterns that trigger rate limiting.
-    const jitter = () => Math.round(intervalMs * (0.8 + Math.random() * 0.4)); // ±20%
+    // Dynamic interval: fast when users are watching, slow when idle.
+    // Uses setTimeout chain with jitter to avoid predictable patterns.
+    const nextDelay = (): number => {
+      const base = (isIdle() || isBanned()) ? IDLE_POLL_MS : this.currentInterval;
+      return Math.round(base * (0.8 + Math.random() * 0.4)); // ±20% jitter
+    };
 
     const tick = async () => {
       await this.updateScores();
-      this.timeoutId = setTimeout(tick, jitter());
+      this.timeoutId = setTimeout(tick, nextDelay());
       if (this.timeoutId && 'unref' in this.timeoutId) (this.timeoutId as NodeJS.Timeout).unref();
     };
 
-    // Fire first update immediately, then schedule next with jitter
+    // Fire first update immediately, then schedule next
     tick();
-    console.log(`[${this.tag}LiveScoresStore] Worker started (${intervalMs}ms ±20% jitter)`);
+    console.log(`[${this.tag}LiveScoresStore] Worker started (${intervalMs}ms active, ${IDLE_POLL_MS}ms idle ±20% jitter)`);
   }
 
   stopBackgroundWorker(): void {
@@ -98,6 +102,11 @@ export class LiveScoresStore {
     if (this.isUpdating) return;
     this.isUpdating = true;
     try {
+      // Skip if tips.gg is in ban cooldown — don't even try, save the request
+      if (isBanned()) {
+        return;
+      }
+
       const today = new Date();
       const dd = String(today.getDate()).padStart(2,'0');
       const mm = String(today.getMonth()+1).padStart(2,'0');
@@ -114,10 +123,9 @@ export class LiveScoresStore {
       const yesterdayUrl = `https://tips.gg/${this.gamePath}/matches/${ydd}-${ymm}-${yyyy2}/`;
 
       const scrapePage = async (pageUrl: string): Promise<Map<string, LiveScoreState>> => {
-        let html = await fetchLiveHtml(pageUrl, 1);
-        if (!html) {
-          try { html = await fetchHtml(pageUrl, 1); } catch { /* ignore */ }
-        }
+        // No Puppeteer fallback for live polling — aggressive browser is worse than
+        // missing one cycle. The fetchLiveHtml rate limiter already handles ban cooldown.
+        const html = await fetchLiveHtml(pageUrl, 1);
         if (!html) return new Map();
         const $ = cheerio.load(html);
         const result = new Map<string, LiveScoreState>();
@@ -125,7 +133,7 @@ export class LiveScoresStore {
         return result;
       };
 
-      // Scrape today and yesterday in parallel
+      // Scrape today and yesterday in parallel (rate limiter sequentializes actual HTTP)
       const [todayScores, yesterdayScores] = await Promise.all([
         scrapePage(url),
         scrapePage(yesterdayUrl),
@@ -158,7 +166,7 @@ export class LiveScoresStore {
           scoredMatches.map(async (s) => {
             const href = s.href!;
             const detailUrl = href.startsWith('http') ? href : `https://tips.gg${href}`;
-            const html = (await fetchLiveHtml(detailUrl, 1)) || (await fetchHtml(detailUrl, 1).catch(() => null));
+            const html = await fetchLiveHtml(detailUrl, 1); // no Puppeteer fallback
             if (!html) return null;
             const $ = cheerio.load(html);
             const temp = new Map<string, LiveScoreState>();
