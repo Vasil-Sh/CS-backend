@@ -40,14 +40,13 @@ import publicProfileRoutes from './routes/publicProfile';
 import matchesHistoryRoutes from './routes/matchesHistory';
 import { closeBrowser } from './services/tipsggScraper';
 import { fetchDota2Matches, fetchCs2Matches, fetchTodayMatches } from './services/tipsggScraper';
-import { fetchDota2FromOpenDota, fetchLiveMatches } from './services/opendotaClient';
+import { fetchDota2FromOpenDota } from './services/opendotaClient';
 import { join } from 'node:path';
 import { readFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { execSync } from 'node:child_process';
-import { liveScoresStore } from './services/liveScoresStore';
 import { writeFileCacheInternal } from './services/createMatchesRouter';
 import { upsertMatchHistoryBatch } from './services/matchHistoryService';
-import { fetchCstestMatches, cstestLiveScoresStore } from './services/hltv/cstestClient';
+import { fetchCstestMatches } from './services/hltv/cstestClient';
 import { scrapeHltvRankingLogos } from './services/hltv/hltvRankingScraper';
 import { buildLocalLogoStore, loadTipsggLogos, buildDota2LocalStore } from './services/logoStore';
 import { runWithRequestContext } from './utils/requestContext';
@@ -409,70 +408,15 @@ setTimeout(async () => {
   }
 }, 1000);
 
-// ── Live scores background workers ──
-// Dota2: OpenDota /live API only (no Cloudflare, safe, free tier).
-//         tips.gg LiveScoresStore DISABLED — OpenDota is sufficient for Dota2.
-// CS2: cstest API only (no tips.gg overlay).
+// ── Live scores workers REMOVED ──
+// No more live polling. Matches are shown as a static list sorted by time.
+// Incremental refresh (every 120s) keeps scores current in the file cache.
+// Users click through to HLTV/tips.gg for real-time scores.
 //
-// All tips.gg live polling is removed — we rely on safe sources:
-//   Dota2 → OpenDota (15s poll, no CF)
-//   CS2   → cstest (20s poll, HTTP JSON API)
-const TIPSGG_POLL_MS = 20_000;
+// Previously: OpenDota 15s + cstest 20s + tips.gg 20s = ~5 req/min
+// Now: 0 requests for live scores. Only warmup + incremental refresh.
 
-// Dota2: OpenDota-only (liveScoresStore disabled — tips.gg scraper not needed)
-// liveScoresStore.startBackgroundWorker() — removed. OpenDota worker below handles Dota2.
-
-// CS2: cstest-only, no tips.gg overlay
-cstestLiveScoresStore.startBackgroundWorker(TIPSGG_POLL_MS);
-
-// ── OpenDota live scores — light HTTP poll, no Cloudflare ──
-const OPENODOTA_LIVE_INTERVAL = 15_000; // 15s (OpenDota free tier: 60 req/min)
-const openDotaLiveInterval = setInterval(async () => {
-  try {
-    const liveMatches = await fetchLiveMatches();
-    if (liveMatches.length === 0) return;
-
-    // Write live matches into the Dota2 cache file (merge with existing)
-    const cacheFile = join(process.cwd(), '.cache', 'dota2_matches.json');
-    let existing: Record<string, any>[] = [];
-    try {
-      if (existsSync(cacheFile)) {
-        const raw = JSON.parse(readFileSync(cacheFile, 'utf-8'));
-        existing = raw.data || [];
-      }
-    } catch { /* stale cache */ }
-
-    const existingMap = new Map(existing.map((m: any) => [m.id, m]));
-    let updated = 0;
-    for (const lm of liveMatches) {
-      const prev = existingMap.get(lm.id);
-      if (prev) {
-        // Update scores/status for existing match
-        if (prev.score1 !== lm.score1 || prev.score2 !== lm.score2 || prev.status !== lm.status) {
-          prev.score1 = lm.score1;
-          prev.score2 = lm.score2;
-          prev.status = lm.status;
-          updated++;
-        }
-      } else {
-        // Fuzzy dedup: OpenDota and tips.gg use different ID formats.
-        // Check by date + normalized team names to avoid duplicates.
-        const isDuplicate = existing.some((m: any) => isSameMatch(m, lm));
-        if (isDuplicate) continue;
-
-        // New live match — add to cache
-        existing.push(lm as any);
-        existingMap.set(lm.id, lm as any);
-        updated++;
-      }
-    }
-    if (updated > 0) {
-      writeFileCacheInternal(existing, cacheFile);
-    }
-  } catch { /* silent — best effort */ }
-}, OPENODOTA_LIVE_INTERVAL);
-if ('unref' in openDotaLiveInterval) (openDotaLiveInterval as NodeJS.Timeout).unref();
-console.log('[opendota] Live scores worker started (15s)');
+console.log('[live] Live score polling disabled — static match list mode');
 
 // ── HLTV ranking logo scraper — run once at startup ──
 // Fills the in-memory logo map for cstestClient to use as fallback
