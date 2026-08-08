@@ -112,10 +112,17 @@ function cstestToTipsGgMatch(g: CstestGame): TipsGgMatch {
   // Strip " (Online)" / " (LAN)" suffix from type (e.g. "bo3 (Online)" → "BO3")
   const cleanType = g.type.replace(/\s*\(.*\)/i, '').toUpperCase();
 
+  // Build proper HLTV URL using numeric ID (g.id is the HLTV match ID).
+  // g.link sometimes has date-based paths like /matches/counter-strike/.../ that don't work.
+  // Using numeric ID + team slug always works — HLTV redirects correctly.
+  const team1Slug = g.nameTeam1.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  const team2Slug = g.nameTeam2.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  const hltvUrl = `https://www.hltv.org/matches/${g.id}/${team1Slug}-vs-${team2Slug}`;
+
   return {
     id: generateMatchSlug(g.nameTeam1, g.nameTeam2),
     date: g.date.split('T')[0],
-    link: g.link.startsWith('http') ? g.link : `https://www.hltv.org${g.link}`,
+    link: hltvUrl,
     type: cleanType || 'BO3',
     // Use ?? null — but if cstest says 0 and we don't have real scores, set null
     score1: hasRealScore || g.isLive ? (g.score1 ?? null) : null,
