@@ -405,5 +405,6 @@ export class CstestLiveScoresStore {
       clearTimeout(timeout);
     }
   }
+}
 
 export const cstestLiveScoresStore = new CstestLiveScoresStore();
