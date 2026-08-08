@@ -9,9 +9,8 @@
  */
 
 import type { TipsGgMatch } from '../tipsggScraper';
-import { fetchLiveHtml, isBanned } from '../tipsggScraper';
+import { isBanned } from '../tipsggScraper';
 import { isIdle, IDLE_POLL_MS } from '../activityTracker';
-import * as cheerio from 'cheerio';
 import { getHltvLogoCache } from './hltvRankingScraper';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -272,95 +271,41 @@ export class CstestLiveScoresStore {
     };
   }
 
-  // ── Score update: fetch cstest + tips.gg in parallel, merge ──
+  // ── Score update: cstest-only (no tips.gg overlay) ──
   private async updateScores(): Promise<void> {
     if (this.isUpdating) return;
     this.isUpdating = true;
     const t0 = Date.now();
 
     try {
-      // ── Fetch both sources in parallel ──
-      const [cstestResult, tipsggScores] = await Promise.allSettled([
-        this.fetchCstestScores(),
-        this.fetchTipsggScores(),
-      ]);
+      const cstestResult = await this.fetchCstestScores().catch(() => null);
 
-      // ── Build final store ──
       const ns = new Map<string, LiveScoreState>();
 
-      // Primary: cstest provides the match list (coverage)
-      if (cstestResult.status === 'fulfilled' && cstestResult.value) {
-        for (const s of cstestResult.value) {
-          ns.set(s.id, { ...s });
-        }
+      if (cstestResult) {
+        for (const s of cstestResult) ns.set(s.id, { ...s });
         this.cstestFailCount = 0;
       } else {
         this.cstestFailCount++;
-        if (cstestResult.status === 'rejected') {
-          console.warn(`[CstestLiveScoresStore] cstest fetch failed (×${this.cstestFailCount}):`,
-            (cstestResult.reason as Error)?.message);
+        if (this.cstestFailCount >= 3) {
+          console.warn(`[CstestLiveScoresStore] cstest failed ${this.cstestFailCount}× — keeping previous store`);
         }
       }
 
-      // Secondary: tips.gg provides real scores — overlay on cstest entries
-      if (tipsggScores.status === 'fulfilled') {
-        let overlays = 0;
-        let newEntries = 0;
-        for (const ts of tipsggScores.value) {
-          const existing = ns.get(ts.id);
-          if (existing) {
-            // Overlay tips.gg real scores on cstest match if:
-            // - tips.gg has non-null scores (cstest may show 0-0)
-            // - Don't overwrite non-zero cstest scores with null tips.gg scores
-            if (ts.score1 != null) existing.score1 = ts.score1;
-            if (ts.score2 != null) existing.score2 = ts.score2;
-            // Status: trust tips.gg more (they update CSS classes faster)
-            if (ts.status !== 'upcoming') existing.status = ts.status;
-            if (ts.href) existing.href = ts.href;
-            overlays++;
-          } else {
-            // Always add tips.gg entries not found in cstest — these are matches
-            // from tournaments that cstest/HLTV doesn't cover (e.g. Tipsport Open Cup,
-            // CCT Europe). Without them, these matches stay scoreless and the
-            // frontend auto-postpones them after 30 min.
-            ns.set(ts.id, ts);
-            newEntries++;
-          }
-        }
-        this.tipsggFailCount = 0;
-
-        const liveNow = [...ns.values()].filter(s => s.status === 'live').length;
-        if (overlays > 0 || newEntries > 0 || liveNow > 0) {
-          const ms = Date.now() - t0;
-          console.log(
-            `[CstestLiveScoresStore] ${ns.size} matches (${liveNow} live) | ` +
-            `${overlays} scores overlaid from tips.gg` +
-            (newEntries ? ` | +${newEntries} from tips.gg (dead-man)` : '') +
-            ` | ${ms}ms`,
-          );
-        }
-      } else {
-        this.tipsggFailCount++;
-      }
-
-      // Preserve entries from previous store that weren't found in current fetch.
-      // Grace period: 10 min for all entries (handles transient tips.gg failures),
-      // 12 hours for live entries only (cross-midnight matches).
-      const tipsggEmpty = tipsggScores.status !== 'fulfilled' || tipsggScores.value.length === 0;
+      // Preserve entries from previous store if cstest returned nothing
+      const cstestEmpty = !cstestResult || cstestResult.length === 0;
       const now = Date.now();
       for (const [id, s] of this.store) {
         if (!ns.has(id)) {
           if (s.status === 'live' && now - this.lastUpdate < 12 * 60 * 60 * 1000) {
             ns.set(id, s);
-          } else if (tipsggEmpty && now - this.lastUpdate < 10 * 60 * 1000) {
-            // tips.gg returned nothing — keep all entries (not just live) for 10 min
+          } else if (cstestEmpty && now - this.lastUpdate < 10 * 60 * 1000) {
             ns.set(id, s);
           }
         }
       }
 
-      // If both sources failed and store is empty on cold start, seed from cache.
-      // This avoids showing stuck "live" matches with no score updates at all.
+      // Cold start with no data — seed from cache file
       if (ns.size === 0 && this.store.size === 0) {
         try {
           const cacheFile = join(process.cwd(), '.cache', 'cs2_matches.json');
@@ -369,88 +314,24 @@ export class CstestLiveScoresStore {
             const cacheData: TipsGgMatch[] = raw?.data ?? [];
             for (const m of cacheData) {
               if (m.date < new Date().toISOString().split('T')[0]) continue;
-              const s: LiveScoreState = {
+              ns.set(m.id, {
                 id: m.id,
                 score1: m.score1 ?? null,
                 score2: m.score2 ?? null,
                 status: m.status ?? 'upcoming',
-              };
-              ns.set(m.id, s);
+              });
             }
-            if (ns.size > 0) {
-              const liveNow = [...ns.values()].filter(s => s.status === 'live').length;
-              console.log(`[CstestLiveScoresStore] Seeded from cache: ${ns.size} matches (${liveNow} live)`);
-            }
+            if (ns.size > 0) console.log(`[CstestLiveScoresStore] Seeded from cache: ${ns.size} matches`);
           }
         } catch { /* ignore */ }
       }
 
-      // For matches with scores on the date pages, also scrape individual match detail pages.
-      // Date-based archive pages may show stale scores after midnight.
-      // Target: all scored matches (live or finished) — detail page has the real final score.
-      const liveMatches = [...ns.values()].filter(
-        (s) => s.href && s.score1 != null && s.score2 != null,
-      );
-      if (liveMatches.length > 0) {
-        const detailResults = await Promise.allSettled(
-          liveMatches.map(async (s) => {
-            const href = s.href!;
-            const detailUrl = href.startsWith('http') ? href : `https://tips.gg${href}`;
-            const html = await fetchLiveHtml(detailUrl, 1); // no Puppeteer fallback for safety
-            if (!html) return null;
-            const $ = cheerio.load(html);
-            // Parse the single match page
-            const scores: LiveScoreState[] = [];
-            $('.element.match').each((_, el) => {
-              const $m = $(el);
-              let status = 'upcoming';
-              if ($m.hasClass('finished')) status = 'finished';
-              else if ($m.hasClass('live')) status = 'live';
-
-              const href = $m.find('a.match-link').attr('href') || '';
-              const p = href.replace(/\/$/, '').split('/');
-              const id = p[p.length - 2] || p[p.length - 1] || '';
-              if (!id) return;
-
-              const rs: number[] = [];
-              $m.find('.scores .score').each((_, se) => {
-                const v = parseInt($(se).text().trim(), 10);
-                if (!isNaN(v)) rs.push(v);
-              });
-
-              let w1 = 0, w2 = 0;
-              const allLow = rs.length > 0 && rs.every(v => v <= 5);
-              if (allLow) { w1 = rs[0] ?? 0; w2 = rs[1] ?? 0; }
-              else {
-                for (let i = 0; i + 1 < rs.length; i += 2) {
-                  if (rs[i] > rs[i + 1]) w1++;
-                  else if (rs[i + 1] > rs[i]) w2++;
-                }
-              }
-
-              if (status === 'upcoming' && (w1 > 0 || w2 > 0)) status = 'live';
-              if (status === 'live') {
-                const startAttr = $m.attr('data-start') || $m.find('time').attr('datetime') || '';
-                if (startAttr) {
-                  const hoursSinceStart = (Date.now() - new Date(startAttr).getTime()) / 3600000;
-                  if (hoursSinceStart > 4) status = 'finished';
-                }
-              }
-
-              scores.push({ id, score1: rs.length > 0 ? w1 : null, score2: rs.length > 0 ? w2 : null, status });
-            });
-            return scores.length > 0 ? scores[0] : null;
-          }),
-        );
-        for (const result of detailResults) {
-          if (result.status === 'fulfilled' && result.value) {
-            const fresh = result.value;
-            ns.set(fresh.id, fresh);
-          }
-        }
-      }
-
       if (ns.size > 0) {
+        const liveNow = [...ns.values()].filter(s => s.status === 'live').length;
+        const ms = Date.now() - t0;
+        if (liveNow > 0 || cstestEmpty) {
+          console.log(`[CstestLiveScoresStore] ${ns.size} matches (${liveNow} live, cstest-only) | ${ms}ms`);
+        }
         this.lastStore = new Map(this.store);
         this.store = ns;
         this.lastUpdate = Date.now();
@@ -510,111 +391,5 @@ export class CstestLiveScoresStore {
       clearTimeout(timeout);
     }
   }
-
-  // ── Fetch from tips.gg CS2 today + yesterday pages (HTTP, real scores via HTML parsing) ──
-  // Falls back to Puppeteer when Cloudflare blocks fast HTTP.
-  // Also fetches yesterday's page — live matches that started yesterday
-  // still appear there after midnight.
-  private async fetchTipsggScores(): Promise<LiveScoreState[]> {
-    const t0 = Date.now();
-    try {
-      // Skip if tips.gg is in ban cooldown
-      if (isBanned()) return [];
-
-      const today = new Date();
-      const dd = String(today.getDate()).padStart(2, '0');
-      const mm = String(today.getMonth() + 1).padStart(2, '0');
-      const yyyy = today.getFullYear();
-      const url = `https://tips.gg/csgo/matches/${dd}-${mm}-${yyyy}/`;
-
-      const yesterday = new Date(today);
-      yesterday.setDate(yesterday.getDate() - 1);
-      const ydd = String(yesterday.getDate()).padStart(2, '0');
-      const ymm = String(yesterday.getMonth() + 1).padStart(2, '0');
-      const yyyy2 = yesterday.getFullYear();
-      const yesterdayUrl = `https://tips.gg/csgo/matches/${ydd}-${ymm}-${yyyy2}/`;
-
-      const scrapePage = async (pageUrl: string): Promise<LiveScoreState[]> => {
-        const html = await fetchLiveHtml(pageUrl, 1);
-        // No Puppeteer fallback — live polling with browser is too aggressive
-        if (!html || !html.includes('element match')) return [];
-
-        const $ = cheerio.load(html);
-        const result: LiveScoreState[] = [];
-
-        $('.element.match').each((_, el) => {
-          const $m = $(el);
-          let status = 'upcoming';
-          if ($m.hasClass('finished')) status = 'finished';
-          else if ($m.hasClass('live')) status = 'live';
-
-          const href = $m.find('a.match-link').attr('href') || '';
-          const p = href.replace(/\/$/, '').split('/');
-          const id = p[p.length - 2] || p[p.length - 1] || '';
-          if (!id) return;
-
-          const rs: number[] = [];
-          $m.find('.scores .score').each((_, se) => {
-            const v = parseInt($(se).text().trim(), 10);
-            if (!isNaN(v)) rs.push(v);
-          });
-
-          let w1 = 0, w2 = 0;
-          const allLow = rs.length > 0 && rs.every(v => v <= 5);
-          if (allLow) {
-            w1 = rs[0] ?? 0;
-            w2 = rs[1] ?? 0;
-          } else {
-            for (let i = 0; i + 1 < rs.length; i += 2) {
-              if (rs[i] > rs[i + 1]) w1++;
-              else if (rs[i + 1] > rs[i]) w2++;
-            }
-          }
-
-          if (status === 'upcoming' && (w1 > 0 || w2 > 0)) status = 'live';
-
-          if (status === 'live') {
-            const startAttr = $m.attr('data-start') || $m.find('time').attr('datetime') || '';
-            if (startAttr) {
-              const hoursSinceStart = (Date.now() - new Date(startAttr).getTime()) / 3600000;
-              if (hoursSinceStart > 4) status = 'finished';
-            }
-          }
-
-          result.push({
-            id,
-            score1: rs.length > 0 ? w1 : null,
-            score2: rs.length > 0 ? w2 : null,
-            status,
-            href,
-          });
-        });
-        return result;
-      };
-
-      const [todayScores, yesterdayScores] = await Promise.all([
-        scrapePage(url),
-        scrapePage(yesterdayUrl),
-      ]);
-
-      // Merge: today wins for same IDs, yesterday fills gaps
-      const merged = new Map<string, LiveScoreState>();
-      for (const s of yesterdayScores) merged.set(s.id, s);
-      for (const s of todayScores) merged.set(s.id, s);
-
-      const result = [...merged.values()];
-      this.lastTipsggLatency = Date.now() - t0;
-      if (result.length > 0) {
-        const liveNow = result.filter(s => s.status === 'live').length;
-        console.log(`[CstestLiveScoresStore] tips.gg: ${result.length} scores (${liveNow} live, via HTTP/Puppeteer)`);
-      }
-      return result;
-    } catch (err) {
-      console.warn('[CstestLiveScoresStore] tips.gg fetch failed:', (err as Error).message);
-      this.tipsggFailCount++;
-      return [];
-    }
-  }
-}
 
 export const cstestLiveScoresStore = new CstestLiveScoresStore();

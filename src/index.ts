@@ -410,23 +410,20 @@ setTimeout(async () => {
 }, 1000);
 
 // ── Live scores background workers ──
-// Dota2: OpenDota /live API (not behind Cloudflare) — primary
-//         tips.gg scraper kept as backup (rate-limited to avoid bans)
-// CS2: poll cstest API + tips.gg scores
+// Dota2: OpenDota /live API only (no Cloudflare, safe, free tier).
+//         tips.gg LiveScoresStore DISABLED — OpenDota is sufficient for Dota2.
+// CS2: cstest API only (no tips.gg overlay).
 //
-// Rate-limiting strategy for tips.gg:
-//   - Minimum 800ms between all fetchLiveHtml calls (shared limiter)
-//   - Polling interval: 20s (was 7s — too aggressive, triggered CF bans)
-//   - Jitter: ±20% random offset per cycle to avoid predictable patterns
-//   - Staggered startup: Dota2 at 0s, CS2 at 5s offset
+// All tips.gg live polling is removed — we rely on safe sources:
+//   Dota2 → OpenDota (15s poll, no CF)
+//   CS2   → cstest (20s poll, HTTP JSON API)
 const TIPSGG_POLL_MS = 20_000;
 
-liveScoresStore.startBackgroundWorker(TIPSGG_POLL_MS);
+// Dota2: OpenDota-only (liveScoresStore disabled — tips.gg scraper not needed)
+// liveScoresStore.startBackgroundWorker() — removed. OpenDota worker below handles Dota2.
 
-// Stagger CS2 worker by 5s so it doesn't fire simultaneously with Dota2
-setTimeout(() => {
-  cstestLiveScoresStore.startBackgroundWorker(TIPSGG_POLL_MS);
-}, 5_000);
+// CS2: cstest-only, no tips.gg overlay
+cstestLiveScoresStore.startBackgroundWorker(TIPSGG_POLL_MS);
 
 // ── OpenDota live scores — light HTTP poll, no Cloudflare ──
 const OPENODOTA_LIVE_INTERVAL = 15_000; // 15s (OpenDota free tier: 60 req/min)
