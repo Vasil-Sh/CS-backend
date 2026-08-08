@@ -364,16 +364,30 @@ export class CstestLiveScoresStore {
       const result: LiveScoreState[] = [];
       for (const g of raw) {
         const slug = generateMatchSlug(g.nameTeam1, g.nameTeam2);
-        let status = 'upcoming';
-        if (g.isLive) status = 'live';
-        else if (g.score1 > 0 || g.score2 > 0) {
+        const s1 = g.score1 ?? 0;
+        const s2 = g.score2 ?? 0;
+
+        // Detect finished matches even when cstest still reports isLive=true.
+        // Score-decided takes priority over isLive flag.
+        const winsNeeded = g.type === 'BO5' ? 3 : g.type === 'BO1' ? 1 : 2;
+        const maxScore = Math.max(s1, s2);
+        const isScoreDecided =
+          maxScore >= winsNeeded &&
+          Math.abs(s1 - s2) >= (g.type === 'BO1' ? 0 : 1);
+
+        let status: string;
+        if (isScoreDecided) {
+          status = 'finished';
+        } else if (g.isLive) {
+          status = 'live';
+        } else if (s1 > 0 || s2 > 0) {
           const matchTime = new Date(g.date).getTime();
           const hoursAgo = (Date.now() - matchTime) / (1000 * 60 * 60);
           status = hoursAgo > 2 ? 'finished' : 'live';
         } else {
           const matchTime = new Date(g.date).getTime();
           const hoursAgo = (Date.now() - matchTime) / (1000 * 60 * 60);
-          if (hoursAgo > 4) status = 'finished';
+          status = hoursAgo > 4 ? 'finished' : 'upcoming';
         }
 
         result.push({
