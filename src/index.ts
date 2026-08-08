@@ -301,14 +301,14 @@ function persistFinishedToHistory(
 // ── Seed: persist all finished matches from existing caches to DB on startup ──
 setTimeout(() => {
   for (const [file, game] of [
-    [join(process.cwd(), '.cache', 'dota2_matches.json'), 'dota2' as const],
-    [join(process.cwd(), '.cache', 'cs2_matches.json'), 'cs2' as const],
-  ]) {
+    [join(process.cwd(), '.cache', 'dota2_matches.json'), 'dota2'] as const,
+    [join(process.cwd(), '.cache', 'cs2_matches.json'), 'cs2'] as const,
+  ] as const) {
     try {
       if (!existsSync(file)) continue;
       const raw = JSON.parse(readFileSync(file, 'utf-8'));
       const items: any[] = raw.data || [];
-      persistFinishedToHistory(items, game, `seed:${game}`);
+      persistFinishedToHistory(items, game, `seed:${String(game)}`);
     } catch { /* best effort */ }
   }
 }, 3_000);
@@ -632,6 +632,58 @@ setTimeout(() => {
     startIncrementalRefresh('cs2', join(process.cwd(), '.cache', 'cs2_matches.json'), 'cs2');
   }, 5_000);
 }, 5_000);
+
+// ── Periodic full refresh: re-scrape 8-day window every 4 hours ──
+// Catches new matches for future days that the 120s incremental refresh
+// (today-only) would miss. Uses tips.gg for Dota2, cstest for CS2.
+const FULL_REFRESH_MS = 4 * 60 * 60 * 1000; // 4 hours
+
+function startFullRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: string): void {
+  const tick = async () => {
+    if (isBanned()) {
+      // Skip if banned — try again in 4h
+      setTimeout(tick, FULL_REFRESH_MS).unref();
+      return;
+    }
+    try {
+      const fetchFn = game === 'dota2' ? fetchDota2Matches : fetchCs2Matches;
+      const fresh = await fetchFn();
+      if (fresh && fresh.length > 0) {
+        // Merge: don't lose cstest entries for CS2
+        if (game === 'cs2') {
+          let existing: any[] = [];
+          try {
+            if (existsSync(cacheFile)) {
+              const raw = JSON.parse(readFileSync(cacheFile, 'utf-8'));
+              existing = raw.data || [];
+            }
+          } catch { /* stale */ }
+          const merged = new Map<string, any>(existing.map((m: any) => [m.id, m]));
+          for (const m of fresh) merged.set(m.id, m);
+          writeFileCacheInternal([...merged.values()], cacheFile);
+          persistFinishedToHistory([...merged.values()], game, `full-refresh:${tag}`);
+          console.log(`[full-refresh] ${tag}: ${fresh.length} fresh merged into ${merged.size} total`);
+        } else {
+          writeFileCacheInternal(fresh, cacheFile);
+          persistFinishedToHistory(fresh, game, `full-refresh:${tag}`);
+          console.log(`[full-refresh] ${tag}: ${fresh.length} matches`);
+        }
+      }
+    } catch (err) {
+      console.warn(`[full-refresh] ${tag} failed:`, (err as Error).message);
+    }
+    setTimeout(tick, FULL_REFRESH_MS).unref();
+  };
+  setTimeout(tick, 60_000).unref(); // first run 1min after startup
+  console.log(`[full-refresh] ${tag}: periodic 4h full scan registered`);
+}
+
+setTimeout(() => {
+  startFullRefresh('dota2', join(process.cwd(), '.cache', 'dota2_matches.json'), 'dota2');
+  setTimeout(() => {
+    startFullRefresh('cs2', join(process.cwd(), '.cache', 'cs2_matches.json'), 'cs2');
+  }, 10_000);
+}, 10_000);
 
 // ── Graceful shutdown ──
 const shutdown = async (signal: string) => {

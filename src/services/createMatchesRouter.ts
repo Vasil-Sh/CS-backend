@@ -281,11 +281,67 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
     );
   }
 
-  async function getMatchesWithSWR(): Promise<{ data: TipsGgMatch[]; fromCache: boolean }> {
+  /** Persist ALL finished matches (not just new ones) — used after full re-scrape. */
+  function syncFinishedToHistory(matches: TipsGgMatch[]): void {
+    const finished = matches
+      .filter(m => m.status === 'finished')
+      .map(m => ({
+        id: m.id,
+        game: cfg.game,
+        team1: m.nameTeam1,
+        team2: m.nameTeam2,
+        date: m.date,
+        score1: m.score1 ?? 0,
+        score2: m.score2 ?? 0,
+        status: 'finished' as const,
+        tournament: m.tournament || m.stage || '',
+        matchType: m.type,
+        logoTeam1: m.logoTeam1,
+        logoTeam2: m.logoTeam2,
+      }));
+    if (finished.length > 0) {
+      upsertMatchHistoryBatch(finished).catch(e =>
+        console.error(`[${prefix}Matches] History sync failed:`, (e as Error).message),
+      );
+    }
+  }
+
+  async function getMatchesWithSWR(forceRefresh = false): Promise<{ data: TipsGgMatch[]; fromCache: boolean }> {
     // Always read from disk — memCache can be stale when incremental refresh
     // updates the file without going through this function.
     memCache.delete(cacheFile);
     const memResult = readFileCache<TipsGgMatch[]>(CACHE_TTL_FRESH, cacheFile);
+
+    // If user explicitly requested refresh, force a full re-scrape.
+    // Skip all cache checks — trigger background fetch immediately.
+    if (forceRefresh) {
+      const state = getRefreshState(cacheFile);
+      if (!state.lock) {
+        state.lock = true;
+        state.promise = fetchFn()
+          .then(matches => {
+            if (matches.length > 0) {
+              writeFileCacheInternal(matches, cacheFile);
+              syncFinishedToHistory(matches);
+            }
+            return matches;
+          })
+          .catch(err => {
+            console.error(`[${prefix}Matches] Force refresh failed:`, (err as Error).message);
+            recordFailure(circuitBreakerName);
+            return null;
+          })
+          .finally(() => { state.promise = null; state.lock = false; });
+      }
+      // Return current cache while refresh runs in background
+      if (memResult) {
+        persistFinishedIfNeeded(memResult.data, cfg);
+        return { data: memResult.data, fromCache: true };
+      }
+      // No cache at all — serve empty, refresh will populate
+      console.log(`[${prefix}Matches] Force refresh — serving current data, full scrape in background`);
+      return { data: [], fromCache: false };
+    }
 
     // Cache is fresh (<1h) — serve immediately, no network requests.
     if (memResult && !memResult.stale) {
@@ -354,8 +410,11 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
         });
     }
 
-    if (memResult) {
-      return { data: memResult.data, fromCache: true };
+    // Re-check: background fetch may have completed and written cache
+    const recheck = readFileCache<TipsGgMatch[]>(CACHE_TTL_STALE, cacheFile);
+    if (recheck) {
+      persistFinishedIfNeeded(recheck.data, cfg);
+      return { data: recheck.data, fromCache: true };
     }
 
     // Cold start: wait for initial fetch to complete (up to 15s) so the first
@@ -371,9 +430,9 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
           if (fresh && fresh.length > 0) return { data: fresh, fromCache: false };
         } catch { /* fall through */ }
       }
-      // Re-check: refresh may have completed and written cache between checks
-      const recheck = readFileCache<TipsGgMatch[]>(CACHE_TTL_STALE, cacheFile);
-      if (recheck) return { data: recheck.data, fromCache: true };
+      // After waiting, refresh may have completed and written cache
+      const recheck2 = readFileCache<TipsGgMatch[]>(CACHE_TTL_STALE, cacheFile);
+      if (recheck2) return { data: recheck2.data, fromCache: true };
       console.log(`[${prefix}Matches] Cold start — serving empty, refresh runs in background`);
       return { data: [], fromCache: false };
     }
@@ -398,7 +457,7 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       // Track user activity — signals to live score workers that someone is watching.
       // Workers reduce polling frequency when idle to save tips.gg requests.
       touchActivity();
-      const { data, fromCache } = await getMatchesWithSWR();
+      const { data, fromCache } = await getMatchesWithSWR(forceRefresh);
 
       // ── Overlay live scores on match list ──
       // Live scores from the in-memory store are at most 7s old and correctly
