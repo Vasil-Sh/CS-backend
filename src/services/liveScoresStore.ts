@@ -139,6 +139,10 @@ export class LiveScoresStore {
         scrapePage(yesterdayUrl),
       ]);
 
+      // If BOTH pages returned empty (Cloudflare, network, rate limit), keep previous
+      // store intact. Don't replace 19 matches with 3 orphaned live entries.
+      if (todayScores.size === 0 && yesterdayScores.size === 0) return;
+
       // Merge: today wins for same IDs, yesterday fills gaps
       const ns = new Map<string, LiveScoreState>();
       for (const [id, s] of yesterdayScores) ns.set(id, s);

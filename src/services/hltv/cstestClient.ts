@@ -343,14 +343,17 @@ export class CstestLiveScoresStore {
         this.tipsggFailCount++;
       }
 
-      // Preserve live entries from previous store that weren't found in current fetch
-      // (e.g., cross-midnight live matches not yet finished).
-      // Only keep entries from today or yesterday — clean up stale ones.
+      // Preserve entries from previous store that weren't found in current fetch.
+      // Grace period: 10 min for all entries (handles transient tips.gg failures),
+      // 12 hours for live entries only (cross-midnight matches).
+      const tipsggEmpty = tipsggScores.status !== 'fulfilled' || tipsggScores.value.length === 0;
       const now = Date.now();
       for (const [id, s] of this.store) {
-        if (!ns.has(id) && s.status === 'live') {
-          // Don't preserve orphan live entries older than 12 hours
-          if (now - this.lastUpdate < 12 * 60 * 60 * 1000) {
+        if (!ns.has(id)) {
+          if (s.status === 'live' && now - this.lastUpdate < 12 * 60 * 60 * 1000) {
+            ns.set(id, s);
+          } else if (tipsggEmpty && now - this.lastUpdate < 10 * 60 * 1000) {
+            // tips.gg returned nothing — keep all entries (not just live) for 10 min
             ns.set(id, s);
           }
         }
