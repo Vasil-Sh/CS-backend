@@ -40,7 +40,6 @@ import publicProfileRoutes from './routes/publicProfile';
 import matchesHistoryRoutes from './routes/matchesHistory';
 import { closeBrowser } from './services/tipsggScraper';
 import { fetchDota2Matches, fetchCs2Matches, fetchTodayMatches } from './services/tipsggScraper';
-import { fetchDota2FromOpenDota } from './services/opendotaClient';
 import { join } from 'node:path';
 import { readFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { execSync } from 'node:child_process';
@@ -228,8 +227,7 @@ const port = parseInt(process.env.PORT || '3001', 10);
 console.log(`🚀 MatchIQ API server starting on http://localhost:${port}`);
 
 // ── Cache warmup: pre-fetch Dota2 matches in background ──
-// Strategy: try tips.gg first, fallback to OpenDota if blocked (0 matches).
-// OpenDota is NOT behind Cloudflare — serves as reliable backup.
+// Uses tips.gg scraper.
 //
 // SKIP warmup if today's cache already exists on disk — incremental refresh
 // will fill any gaps. Avoids a full 8-day scrape on every restart.
@@ -255,17 +253,9 @@ setTimeout(async () => {
       console.log(`[warmup] Dota2 cache primed: ${tipsggMatches.length} matches (tips.gg)`);
       return;
     }
-    console.warn('[warmup] tips.gg returned 0 Dota2 matches — falling back to OpenDota');
+    console.warn('[warmup] tips.gg returned 0 Dota2 matches');
   } catch (e) {
-    console.warn('[warmup] Dota2 tips.gg fetch failed:', (e as Error).message, '— falling back to OpenDota');
-  }
-  try {
-    const odMatches = await fetchDota2FromOpenDota();
-    writeFileCacheInternal(odMatches, cacheFile);
-    persistFinishedToHistory(odMatches, 'dota2', 'warmup:dota2-od');
-    console.log(`[warmup] Dota2 cache primed: ${odMatches.length} matches (OpenDota)`);
-  } catch (e) {
-    console.warn('[warmup] Dota2 OpenDota fetch also failed:', (e as Error).message);
+    console.warn('[warmup] Dota2 tips.gg fetch failed:', (e as Error).message);
   }
 }, 500);
 
@@ -313,7 +303,7 @@ setTimeout(() => {
   }
 }, 3_000);
 
-// ── Dedup existing caches on startup (fix stale duplicates from OpenDota) ──
+// ── Dedup existing caches on startup ──
 function dedupCache(cacheFile: string, tag: string): void {
   try {
     if (!existsSync(cacheFile)) return;
@@ -413,7 +403,6 @@ setTimeout(async () => {
 // Incremental refresh (every 120s) keeps scores current in the file cache.
 // Users click through to HLTV/tips.gg for real-time scores.
 //
-// Previously: OpenDota 15s + cstest 20s + tips.gg 20s = ~5 req/min
 // Now: 0 requests for live scores. Only warmup + incremental refresh.
 
 console.log('[live] Live score polling disabled — static match list mode');

@@ -1073,8 +1073,7 @@ function triggerBanCooldown(): void {
     _fallbackUntil = nextMorningTs();
     const hours = Math.round((_fallbackUntil - Date.now()) / 3600000);
     console.warn(
-      `[tipsgg] Cloudflare ban detected — fallback-only mode until 6am UTC (${hours}h). ` +
-      `Using cstest/OpenDota until then.`,
+      `[tipsgg] Cloudflare ban detected — fallback-only mode until 6am UTC (${hours}h). `
     );
   }
 }
