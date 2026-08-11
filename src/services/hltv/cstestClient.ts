@@ -97,11 +97,11 @@ function cstestToTipsGgMatch(g: CstestGame): TipsGgMatch {
   const hoursAgo = (now - matchTime) / (1000 * 60 * 60);
 
   // SC parser only scrapes listing page — it returns score 0 for finished matches
-  // that it hasn't visited. Detect finished matches: not live + started >2h ago.
-  // CS2 BO3 rarely exceeds 2h; even BO5 OT wraps up under 4h. 2h is the sweet spot
-  // — short enough to catch all finished, long enough to not flag delayed starts.
+  // that it hasn't visited. Detect finished matches: not live + started beyond format
+  // max duration. CS2: BO1≈2h, BO3≈3h, BO5≈5h.
   const hasRealScore = g.score1 > 0 || g.score2 > 0;
-  const isFinished = !g.isLive && (hasRealScore || hoursAgo > 2);
+  const maxHours = g.type === 'BO5' ? 5 : g.type === 'BO1' ? 2 : 3;
+  const isFinished = !g.isLive && (hasRealScore || hoursAgo > maxHours);
 
   const status: 'upcoming' | 'live' | 'finished' = isFinished
     ? 'finished'
@@ -392,11 +392,15 @@ export class CstestLiveScoresStore {
         } else if (s1 > 0 || s2 > 0) {
           const matchTime = new Date(g.date).getTime();
           const hoursAgo = (Date.now() - matchTime) / (1000 * 60 * 60);
-          status = hoursAgo > 2 ? 'finished' : 'live';
+          // Format-dependent: Bo1→2h, Bo5→5h, Bo3→3h
+          const maxH = g.type === 'BO5' ? 5 : g.type === 'BO1' ? 2 : 3;
+          status = hoursAgo > maxH ? 'finished' : 'live';
         } else {
           const matchTime = new Date(g.date).getTime();
           const hoursAgo = (Date.now() - matchTime) / (1000 * 60 * 60);
-          status = hoursAgo > 4 ? 'finished' : 'upcoming';
+          // No scores at all: shorter thresholds (match likely cancelled/postponed)
+          const maxH = g.type === 'BO5' ? 5 : g.type === 'BO1' ? 1.5 : 3;
+          status = hoursAgo > maxH ? 'finished' : 'upcoming';
         }
 
         result.push({

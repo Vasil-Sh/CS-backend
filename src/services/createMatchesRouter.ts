@@ -483,14 +483,30 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
 
       // ── Safety net: auto-timeout stuck "live" / fix falsely "finished" matches ──
       const now = Date.now();
-      const STUCK_LIVE_MS = 6 * 60 * 60 * 1000; // 6 hours (safe for CS2 BO5 + OT)
       const todayStr = new Date().toISOString().split('T')[0];
+      // Format-dependent max durations: Bo1=2h, Bo3=3h, Bo5=5h, unknown=4h
+      const getMaxHours = (type: string): number => {
+        if (/bo5/i.test(type)) return 5;
+        if (/bo3/i.test(type)) return 3;
+        if (/bo1/i.test(type)) return 2;
+        return 4;
+      };
+      // Score-decided thresholds (slightly before timeout to catch decided matches early):
+      // Bo1=1.5h, Bo3=2.5h, Bo5=4h
+      const getScoreDecidedHours = (type: string): number => {
+        if (/bo5/i.test(type)) return 4;
+        if (/bo3/i.test(type)) return 2.5;
+        return 1.5;
+      };
       for (const m of data) {
         const hasStartDate = !!(m as any).startDate;
         const startTs = hasStartDate
           ? new Date((m as any).startDate).getTime()
           : new Date(m.date + 'T00:00:00Z').getTime();
         const msSinceStart = now - startTs;
+        const hoursSinceStart = msSinceStart / (1000 * 60 * 60);
+        const matchType = (m as any).type || (m as any).format || '';
+        const maxHours = getMaxHours(matchType);
 
         if (m.status === 'live') {
           // If the match is from a previous day, it's definitely finished
@@ -499,29 +515,31 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
             continue;
           }
           if (!isNaN(startTs)) {
-            // Score-based auto-finish: if the score is decided (BO3: 2-0, 2-1, etc.)
-            // and match started >2h ago, it's definitely finished.
             const s1 = m.score1 ?? 0;
             const s2 = m.score2 ?? 0;
             const maxScore = Math.max(s1, s2);
-            const isBo3Plus = /bo[3-9]/i.test((m as any).type || (m as any).format || '');
-            const isBo1 = /bo1/i.test((m as any).type || (m as any).format || '');
+            const isBo3Plus = /bo[3-9]/i.test(matchType);
+            const isBo1 = /bo1/i.test(matchType);
+            const isBo5 = /bo5/i.test(matchType);
             const scoreDecided = isBo1 ? (s1 + s2 >= 1 && Math.abs(s1 - s2) >= 1)
-              : isBo3Plus ? maxScore >= 2
-              : maxScore >= 2; // BO2: 2-0 decided, 1-1 draw possible
+              : isBo3Plus ? (isBo5 ? maxScore >= 3 : maxScore >= 2)
+              : maxScore >= 2;
             const hasScores = s1 > 0 || s2 > 0;
 
-            if (hasScores && scoreDecided && msSinceStart > 2 * 60 * 60 * 1000) {
+            // Score-decided + enough time passed → auto-finish
+            const scoreDecidedHours = getScoreDecidedHours(matchType);
+            if (hasScores && scoreDecided && hoursSinceStart > scoreDecidedHours) {
               m.status = 'finished';
               continue;
             }
 
-            if (hasStartDate && msSinceStart > STUCK_LIVE_MS) {
+            // Format-dependent hard timeout (with or without scores)
+            if (hasStartDate && hoursSinceStart > maxHours) {
               m.status = 'finished';
-            } else if (!hasStartDate && msSinceStart > 8 * 60 * 60 * 1000) {
-              m.status = 'finished';
-            } else if (hasStartDate && msSinceStart > 30 * 60 * 1000) {
-              // Auto-postponed: live match with no scores 30min past start
+            } else if (!hasStartDate && hoursSinceStart > maxHours * 1.5) {
+              m.status = 'finished'; // no startDate = less precise, give 50% more time
+            } else if (hasStartDate && hoursSinceStart > 0.5) {
+              // Auto-cancelled: live match with no scores 30min past start
               if (!hasScores) {
                 m.status = 'finished'; // effectively cancelled — won't play today
               }
@@ -529,15 +547,15 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
           }
         } else if (m.status === 'finished' && m.date >= todayStr) {
           // Reverse safety net: a "finished" match on today that started recently
-          // is almost certainly still live (source dropped it between BO3 maps).
-          if (!isNaN(startTs) && msSinceStart > 0 && msSinceStart < STUCK_LIVE_MS) {
+          // is almost certainly still live (source dropped it between maps).
+          if (!isNaN(startTs) && hoursSinceStart > 0 && hoursSinceStart < maxHours) {
             const s1 = m.score1 ?? 0;
             const s2 = m.score2 ?? 0;
             const maxScore = Math.max(s1, s2);
-            // BO3+: max < 2 means match not finished yet (1-0, 0-1, 1-1)
-            // BO1: always re-check (0-0 after start is suspicious)
-            const isBo3Plus = /bo[3-9]/i.test((m as any).type || (m as any).format || '');
-            if (isBo3Plus ? maxScore < 2 : maxScore === 0) {
+            const isBo5 = /bo5/i.test(matchType);
+            const isBo3Plus = /bo[3-9]/i.test(matchType);
+            // BO5: max < 3 means not finished; BO3: max < 2; BO1: score=0 suspicious
+            if (isBo5 ? maxScore < 3 : isBo3Plus ? maxScore < 2 : maxScore === 0) {
               m.status = 'live';
             }
           }

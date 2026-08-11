@@ -233,7 +233,7 @@ export class LiveScoresStore {
         const startAttr = $m.attr('data-start') || $m.find('time').attr('datetime') || '';
         if (startAttr) {
           const hoursSinceStart = (Date.now() - new Date(startAttr).getTime()) / 3600000;
-          if (hoursSinceStart > 4) status = 'finished';
+          if (hoursSinceStart > 5) status = 'finished'; // conservative blanket timeout
         }
       }
 
