@@ -484,19 +484,19 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       // ── Safety net: auto-timeout stuck "live" / fix falsely "finished" matches ──
       const now = Date.now();
       const todayStr = new Date().toISOString().split('T')[0];
-      // Format-dependent max durations: Bo1=2h, Bo3=3h, Bo5=5h, unknown=4h
+      // Format-dependent max durations: Bo1=1.5h, Bo3=3h, Bo5=5h, unknown=4h
       const getMaxHours = (type: string): number => {
         if (/bo5/i.test(type)) return 5;
         if (/bo3/i.test(type)) return 3;
-        if (/bo1/i.test(type)) return 2;
+        if (/bo1/i.test(type)) return 1.5;
         return 4;
       };
       // Score-decided thresholds (slightly before timeout to catch decided matches early):
-      // Bo1=1.5h, Bo3=2.5h, Bo5=4h
+      // Bo1=1h, Bo3=2.5h, Bo5=4h
       const getScoreDecidedHours = (type: string): number => {
         if (/bo5/i.test(type)) return 4;
         if (/bo3/i.test(type)) return 2.5;
-        return 1.5;
+        return 1; // Bo1
       };
       for (const m of data) {
         const hasStartDate = !!(m as any).startDate;
