@@ -141,6 +141,8 @@ function cstestToTipsGgMatch(g: CstestGame): TipsGgMatch {
     pred2: g.predictionPercentTeam2 ?? 50,
     coeff1: g.bettingCoefficientTeam1 ?? null,
     coeff2: g.bettingCoefficientTeam2 ?? null,
+    positionTeam1: g.positionTeam1 ?? null,
+    positionTeam2: g.positionTeam2 ?? null,
   };
 }
 

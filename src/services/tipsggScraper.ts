@@ -37,6 +37,8 @@ export interface TipsGgMatch {
   pred2: number;
   coeff1: number | null; // real bookmaker coefficient from predictions page
   coeff2: number | null;
+  positionTeam1: number | null; // HLTV ranking position
+  positionTeam2: number | null;
 }
 
 interface JsonLdSportsEvent {
@@ -318,6 +320,8 @@ export async function parseMatchesFromHtml(html: string, game: 'dota2' | 'cs2' =
         pred2: 100 - pred1,
         coeff1: null,
         coeff2: null,
+        positionTeam1: null,
+        positionTeam2: null,
       });
     } catch (err) {
       // Log malformed entries for debugging
@@ -565,6 +569,8 @@ export async function fetchMatchDetail(matchUrl: string, game: 'dota2' | 'cs2' =
     pred2: 100 - pred1,
     coeff1: null,
     coeff2: null,
+    positionTeam1: null,
+    positionTeam2: null,
   };
 
   // Try to enrich with real coefficients (best-effort, don't fail on error)
