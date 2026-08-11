@@ -98,9 +98,9 @@ function cstestToTipsGgMatch(g: CstestGame): TipsGgMatch {
 
   // SC parser only scrapes listing page — it returns score 0 for finished matches
   // that it hasn't visited. Detect finished matches: not live + started beyond format
-  // max duration. CS2: BO1≈1.5h, BO3≈3h, BO5≈5h.
+  // max duration. CS2: BO1≈1h, BO3≈2.5h, BO5≈4.5h.
   const hasRealScore = g.score1 > 0 || g.score2 > 0;
-  const maxHours = g.type === 'BO5' ? 5 : g.type === 'BO1' ? 1.5 : 3;
+  const maxHours = g.type === 'BO5' ? 4.5 : g.type === 'BO1' ? 1 : 2.5;
   const isFinished = !g.isLive && (hasRealScore || hoursAgo > maxHours);
 
   const status: 'upcoming' | 'live' | 'finished' = isFinished
@@ -392,14 +392,14 @@ export class CstestLiveScoresStore {
         } else if (s1 > 0 || s2 > 0) {
           const matchTime = new Date(g.date).getTime();
           const hoursAgo = (Date.now() - matchTime) / (1000 * 60 * 60);
-          // Format-dependent: Bo1→1.5h, Bo5→5h, Bo3→3h
-          const maxH = g.type === 'BO5' ? 5 : g.type === 'BO1' ? 1.5 : 3;
+          // Format-dependent: Bo1→1h, Bo5→4.5h, Bo3→2.5h
+          const maxH = g.type === 'BO5' ? 4.5 : g.type === 'BO1' ? 1 : 2.5;
           status = hoursAgo > maxH ? 'finished' : 'live';
         } else {
           const matchTime = new Date(g.date).getTime();
           const hoursAgo = (Date.now() - matchTime) / (1000 * 60 * 60);
           // No scores at all: shorter thresholds (match likely cancelled/postponed)
-          const maxH = g.type === 'BO5' ? 5 : g.type === 'BO1' ? 1.5 : 3;
+          const maxH = g.type === 'BO5' ? 4.5 : g.type === 'BO1' ? 1 : 2.5;
           status = hoursAgo > maxH ? 'finished' : 'upcoming';
         }
 

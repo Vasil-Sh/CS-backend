@@ -13,6 +13,7 @@ import { recordFailure } from '../services/circuitBreaker';
 import type { ILiveScoresStore } from '../services/liveScoresStore';
 import { upsertMatchHistoryBatch } from '../services/matchHistoryService';
 import { getHltvLogoCache } from '../services/hltv/hltvRankingScraper';
+import { batchComputeTeamForms } from './teamFormService';
 import { lookupLocalLogo, getLocalLogoDir, lookupTipsggLogo, lookupDota2LocalLogo, getDota2LogoDir } from '../services/logoStore';
 import { touchActivity } from './activityTracker';
 
@@ -31,6 +32,10 @@ const CACHE_DIR = join(process.cwd(), '.cache');
 
 // ── Logo download queue — limit concurrent Puppeteer fetches ──
 const logoDownloadsInFlight = new Map<string, { promise: Promise<Buffer>; ts: number }>();
+
+// ── Team form cache — in-memory cache of computed team forms ──
+import type { TeamFormResult } from './teamFormService';
+const teamFormCache = new Map<string, { data: Map<string, TeamFormResult>; ts: number }>();
 
 async function fetchAndCacheLogo(cdnUrl: string, cacheFile: string): Promise<Buffer> {
   // Deduplicate concurrent requests for the same file
@@ -484,19 +489,19 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       // ── Safety net: auto-timeout stuck "live" / fix falsely "finished" matches ──
       const now = Date.now();
       const todayStr = new Date().toISOString().split('T')[0];
-      // Format-dependent max durations: Bo1=1.5h, Bo3=3h, Bo5=5h, unknown=4h
+      // Format-dependent max durations: Bo1=1h, Bo3=2.5h, Bo5=4.5h, unknown=4h
       const getMaxHours = (type: string): number => {
-        if (/bo5/i.test(type)) return 5;
-        if (/bo3/i.test(type)) return 3;
-        if (/bo1/i.test(type)) return 1.5;
+        if (/bo5/i.test(type)) return 4.5;
+        if (/bo3/i.test(type)) return 2.5;
+        if (/bo1/i.test(type)) return 1;
         return 4;
       };
       // Score-decided thresholds (slightly before timeout to catch decided matches early):
-      // Bo1=1h, Bo3=2.5h, Bo5=4h
+      // Bo1=0.5h, Bo3=2h, Bo5=3.5h
       const getScoreDecidedHours = (type: string): number => {
-        if (/bo5/i.test(type)) return 4;
-        if (/bo3/i.test(type)) return 2.5;
-        return 1; // Bo1
+        if (/bo5/i.test(type)) return 3.5;
+        if (/bo3/i.test(type)) return 2;
+        return 0.5; // Bo1
       };
       for (const m of data) {
         const hasStartDate = !!(m as any).startDate;
@@ -578,6 +583,33 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
         m.logoTeam2 = m.logoTeam2 ? proxyLogoUrl(m.logoTeam2, prefix) : generateLogoFallback(m.nameTeam2, prefix);
       }
 
+      // ── Enrich with team form data from match history ──
+      // Uses cached form data computed from a previous request or background job.
+      // First request after cold start won't have forms — they'll appear on next refresh.
+      const cachedForm = teamFormCache.get(game);
+      if (cachedForm && Date.now() - cachedForm.ts < 120_000) {
+        for (const m of filtered) {
+          (m as any).formTeam1 = cachedForm.data.get(String(m.nameTeam1))?.form ?? 'unknown';
+          (m as any).formTeam2 = cachedForm.data.get(String(m.nameTeam2))?.form ?? 'unknown';
+        }
+      }
+
+      // Trigger background form computation for the next request
+      if (!cachedForm || Date.now() - cachedForm.ts > 60_000) {
+        const allTeams = new Set<string>();
+        for (const m of filtered) {
+          if (m.nameTeam1) allTeams.add(String(m.nameTeam1));
+          if (m.nameTeam2) allTeams.add(String(m.nameTeam2));
+        }
+        const teams = [...allTeams];
+        batchComputeTeamForms(teams, game).then(formMap => {
+          teamFormCache.set(game, { data: formMap, ts: Date.now() });
+          console.log(`[${prefix}Matches] Forms cached for ${formMap.size} teams`);
+        }).catch(err => {
+          console.error(`[${prefix}Matches] Form computation failed:`, (err as Error).message);
+        });
+      }
+
       c.header('X-Cache', fromCache ? 'HIT' : 'MISS');
       c.header('Cache-Control', `public, max-age=${CACHE_TTL_FRESH / 1000}`);
       return c.json(filtered);
@@ -585,6 +617,27 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       const message = err instanceof Error ? err.message : 'Unknown error';
       console.error(`[${prefix}Matches] Scrape failed:`, message);
       return c.json({ error: `Failed to fetch ${gameLabel} matches`, detail: message }, 502);
+    }
+  });
+
+  // ── POST /team-forms — compute form stability for a list of team names ──
+  router.post('/team-forms', async (c) => {
+    try {
+      const body = await c.req.json();
+      const teams: string[] = Array.isArray(body.teams) ? body.teams : [];
+      if (teams.length === 0) {
+        return c.json({ error: 'No team names provided' }, 400);
+      }
+      const formMap = await batchComputeTeamForms(teams, game);
+      const result: Record<string, TeamFormResult> = {};
+      for (const [name, form] of formMap) {
+        result[name] = form;
+      }
+      return c.json(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      console.error(`[${prefix}Matches] Team forms failed:`, message);
+      return c.json({ error: message }, 500);
     }
   });
 
