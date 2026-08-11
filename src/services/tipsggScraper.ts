@@ -274,7 +274,7 @@ export async function parseMatchesFromHtml(html: string, game: 'dota2' | 'cs2' =
       // Date-based safety override: if HTML says "live" but match started too long ago,
       // it's probably finished. Threshold depends on game + format:
       //   CS2:   BO1=1h, BO3=2.5h, BO5=4.5h
-      //   Dota2: BO1=1h, BO3=3h, BO5=5.5h
+      //   Dota2: BO1=1h, BO3=3.5h, BO5=5.5h
       // Only auto-finish if scores confirm it (score decided) OR there are no scores
       // (stale HTML). If scores show an undecided match (e.g. BO3 1:1), keep "live".
       if (status === 'live') {
@@ -284,7 +284,7 @@ export async function parseMatchesFromHtml(html: string, game: 'dota2' | 'cs2' =
           const isCs2 = game === 'cs2';
           const maxHours = matchType === 'BO1' ? 1
             : matchType === 'BO5' ? (isCs2 ? 4.5 : 5.5)
-            : (isCs2 ? 2.5 : 3); // BO3 default
+            : (isCs2 ? 2.5 : 3.5); // BO3 default
 
           if (hoursSinceStart > maxHours && (!hasScores || isScoreDecided)) {
             status = 'finished';

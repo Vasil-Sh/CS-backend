@@ -489,18 +489,21 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       // ── Safety net: auto-timeout stuck "live" / fix falsely "finished" matches ──
       const now = Date.now();
       const todayStr = new Date().toISOString().split('T')[0];
-      // Format-dependent max durations: Bo1=1h, Bo3=2.5h, Bo5=4.5h, unknown=4h
+      // Format-dependent max durations:
+      //   CS2:   Bo1=1h, Bo3=2.5h, Bo5=4.5h
+      //   Dota2: Bo1=1h, Bo3=3.5h, Bo5=5.5h
       const getMaxHours = (type: string): number => {
-        if (/bo5/i.test(type)) return 4.5;
-        if (/bo3/i.test(type)) return 2.5;
+        if (/bo5/i.test(type)) return game === 'dota2' ? 5.5 : 4.5;
+        if (/bo3/i.test(type)) return game === 'dota2' ? 3.5 : 2.5;
         if (/bo1/i.test(type)) return 1;
         return 4;
       };
-      // Score-decided thresholds (slightly before timeout to catch decided matches early):
-      // Bo1=0.5h, Bo3=2h, Bo5=3.5h
+      // Score-decided thresholds:
+      //   CS2:   Bo1=0.5h, Bo3=2h, Bo5=3.5h
+      //   Dota2: Bo1=0.5h, Bo3=2.5h, Bo5=4h
       const getScoreDecidedHours = (type: string): number => {
-        if (/bo5/i.test(type)) return 3.5;
-        if (/bo3/i.test(type)) return 2;
+        if (/bo5/i.test(type)) return game === 'dota2' ? 4 : 3.5;
+        if (/bo3/i.test(type)) return game === 'dota2' ? 2.5 : 2;
         return 0.5; // Bo1
       };
       for (const m of data) {
