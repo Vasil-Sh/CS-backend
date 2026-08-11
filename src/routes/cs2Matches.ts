@@ -12,6 +12,12 @@ import { cstestLiveScoresStore } from '../services/hltv/cstestClient';
 import { fetchCstestMatches } from '../services/hltv/cstestClient';
 import { normalizeTeam, isSameMatch } from '../utils/matchUtils.js';
 import { join } from 'node:path';
+import {
+  getCustomMatches,
+  saveCustomMatches,
+  clearCustomMatches,
+  parseMatchText,
+} from '../services/customMatchesService';
 
 function ddmmyyyy(): string {
   const d = new Date();
@@ -72,6 +78,22 @@ async function fetchCs2MatchesAll(): Promise<TipsGgMatch[]> {
   }
 
   const all = [...merged.values()];
+
+  // ── Merge custom/placeholder matches ──
+  const customMatches = getCustomMatches();
+  if (customMatches.length > 0) {
+    for (const cm of customMatches) {
+      // Dedup: check if a "real" match with same teams+date already exists
+      const alreadyExists = all.some(
+        (m) => m.date === cm.date && isSameMatch(m, cm),
+      );
+      if (!alreadyExists) {
+        all.push(cm);
+      }
+    }
+    console.log(`[cs2Matches] Custom matches: ${customMatches.length} (after dedup in ${all.length} total)`);
+  }
+
   const parts = [`cstest: ${cstest.length}`, `tips.gg: ${tipsgg.length}`];
   if (enriched > 0) parts.push(`enriched: ${enriched}`);
   if (fuzzyDeduped > 0) parts.push(`fuzzyDeduped: ${fuzzyDeduped}`);

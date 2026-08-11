@@ -429,6 +429,24 @@ async function fetchTipsGgMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[]>
       const updated = all.find(x => x.id === m.id);
       return updated && updated.score1 != null;
     }).length;
+
+    // ── Normalize scores: ensure no round scores (>5) leak through ──
+    // Dota2 detail pages sometimes show per-map round scores (12:22)
+    // that bypass the listing page's per-map conversion logic.
+    // Only fix when sum > 10 (definitely rounds, not map wins).
+    let normalized = 0;
+    for (const m of all) {
+      const s1 = m.score1 ?? 0, s2 = m.score2 ?? 0;
+      if ((s1 > 5 || s2 > 5) && (s1 + s2) > 10) {
+        m.score1 = s1 > s2 ? 1 : 0;
+        m.score2 = s2 > s1 ? 1 : 0;
+        normalized++;
+      }
+    }
+    if (normalized > 0) {
+      console.log(`[tipsgg:${gameTag}] Score normalize: ${normalized} matches fixed`);
+    }
+
     console.log(
       `[tipsgg:${gameTag}] Score backfill: ${filled}/${needsBackfill.length} ` +
       `(${Date.now() - scoreBackfillStart}ms)`,
