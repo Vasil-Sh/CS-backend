@@ -227,6 +227,20 @@ export class LiveScoresStore {
         }
       }
 
+      // Fallback: for finished matches without .scores .score spans,
+      // try to find result in "X:Y" text format (e.g., "2:0").
+      if (rs.length === 0 && status === 'finished') {
+        const resultMatch = $m.text().match(/\b([0-5])\s*:\s*([0-5])\b/);
+        if (resultMatch) {
+          const r1 = parseInt(resultMatch[1], 10);
+          const r2 = parseInt(resultMatch[2], 10);
+          if (!isNaN(r1) && !isNaN(r2)) {
+            w1 = r1;
+            w2 = r2;
+          }
+        }
+      }
+
       if (status === 'upcoming' && (w1>0||w2>0)) status = 'live';
 
       if (status === 'live') {
@@ -237,7 +251,7 @@ export class LiveScoresStore {
         }
       }
 
-      ns.set(id, { id, score1: rs.length>0?w1:null, score2: rs.length>0?w2:null, status, href });
+      ns.set(id, { id, score1: (rs.length>0||(w1+w2)>0)?w1:null, score2: (rs.length>0||(w1+w2)>0)?w2:null, status, href });
     });
   }
 }

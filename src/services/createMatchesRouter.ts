@@ -465,24 +465,24 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       const { data, fromCache } = await getMatchesWithSWR(forceRefresh);
 
       // ── Overlay live scores on match list ──
-      // Live scores from the in-memory store are at most 7s old and correctly
-      // count map wins. Only overlay matches that the live store considers
-      // "live" or "upcoming" — finished matches in the live store are heldover
-      // from a past state and may have incomplete scores (e.g. 1-0 map score
-      // vs 2-1 series score from the full scrape).
+      // Live scores from the in-memory store are at most 15s old and correctly
+      // count map wins from individual match detail pages.
+      // Overlay scores when the live store has more complete data (higher total).
       const liveScores = scoresStore.getScores();
       if (liveScores.length > 0) {
         const scoreMap = new Map(liveScores.map(s => [s.id, s]));
         for (const m of data) {
           const ls = scoreMap.get(m.id);
           if (!ls) continue;
-          // Only overlay scores — status comes from the full scrape.
-          // Live store status is unreliable when sourced from stale seed data.
-          if (ls.status === 'finished') continue;
-          if (ls.status === 'upcoming') continue;
-          // Apply live scores (allow 0→0 override for started-but-no-score matches)
-          if (ls.score1 != null) m.score1 = ls.score1;
-          if (ls.score2 != null) m.score2 = ls.score2;
+          if (ls.score1 == null || ls.score2 == null) continue;
+          const liveTotal = ls.score1 + ls.score2;
+          const cachedTotal = (m.score1 ?? 0) + (m.score2 ?? 0);
+          // Overlay if live data is more complete (more maps played),
+          // or if cached data is missing/zero
+          if (liveTotal > cachedTotal || cachedTotal === 0) {
+            m.score1 = ls.score1;
+            m.score2 = ls.score2;
+          }
         }
       }
 
