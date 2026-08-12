@@ -86,13 +86,16 @@ async function computeTeamForm(teamName: string, game: 'dota2' | 'cs2'): Promise
     if (total < 3) return { wins, losses, lastResults, streak, form: 'unknown' };
 
     let form: TeamFormResult['form'];
+    const winRate = wins / total;
     if (streak >= 5) form = 'hot_streak';
     else if (streak <= -5) form = 'slump';
-    else if (lastResults.slice(0, 2).every(r => r === 'L') && lastResults.length >= 3 && lastResults[2] === 'W') form = 'momentum';
-    else if (wins >= total * 0.6) form = 'stable';
-    else if (losses >= 2 && losses >= total * 0.5) form = 'falling';
-    else if (Math.abs(wins - losses) <= 1 && total >= 4) form = 'inconsistent';
-    else form = 'stable';
+    else if (lastResults.slice(0, 2).every(r => r === 'L') && lastResults.length >= 3 && lastResults.slice(2, 3)[0] === 'W') form = 'falling';
+    else if (winRate >= 0.65) form = 'stable';
+    else if (winRate >= 0.55) form = 'momentum';
+    else if (losses >= 3 && winRate < 0.4) form = 'slump';
+    else if (winRate >= 0.35 && winRate < 0.55) form = 'inconsistent';
+    else if (winRate < 0.35) form = 'falling';
+    else form = 'inconsistent';
 
     return { wins, losses, lastResults, streak, form };
   } catch (err) {

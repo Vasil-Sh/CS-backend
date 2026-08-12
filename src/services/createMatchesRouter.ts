@@ -587,8 +587,8 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       }
 
       // ── Enrich with team form data from match history ──
-      // Uses cached form data computed from a previous request or background job.
-      // First request after cold start won't have forms — they'll appear on next refresh.
+      // Cache hit → use immediately. Cache miss → await computation.
+      // Stale cache → use cached, trigger background refresh.
       const cachedForm = teamFormCache.get(game);
       if (cachedForm && Date.now() - cachedForm.ts < 120_000) {
         for (const m of filtered) {
@@ -597,7 +597,7 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
         }
       }
 
-      // Trigger background form computation for the next request
+      // Compute or refresh forms
       if (!cachedForm || Date.now() - cachedForm.ts > 60_000) {
         const allTeams = new Set<string>();
         for (const m of filtered) {
@@ -605,12 +605,29 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
           if (m.nameTeam2) allTeams.add(String(m.nameTeam2));
         }
         const teams = [...allTeams];
-        batchComputeTeamForms(teams, game).then(formMap => {
-          teamFormCache.set(game, { data: formMap, ts: Date.now() });
-          console.log(`[${prefix}Matches] Forms cached for ${formMap.size} teams`);
-        }).catch(err => {
-          console.error(`[${prefix}Matches] Form computation failed:`, (err as Error).message);
-        });
+
+        if (!cachedForm) {
+          // Cold start — await computation so the response includes form data
+          try {
+            const formMap = await batchComputeTeamForms(teams, game);
+            teamFormCache.set(game, { data: formMap, ts: Date.now() });
+            for (const m of filtered) {
+              (m as any).formTeam1 = formMap.get(String(m.nameTeam1))?.form ?? 'unknown';
+              (m as any).formTeam2 = formMap.get(String(m.nameTeam2))?.form ?? 'unknown';
+            }
+            console.log(`[${prefix}Matches] Forms computed & cached for ${formMap.size} teams`);
+          } catch (err) {
+            console.error(`[${prefix}Matches] Initial form computation failed:`, (err as Error).message);
+          }
+        } else {
+          // Stale cache — refresh in background, don't delay response
+          batchComputeTeamForms(teams, game).then(formMap => {
+            teamFormCache.set(game, { data: formMap, ts: Date.now() });
+            console.log(`[${prefix}Matches] Forms refreshed for ${formMap.size} teams`);
+          }).catch(err => {
+            console.error(`[${prefix}Matches] Form refresh failed:`, (err as Error).message);
+          });
+        }
       }
 
       c.header('X-Cache', fromCache ? 'HIT' : 'MISS');
