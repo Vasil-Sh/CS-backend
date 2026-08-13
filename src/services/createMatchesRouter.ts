@@ -605,7 +605,10 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       };
 
       const cachedForm = teamFormCache.get(game);
-      if (cachedForm && Date.now() - cachedForm.ts < 120_000) {
+
+      // Always apply form data if we have ANY cached form map (even stale) —
+      // stale form data is far better than showing "Нема даних" to the user.
+      if (cachedForm) {
         for (const m of filtered) {
           applyForm(m, cachedForm.data);
         }
