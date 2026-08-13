@@ -33,8 +33,8 @@ export interface TipsGgMatch {
   tipsCount: number;
   performer: string | null; // predicted winner
   startDate: string; // ISO 8601
-  pred1: number; // tipster prediction % (0-100)
-  pred2: number;
+  pred1: number | null; // tipster prediction % (0-100); null = no real data yet
+  pred2: number | null;
   coeff1: number | null; // real bookmaker coefficient from predictions page
   coeff2: number | null;
   positionTeam1: number | null; // HLTV ranking position
@@ -295,9 +295,10 @@ export async function parseMatchesFromHtml(html: string, game: 'dota2' | 'cs2' =
       const logo1 = getTeamLogo(competitor1.name, competitor1.url, logoMap);
       const logo2 = getTeamLogo(competitor2.name, competitor2.url, logoMap);
 
-      const pred1 = ld.performer?.name === competitor1.name ? 55
-        : ld.performer?.name === competitor2.name ? 45
-        : 50;
+      // No real prediction data yet — coefficients are fetched separately and
+      // derive the actual percentages. Never fake 55/45 from the performer field.
+      const pred1: number | null = null;
+      const pred2: number | null = null;
 
       matches.push({
         id: slugFromUrl(ld.url),
@@ -317,7 +318,7 @@ export async function parseMatchesFromHtml(html: string, game: 'dota2' | 'cs2' =
         performer: ld.performer?.name || null,
         startDate: ld.startDate,
         pred1,
-        pred2: 100 - pred1,
+        pred2,
         coeff1: null,
         coeff2: null,
         positionTeam1: null,
@@ -545,8 +546,9 @@ export async function fetchMatchDetail(matchUrl: string, game: 'dota2' | 'cs2' =
   const dateKey = parseIsoDate(ld.startDate);
   const { score1, score2, status } = extractScoresFromHtml(html, ld.url);
 
-  const pred1 = ld.performer?.name === competitor1.name ? 55
-    : ld.performer?.name === competitor2.name ? 45 : 50;
+  // No real prediction data yet — coefficients derive the actual percentages.
+  const pred1: number | null = null;
+  const pred2: number | null = null;
 
   const match: TipsGgMatch = {
     id: slugFromUrl(ld.url),
@@ -566,7 +568,7 @@ export async function fetchMatchDetail(matchUrl: string, game: 'dota2' | 'cs2' =
     performer: ld.performer?.name || null,
     startDate: ld.startDate,
     pred1,
-    pred2: 100 - pred1,
+    pred2,
     coeff1: null,
     coeff2: null,
     positionTeam1: null,

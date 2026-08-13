@@ -171,10 +171,12 @@ function parseMatchLine(line: string, date: string): TipsGgMatch | null {
     tipsCount: 0,
     performer: null,
     startDate,
-    pred1: coeff1 ? Math.round((1 / coeff1) * 100) : 50,
-    pred2: coeff2 ? Math.round((1 / coeff2) * 100) : 50,
+    pred1: coeff1 ? Math.round((1 / coeff1) * 100) : null,
+    pred2: coeff2 ? Math.round((1 / coeff2) * 100) : null,
     coeff1,
     coeff2,
+    positionTeam1: null,
+    positionTeam2: null,
   };
 
   return match;
