@@ -589,11 +589,25 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       // ── Enrich with team form data from match history ──
       // Cache hit → use immediately. Cache miss → await computation.
       // Stale cache → use cached, trigger background refresh.
+      const applyForm = (m: any, formMap: Map<string, any>) => {
+        const f1 = formMap.get(String(m.nameTeam1));
+        const f2 = formMap.get(String(m.nameTeam2));
+        m.formTeam1 = f1?.form ?? 'unknown';
+        m.formTeam2 = f2?.form ?? 'unknown';
+        m.formWins1 = f1?.wins ?? 0;
+        m.formLosses1 = f1?.losses ?? 0;
+        m.formStreak1 = f1?.streak ?? 0;
+        m.formLast1 = (f1?.lastResults ?? []).join('');
+        m.formWins2 = f2?.wins ?? 0;
+        m.formLosses2 = f2?.losses ?? 0;
+        m.formStreak2 = f2?.streak ?? 0;
+        m.formLast2 = (f2?.lastResults ?? []).join('');
+      };
+
       const cachedForm = teamFormCache.get(game);
       if (cachedForm && Date.now() - cachedForm.ts < 120_000) {
         for (const m of filtered) {
-          (m as any).formTeam1 = cachedForm.data.get(String(m.nameTeam1))?.form ?? 'unknown';
-          (m as any).formTeam2 = cachedForm.data.get(String(m.nameTeam2))?.form ?? 'unknown';
+          applyForm(m, cachedForm.data);
         }
       }
 
@@ -612,8 +626,7 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
             const formMap = await batchComputeTeamForms(teams, game);
             teamFormCache.set(game, { data: formMap, ts: Date.now() });
             for (const m of filtered) {
-              (m as any).formTeam1 = formMap.get(String(m.nameTeam1))?.form ?? 'unknown';
-              (m as any).formTeam2 = formMap.get(String(m.nameTeam2))?.form ?? 'unknown';
+              applyForm(m, formMap);
             }
             console.log(`[${prefix}Matches] Forms computed & cached for ${formMap.size} teams`);
           } catch (err) {
