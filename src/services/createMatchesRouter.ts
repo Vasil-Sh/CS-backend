@@ -647,7 +647,9 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       }
 
       c.header('X-Cache', fromCache ? 'HIT' : 'MISS');
-      c.header('Cache-Control', `public, max-age=${CACHE_TTL_FRESH / 1000}`);
+      // Matches are highly dynamic (incremental refresh every 2min, live scores every 7s).
+      // Server-side SWR cache handles load — never let the browser cache this JSON.
+      c.header('Cache-Control', 'no-store');
       return c.json(filtered);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';
