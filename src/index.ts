@@ -359,8 +359,17 @@ setTimeout(async () => {
     const cstest = cstestMatches.status === 'fulfilled' ? cstestMatches.value : [];
     const tipsgg = tipsggMatches.status === 'fulfilled' ? tipsggMatches.value : [];
 
-    // Merge: cstest primary, tips.gg enriches with tournament/coefficients
+    // Merge: start from existing cache (never shrink on warmup), then cstest
+    // primary, then tips.gg enriches with tournament/coefficients.
+    let existingArr: any[] = [];
+    if (existsSync(cacheFile)) {
+      try {
+        const raw = JSON.parse(readFileSync(cacheFile, 'utf-8'));
+        existingArr = raw.data || [];
+      } catch { /* ignore corrupt cache */ }
+    }
     const merged = new Map<string, any>();
+    for (const m of existingArr) merged.set(m.id, m);
     for (const m of cstest) merged.set(m.id, m);
     for (const tm of tipsgg) {
       const existing = merged.get(tm.id);
@@ -390,6 +399,10 @@ setTimeout(async () => {
       }
     }
     const mergedArr = [...merged.values()];
+    if (mergedArr.length === 0) {
+      console.warn('[warmup] CS2: no matches from any source — keeping existing cache untouched');
+      return;
+    }
     writeFileCacheInternal(mergedArr, join(process.cwd(), '.cache', 'cs2_matches.json'));
     persistFinishedToHistory(mergedArr, 'cs2', 'warmup:cs2');
     console.log(`[warmup] CS2 cache primed: ${merged.size} matches (cstest: ${cstest.length}, +tips.gg)`);
