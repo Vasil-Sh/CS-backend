@@ -284,7 +284,7 @@ export async function parseMatchesFromHtml(html: string, game: 'dota2' | 'cs2' =
           const isCs2 = game === 'cs2';
           const maxHours = matchType === 'BO1' ? 1
             : matchType === 'BO5' ? (isCs2 ? 4.5 : 5.5)
-            : (isCs2 ? 2.5 : 3.5); // BO3 default
+            : (isCs2 ? 3.25 : 3.5); // BO3 default (CS2: 3h15m)
 
           if (hoursSinceStart > maxHours && (!hasScores || isScoreDecided)) {
             status = 'finished';
