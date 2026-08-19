@@ -263,6 +263,33 @@ export function lookupLocalLogo(teamName: string): string | null {
   return null;
 }
 
+/**
+ * Look up a team's HLTV world ranking position from the local logo store.
+ * Local logo filenames encode the rank as a numeric prefix ("009_G2.png" → 9).
+ * Returns null if the team has no local logo (no-name / outside top ranking).
+ */
+export function lookupLocalLogoRank(teamName: string): number | null {
+  const filename = lookupLocalLogo(teamName);
+  if (!filename) return null;
+  const match = filename.match(/^(\d+)_/);
+  if (!match) return null;
+  const rank = parseInt(match[1], 10);
+  return Number.isFinite(rank) ? rank : null;
+}
+
+/**
+ * Look up a team's Dota 2 ranking position from the local Dota2 logo store.
+ * Filenames are "{rank}_{Team}.ext" ("0001_Team_Spirit.png" → 1).
+ */
+export function lookupDota2LocalLogoRank(teamName: string): number | null {
+  const filename = lookupDota2LocalLogo(teamName);
+  if (!filename) return null;
+  const match = filename.match(/^(\d+)_/);
+  if (!match) return null;
+  const rank = parseInt(match[1], 10);
+  return Number.isFinite(rank) ? rank : null;
+}
+
 // ═══ tips.gg CDN team logo map — scraped from /csgo/teams/ and /dota2/teams/ ═══
 
 interface TipsggTeamEntry {

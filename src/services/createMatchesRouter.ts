@@ -14,7 +14,7 @@ import type { ILiveScoresStore } from '../services/liveScoresStore';
 import { upsertMatchHistoryBatch } from '../services/matchHistoryService';
 import { getHltvLogoCache } from '../services/hltv/hltvRankingScraper';
 import { batchComputeTeamForms } from './teamFormService';
-import { lookupLocalLogo, getLocalLogoDir, lookupTipsggLogo, lookupDota2LocalLogo, getDota2LogoDir } from '../services/logoStore';
+import { lookupLocalLogo, lookupLocalLogoRank, lookupDota2LocalLogoRank, getLocalLogoDir, lookupTipsggLogo, lookupDota2LocalLogo, getDota2LogoDir } from '../services/logoStore';
 import { touchActivity } from './activityTracker';
 
 interface MatchRouterConfig {
@@ -584,6 +584,14 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
         m.stage = String(m.stage ?? '');
         m.logoTeam1 = m.logoTeam1 ? proxyLogoUrl(m.logoTeam1, prefix) : generateLogoFallback(m.nameTeam1, prefix);
         m.logoTeam2 = m.logoTeam2 ? proxyLogoUrl(m.logoTeam2, prefix) : generateLogoFallback(m.nameTeam2, prefix);
+        // Populate ranking positions from the correct local logo store when the
+        // source didn't provide them (cstest/tips.gg often omit positions).
+        // Filenames encode rank as a numeric prefix ("009_G2.png" → 9).
+        // CS2 uses HLTV ranking; Dota 2 uses its own local ranking store.
+        const rankLookup =
+          game === 'dota2' ? lookupDota2LocalLogoRank : lookupLocalLogoRank;
+        if (m.positionTeam1 == null) m.positionTeam1 = rankLookup(m.nameTeam1);
+        if (m.positionTeam2 == null) m.positionTeam2 = rankLookup(m.nameTeam2);
       }
 
       // ── Enrich with team form data from match history ──
