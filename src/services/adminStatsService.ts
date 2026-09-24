@@ -33,7 +33,9 @@ export class AdminStatsService {
          SELECT to_char(m.month_start, 'YYYY-MM') as month,
                 COALESCE(SUM(u.price_month)::int, 0) as revenue
          FROM months m
-         LEFT JOIN users u ON u.end_date >= m.month_start AND u.role = 'user'
+         LEFT JOIN users u ON u.end_date >= m.month_start
+           AND u.start_date < (m.month_start + INTERVAL '1 month')
+           AND u.role = 'user'
          GROUP BY m.month_start ORDER BY m.month_start`
       );
 
