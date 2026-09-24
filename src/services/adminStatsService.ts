@@ -25,8 +25,8 @@ export class AdminStatsService {
       const revenueResult = await client.query(
         `WITH months AS (
            SELECT generate_series(
-             date_trunc('month', NOW()) - INTERVAL '11 months',
-             date_trunc('month', NOW()),
+             date_trunc('year', CURRENT_DATE) - INTERVAL '1 year',
+             date_trunc('month', CURRENT_DATE),
              '1 month'
            )::date AS month_start
          )
@@ -41,7 +41,7 @@ export class AdminStatsService {
 
       const regResult = await client.query(
         `SELECT to_char(created_at, 'YYYY-MM') as month, COUNT(*) as count
-         FROM users WHERE created_at >= NOW() - INTERVAL '12 months'
+         FROM users WHERE created_at >= date_trunc('year', CURRENT_DATE) - INTERVAL '1 year'
          GROUP BY month ORDER BY month`
       );
 
