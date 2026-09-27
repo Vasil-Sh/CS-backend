@@ -6,6 +6,7 @@
 import { Hono } from 'hono';
 import { db, schema } from '../db/client';
 import { eq, and, sql } from 'drizzle-orm';
+import { generateLogoFallback } from '../services/createMatchesRouter';
 
 const publicProfile = new Hono();
 
@@ -16,7 +17,7 @@ publicProfile.get('/:username', async (c) => {
   try {
     // Find user
     const [user] = await db
-      .select({ id: schema.users.id, username: schema.users.username })
+      .select({ id: schema.users.id, username: schema.users.username, telegram: schema.users.telegram })
       .from(schema.users)
       .where(eq(schema.users.username, username))
       .limit(1);
@@ -91,6 +92,7 @@ publicProfile.get('/:username', async (c) => {
 
     return c.json({
       username,
+      telegram: user.telegram || '',
       stats: {
         totalBets,
         pendingBets,
@@ -104,14 +106,22 @@ publicProfile.get('/:username', async (c) => {
         currentBank: Math.round(currentBank * 100) / 100,
         activeGoals: goals.length,
       },
-      recentBets: recentBets.map((b: any) => ({
-        match: b.match,
-        result: b.result,
-        profit: toNum(b.profit),
-        odds: toNum(b.odds),
-        date: b.date,
-        game: b.game,
-      })),
+      recentBets: recentBets.map((b: any) => {
+        const prefix = (b.game || 'CS2').toLowerCase().includes('dota') ? 'dota2' : 'cs2';
+        return {
+          match: b.match,
+          team1: b.team1 || '',
+          team2: b.team2 || '',
+          logoTeam1: b.logoTeam1 || generateLogoFallback(b.team1 || '', prefix),
+          logoTeam2: b.logoTeam2 || generateLogoFallback(b.team2 || '', prefix),
+          betType: b.betType || '',
+          result: b.result,
+          profit: toNum(b.profit),
+          odds: toNum(b.odds),
+          date: b.date,
+          game: b.game,
+        };
+      }),
       monthlyProfit,
     });
   } catch (err) {
