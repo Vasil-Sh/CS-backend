@@ -134,6 +134,7 @@ export function generateLogoFallback(teamName: string, prefix: string): string |
   const slug = teamName.toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '');
+  if (!slug) return null;
   const fallbackUrl = `https://files.tips.gg/static/image/teams/${slug}.png`;
   const encoded = Buffer.from(fallbackUrl).toString('base64url');
   return `/api/v1/${prefix}-matches/logo/external/${encoded}`;

@@ -218,6 +218,7 @@ export function lookupDota2LocalLogo(teamName: string): string | null {
   if (store.size === 0) return null;
 
   const norm = normalizeTeamName(teamName);
+  if (!norm) return null;
   if (store.has(norm)) return store.get(norm)!;
 
   // Fuzzy substring
@@ -245,6 +246,7 @@ export function lookupLocalLogo(teamName: string): string | null {
 
   // 1. Normalized exact match
   const norm = normalizeTeamName(teamName);
+  if (!norm) return null;
   if (store.byName.has(norm)) return store.byName.get(norm)!;
 
   // 2. Exact filename match (just in case)
