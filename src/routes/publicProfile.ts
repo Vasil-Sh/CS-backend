@@ -50,6 +50,26 @@ publicProfile.get('/:username', async (c) => {
       : 0;
     const pendingBets = totalBets - completedBets.length;
 
+    // Split profit by currency: UAH bets stay in UAH; USD bets shown in their own currency.
+    // `profit` is always stored in UAH; for USD bets use `originalProfit` (or divide by rate).
+    let profitUAH = 0;
+    let profitUSD = 0;
+    for (const b of completedBets) {
+      const currency = String(b.currency || 'UAH').toUpperCase();
+      if (currency === 'USD') {
+        const rate = toNum(b.exchangeRate);
+        const usd =
+          b.originalProfit !== null && b.originalProfit !== undefined
+            ? toNum(b.originalProfit)
+            : rate > 0
+              ? toNum(b.profit) / rate
+              : 0;
+        profitUSD += usd;
+      } else {
+        profitUAH += toNum(b.profit);
+      }
+    }
+
     // Get bankroll
     const [bankroll] = await db
       .select()
@@ -100,6 +120,8 @@ publicProfile.get('/:username', async (c) => {
         losses,
         winRate,
         totalProfit: Math.round(totalProfit * 100) / 100,
+        profitUAH: Math.round(profitUAH * 100) / 100,
+        profitUSD: Math.round(profitUSD * 100) / 100,
         totalStaked: Math.round(totalStaked * 100) / 100,
         roi,
         avgOdds,
@@ -108,6 +130,16 @@ publicProfile.get('/:username', async (c) => {
       },
       recentBets: recentBets.map((b: any) => {
         const prefix = (b.game || 'CS2').toLowerCase().includes('dota') ? 'dota2' : 'cs2';
+        const currency = String(b.currency || 'UAH').toUpperCase();
+        const rate = toNum(b.exchangeRate);
+        const profitInCurrency =
+          currency === 'USD'
+            ? (b.originalProfit !== null && b.originalProfit !== undefined
+                ? toNum(b.originalProfit)
+                : rate > 0
+                  ? toNum(b.profit) / rate
+                  : 0)
+            : toNum(b.profit);
         return {
           match: b.match,
           team1: b.team1 || '',
@@ -116,7 +148,8 @@ publicProfile.get('/:username', async (c) => {
           logoTeam2: b.logoTeam2 || generateLogoFallback(b.team2 || '', prefix),
           betType: b.betType || '',
           result: b.result,
-          profit: toNum(b.profit),
+          profit: profitInCurrency,
+          currency,
           odds: toNum(b.odds),
           date: b.date,
           game: b.game,
