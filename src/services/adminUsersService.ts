@@ -24,6 +24,22 @@ export interface AdminUserOverview {
   initialBank: number;
   manualAdjustments: number;
   currentBank: number;
+  /** Consecutive losses counting back from the most recent decided bet (0 if none). */
+  lossStreak: number;
+  /** Per-game aggregated stats (profit/ROI separately for CS2, Dota2, …). */
+  games: GameBreakdown[];
+}
+
+export interface GameBreakdown {
+  game: string;
+  bets: number;
+  wins: number;
+  losses: number;
+  pending: number;
+  staked: number;
+  profit: number;
+  winRate: number;
+  roi: number;
 }
 
 export interface AdminUserBet {
@@ -73,6 +89,69 @@ export class AdminUsersService {
         ORDER BY u.created_at DESC
       `);
 
+      // Current loss streak per user (consecutive `Loss` from the most recent
+      // decided bet; a Win or Pending breaks the streak).
+      const streakResult = await client.query(`
+        WITH ranked AS (
+          SELECT user_id, result,
+                 ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY date DESC, created_at DESC) AS rn
+          FROM bets
+        ),
+        streaks AS (
+          SELECT user_id, result, rn,
+                 SUM(CASE WHEN result <> 'Loss' THEN 1 ELSE 0 END)
+                   OVER (PARTITION BY user_id ORDER BY rn ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS grp
+          FROM ranked
+        )
+        SELECT user_id, COUNT(*)::int AS loss_streak
+        FROM streaks
+        WHERE grp = 0 AND result = 'Loss'
+        GROUP BY user_id
+      `);
+
+      // Per-game breakdown (profit/ROI separately for CS2, Dota2, etc.)
+      const gamesResult = await client.query(`
+        SELECT user_id,
+               COALESCE(NULLIF(game, ''), 'CS2') AS game,
+               COUNT(*)::int AS bets,
+               COUNT(*) FILTER (WHERE result = 'Win')::int AS wins,
+               COUNT(*) FILTER (WHERE result = 'Loss')::int AS losses,
+               COUNT(*) FILTER (WHERE result = 'Pending')::int AS pending,
+               COALESCE(SUM(amount)::numeric, 0) AS staked,
+               COALESCE(SUM(profit)::numeric, 0) AS profit
+        FROM bets
+        GROUP BY user_id, COALESCE(NULLIF(game, ''), 'CS2')
+        ORDER BY user_id, game
+      `);
+
+      const lossStreakMap = new Map<number, number>();
+      streakResult.rows.forEach((r: any) =>
+        lossStreakMap.set(Number(r.user_id), Number(r.loss_streak)),
+      );
+
+      const gamesMap = new Map<number, GameBreakdown[]>();
+      gamesResult.rows.forEach((r: any) => {
+        const uid = Number(r.user_id);
+        const list = gamesMap.get(uid) || [];
+        const wins = Number(r.wins);
+        const losses = Number(r.losses);
+        const decided = wins + losses;
+        const staked = Number(r.staked);
+        const profit = Number(r.profit);
+        list.push({
+          game: r.game,
+          bets: Number(r.bets),
+          wins,
+          losses,
+          pending: Number(r.pending),
+          staked,
+          profit,
+          winRate: decided > 0 ? Math.round((wins / decided) * 1000) / 10 : 0,
+          roi: staked > 0 ? Math.round((profit / staked) * 1000) / 10 : 0,
+        });
+        gamesMap.set(uid, list);
+      });
+
       return result.rows.map((r: any) => {
         const wins = Number(r.wins);
         const losses = Number(r.losses);
@@ -102,6 +181,8 @@ export class AdminUsersService {
           initialBank,
           manualAdjustments: manual,
           currentBank: initialBank + manual + totalProfit,
+          lossStreak: lossStreakMap.get(r.id) || 0,
+          games: gamesMap.get(r.id) || [],
         };
       });
     } finally {
