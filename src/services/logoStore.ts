@@ -223,6 +223,7 @@ export function lookupDota2LocalLogo(teamName: string): string | null {
 
   // Fuzzy substring
   for (const [key, path] of store) {
+    if (key.length < 2) continue;
     if (norm.includes(key) || key.includes(norm)) return path;
   }
 
@@ -256,7 +257,11 @@ export function lookupLocalLogo(teamName: string): string | null {
   // 3. Fuzzy substring match — many files have short names (e.g. "SINNERS")
   //    but the display name includes suffixes ("SINNERS Esports").
   //    Check if stored key is contained in the lookup name, or vice versa.
+  //    Guard: skip keys shorter than 2 chars — non-ASCII team names (e.g. "Þór")
+  //    normalize down to a single letter and would otherwise match every name
+  //    containing that letter (Royal Foxes, CTRL, …).
   for (const [key, filename] of store.byName) {
+    if (key.length < 2) continue;
     if (norm.includes(key) || key.includes(norm)) {
       return filename;
     }
@@ -380,6 +385,8 @@ export function lookupTipsggLogo(teamName: string, game: string): string | null 
   for (const [key, url] of map) {
     // Skip game-prefixed keys for fuzzy (they have the ':' separator)
     if (key.includes(':')) continue;
+    // Skip 1-char keys — they match every name containing that letter.
+    if (key.length < 2) continue;
     if (norm.includes(key) || key.includes(norm)) return url;
   }
 
