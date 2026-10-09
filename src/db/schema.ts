@@ -332,6 +332,28 @@ export const matchesHistory = pgTable(
   ]
 );
 
+// ═══════════════════════════════════════════
+// Banners — global advertising banners shown on the matches schedule
+// ═══════════════════════════════════════════
+
+export const banners = pgTable(
+  'banners',
+  {
+    id: serial('id').primaryKey(),
+    active: boolean('active').notNull().default(false),
+    title: varchar('title', { length: 200 }).notNull(),
+    description: text('description').default(''),
+    imageUrl: varchar('image_url', { length: 500 }).default(''),
+    href: varchar('href', { length: 500 }).default(''),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at')
+      .defaultNow()
+      .$onUpdate(() => new Date())
+      .notNull(),
+  },
+  (table) => [index('banners_active_idx').on(table.active)]
+);
+
 // ── Type exports ──
 
 export type User = typeof users.$inferSelect;
@@ -348,3 +370,5 @@ export type RiskyTeam = typeof riskyTeams.$inferSelect;
 export type TiltBlock = typeof tiltBlocks.$inferSelect;
 export type MatchHistory = typeof matchesHistory.$inferSelect;
 export type NewMatchHistory = typeof matchesHistory.$inferInsert;
+export type Banner = typeof banners.$inferSelect;
+export type NewBanner = typeof banners.$inferInsert;
