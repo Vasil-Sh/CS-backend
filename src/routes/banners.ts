@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import sharp from 'sharp';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { bannerService, type BannerInput } from '../services/bannerService';
 
@@ -143,7 +144,22 @@ banners.post('/upload', requireAuth, requireAdmin, async (c) => {
   const ext = MIME_EXT[mime] || 'png';
   ensureDir();
   const filename = `${Date.now()}_${randomBytes(4).toString('hex')}.${ext}`;
-  writeFileSync(join(BANNER_DIR, filename), Buffer.from(raw, 'base64'));
+
+  let buffer = Buffer.from(raw, 'base64');
+  // Auto-trim white/transparent borders (SVG/GIF are passed through untouched).
+  if (ext !== 'svg' && ext !== 'gif') {
+    try {
+      const trimmed = await sharp(buffer)
+        .trim({ threshold: 18 })
+        .toBuffer();
+      // Only use the trimmed result if it kept a meaningful area (>2px each side).
+      if (trimmed.length > 0) buffer = trimmed;
+    } catch (err) {
+      console.warn('[Banners/Upload] Trim skipped:', (err as Error).message);
+    }
+  }
+
+  writeFileSync(join(BANNER_DIR, filename), buffer);
   return c.json({ url: `/api/v1/banners/file/${filename}` }, 201);
 });
 

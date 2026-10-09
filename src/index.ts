@@ -94,7 +94,7 @@ app.use('*', csrf({
 app.use('*', securityHeaders);
 app.use('*', loggerMiddleware);
 app.use('*', rateLimiterMiddleware);
-app.use('*', bodyLimit(1_000_000)); // 1MB max body
+app.use('*', bodyLimit(2_100_000)); // 2.1MB max body (1.5MB file + base64 overhead)
 app.use('*', authMiddleware);
 
 // ── Convert ALL string numbers to real numbers in JSON responses ──
