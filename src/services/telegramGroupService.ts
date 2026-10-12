@@ -10,8 +10,8 @@ export class TelegramGroupService {
     return db.select().from(schema.telegramGroups).where(eq(schema.telegramGroups.userId, userId)).orderBy(schema.telegramGroups.name);
   }
 
-  async create(userId: number, name: string, link: string) {
-    const [group] = await db.insert(schema.telegramGroups).values({ userId, name, link }).returning();
+  async create(userId: number, name: string, link: string, hasChannel: boolean = false, comment: string = '') {
+    const [group] = await db.insert(schema.telegramGroups).values({ userId, name, link, hasChannel, comment }).returning();
     return group;
   }
 

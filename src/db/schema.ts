@@ -225,6 +225,8 @@ export const telegramGroups = pgTable(
       .references(() => users.id, { onDelete: 'cascade' }),
     name: varchar('name', { length: 200 }).notNull(),
     link: varchar('link', { length: 500 }).default(''),
+    hasChannel: boolean('has_channel').default(false).notNull(),
+    comment: varchar('comment', { length: 500 }).default(''),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at')
       .defaultNow()

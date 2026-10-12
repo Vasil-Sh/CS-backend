@@ -142,6 +142,8 @@ export const updateUserSchema = z.object({
 export const telegramGroupSchema = z.object({
   name: z.string().min(1).max(200),
   link: z.string().max(500).default(''),
+  hasChannel: z.boolean().optional().default(false),
+  comment: z.string().max(500).optional().default(''),
 });
 
 export const riskyTeamSchema = z.object({

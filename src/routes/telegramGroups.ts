@@ -18,7 +18,7 @@ tgGroups.post('/', requireAuth, async (c) => {
   let body;
   try { body = telegramGroupSchema.parse(await c.req.json()); }
   catch { return c.json({ error: 'Invalid input: name (1-200 chars) and optional link required' }, 400); }
-  const group = await telegramGroupService.create(c.get('user').userId, body.name, body.link);
+  const group = await telegramGroupService.create(c.get('user').userId, body.name, body.link, body.hasChannel, body.comment);
   return c.json(group, 201);
 });
 
