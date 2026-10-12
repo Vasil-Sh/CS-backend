@@ -1,166 +1,40 @@
-/**
- * Public Profile API — no auth required
- * GET /api/public-profile/:username — returns public stats for sharing
- */
-
+/** Public, read-only profile. Game and period scope every aggregate and recent row. */
 import { Hono } from 'hono';
 import { db, schema } from '../db/client';
-import { eq, and, sql } from 'drizzle-orm';
+import { eq, and } from 'drizzle-orm';
 import { generateLogoFallback } from '../services/createMatchesRouter';
+import { buildPublicProfileStats, toNumber, type ProfileGame, type ProfilePeriod } from '../services/publicProfileStats';
 
 const publicProfile = new Hono();
-
-publicProfile.get('/:username', async (c) => {
+publicProfile.get('/:username', async c => {
   const username = c.req.param('username') || '';
-  if (!username) return c.json({ error: 'Username required' }, 400);
-
+  const game = c.req.query('game') || 'all';
+  const period = c.req.query('period') || 'all';
+  if (!['all', 'cs2', 'dota2'].includes(game) || !['all', '30d', '90d', '365d'].includes(period)) {
+    return c.json({ error: 'Invalid profile filter' }, 400);
+  }
   try {
-    // Find user
-    const [user] = await db
-      .select({ id: schema.users.id, username: schema.users.username, telegram: schema.users.telegram })
-      .from(schema.users)
-      .where(eq(schema.users.username, username))
-      .limit(1);
-
+    const [user] = await db.select({ id: schema.users.id, username: schema.users.username, telegram: schema.users.telegram })
+      .from(schema.users).where(eq(schema.users.username, username)).limit(1);
     if (!user) return c.json({ error: 'User not found' }, 404);
-
-    // Get ALL bets (including pending for total count)
-    const allBets = await db
-      .select()
-      .from(schema.bets)
-      .where(eq(schema.bets.userId, user.id));
-
-    // Completed bets only for stats calculations
-    const completedBets = allBets.filter((b: any) => b.result !== 'Pending');
-
-    const totalBets = allBets.length;
-    const wins = completedBets.filter((b: any) => b.result === 'Win').length;
-    const winRate = completedBets.length > 0 ? Math.round((wins / completedBets.length) * 100) : 0;
-    // PostgreSQL numeric columns may return strings with commas → normalize
-    const toNum = (v: unknown): number => {
-      if (v === null || v === undefined) return 0;
-      if (typeof v === 'number') return v;
-      return Number(String(v).replace(',', '.'));
-    };
-    const totalProfit = completedBets.reduce((sum: number, b: any) => sum + toNum(b.profit), 0);
-    const totalStaked = completedBets.reduce((sum: number, b: any) => sum + toNum(b.amount), 0);
-    const roi = totalStaked > 0 ? Math.round((totalProfit / totalStaked) * 100) : 0;
-    const avgOdds = completedBets.length > 0
-      ? Math.round((completedBets.reduce((sum: number, b: any) => sum + toNum(b.odds), 0) / completedBets.length) * 100) / 100
-      : 0;
-    const pendingBets = totalBets - completedBets.length;
-
-    // Split profit by currency: UAH bets stay in UAH; USD bets shown in their own currency.
-    // `profit` is always stored in UAH; for USD bets use `originalProfit` (or divide by rate).
-    let profitUAH = 0;
-    let profitUSD = 0;
-    for (const b of completedBets) {
-      const currency = String(b.currency || 'UAH').toUpperCase();
-      if (currency === 'USD') {
-        const rate = toNum(b.exchangeRate);
-        const usd =
-          b.originalProfit !== null && b.originalProfit !== undefined
-            ? toNum(b.originalProfit)
-            : rate > 0
-              ? toNum(b.profit) / rate
-              : 0;
-        profitUSD += usd;
-      } else {
-        profitUAH += toNum(b.profit);
-      }
-    }
-
-    // Get bankroll
-    const [bankroll] = await db
-      .select()
-      .from(schema.bankroll)
-      .where(eq(schema.bankroll.userId, user.id))
-      .limit(1);
-
-    // Get active goals count
-    const goals = await db
-      .select()
-      .from(schema.goals)
-      .where(and(eq(schema.goals.userId, user.id), eq(schema.goals.isCompleted, false)));
-
-    // Get recent 5 bets
-    const recentBets = await db
-      .select()
-      .from(schema.bets)
-      .where(eq(schema.bets.userId, user.id))
-      .orderBy(sql`${schema.bets.createdAt} DESC`)
-      .limit(5);
-
-    // Monthly profit for chart (completed only)
-    const monthlyProfit: { month: string; profit: number }[] = [];
-    const monthMap = new Map<string, number>();
-    for (const b of completedBets) {
-      const date = b.date || b.createdAt;
-      if (!date) continue;
-      const m = String(date).substring(0, 7); // YYYY-MM
-      monthMap.set(m, (monthMap.get(m) || 0) + toNum(b.profit));
-    }
-    for (const [month, profit] of [...monthMap.entries()].sort()) {
-      monthlyProfit.push({ month, profit: Math.round(profit * 100) / 100 });
-    }
-
-    const currentBank = bankroll
-      ? toNum(bankroll.initialBank) + totalProfit
-      : totalProfit;
-
-    const losses = completedBets.filter((b: any) => b.result === 'Loss').length;
-
+    const allBets = await db.select().from(schema.bets).where(eq(schema.bets.userId, user.id));
+    const [bankroll] = await db.select().from(schema.bankroll).where(eq(schema.bankroll.userId, user.id)).limit(1);
+    const goals = await db.select().from(schema.goals).where(and(eq(schema.goals.userId, user.id), eq(schema.goals.isCompleted, false)));
+    const result = buildPublicProfileStats(allBets, { game: game as ProfileGame, period: period as ProfilePeriod, exchangeRate: bankroll?.exchangeRate });
     return c.json({
-      username,
-      telegram: user.telegram || '',
-      stats: {
-        totalBets,
-        pendingBets,
-        wins,
-        losses,
-        winRate,
-        totalProfit: Math.round(totalProfit * 100) / 100,
-        profitUAH: Math.round(profitUAH * 100) / 100,
-        profitUSD: Math.round(profitUSD * 100) / 100,
-        totalStaked: Math.round(totalStaked * 100) / 100,
-        roi,
-        avgOdds,
-        currentBank: Math.round(currentBank * 100) / 100,
-        activeGoals: goals.length,
-      },
-      recentBets: recentBets.map((b: any) => {
-        const prefix = (b.game || 'CS2').toLowerCase().includes('dota') ? 'dota2' : 'cs2';
-        const currency = String(b.currency || 'UAH').toUpperCase();
-        const rate = toNum(b.exchangeRate);
-        const profitInCurrency =
-          currency === 'USD'
-            ? (b.originalProfit !== null && b.originalProfit !== undefined
-                ? toNum(b.originalProfit)
-                : rate > 0
-                  ? toNum(b.profit) / rate
-                  : 0)
-            : toNum(b.profit);
-        return {
-          match: b.match,
-          team1: b.team1 || '',
-          team2: b.team2 || '',
-          logoTeam1: b.logoTeam1 || generateLogoFallback(b.team1 || '', prefix),
-          logoTeam2: b.logoTeam2 || generateLogoFallback(b.team2 || '', prefix),
-          betType: b.betType || '',
-          result: b.result,
-          profit: profitInCurrency,
-          currency,
-          odds: toNum(b.odds),
-          date: b.date,
-          game: b.game,
+      ...result, username: user.username, telegram: user.telegram || '',
+      stats: { ...result.stats, currentBank: toNumber(bankroll?.initialBank) + result.stats.totalProfit, activeGoals: goals.length },
+      recentBets: result.recentBets.map(bet => {
+        const prefix = /dota|дота/i.test(bet.game) ? 'dota2' : 'cs2';
+        return { ...bet,
+          logoTeam1: bet.logoTeam1 || (bet.team1 ? generateLogoFallback(bet.team1, prefix) : null),
+          logoTeam2: bet.logoTeam2 || (bet.team2 ? generateLogoFallback(bet.team2, prefix) : null),
         };
       }),
-      monthlyProfit,
     });
-  } catch (err) {
-    console.error('[PublicProfile] Error:', (err as Error).message);
+  } catch (error) {
+    console.error('[PublicProfile] Error:', (error as Error).message);
     return c.json({ error: 'Failed to fetch profile' }, 500);
   }
 });
-
 export default publicProfile;
