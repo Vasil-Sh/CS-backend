@@ -227,6 +227,7 @@ export const telegramGroups = pgTable(
     link: varchar('link', { length: 500 }).default(''),
     hasChannel: boolean('has_channel').default(false).notNull(),
     comment: varchar('comment', { length: 500 }).default(''),
+    game: varchar('game', { length: 20 }).default('').notNull(),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at')
       .defaultNow()

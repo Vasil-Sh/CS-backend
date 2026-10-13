@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { requireAuth } from '../middleware/auth';
-import { telegramGroupSchema } from '../middleware/validation';
+import { telegramGroupSchema, telegramGroupUpdateSchema } from '../middleware/validation';
 import { telegramGroupService } from '../services/telegramGroupService';
 
 const tgGroups = new Hono();
@@ -18,7 +18,7 @@ tgGroups.post('/', requireAuth, async (c) => {
   let body;
   try { body = telegramGroupSchema.parse(await c.req.json()); }
   catch { return c.json({ error: 'Invalid input: name (1-200 chars) and optional link required' }, 400); }
-  const group = await telegramGroupService.create(c.get('user').userId, body.name, body.link, body.hasChannel, body.comment);
+  const group = await telegramGroupService.create(c.get('user').userId, body.name, body.link, body.hasChannel, body.comment, body.game);
   return c.json(group, 201);
 });
 
@@ -26,6 +26,15 @@ tgGroups.delete('/:id', requireAuth, async (c) => {
   const deleted = await telegramGroupService.remove(c.req.param('id') || '', c.get('user').userId);
   if (!deleted) return c.json({ error: 'Not found' }, 404);
   return c.json({ success: true });
+});
+
+tgGroups.put('/:id', requireAuth, async (c) => {
+  let body;
+  try { body = telegramGroupUpdateSchema.parse(await c.req.json()); }
+  catch { return c.json({ error: 'Invalid input' }, 400); }
+  const group = await telegramGroupService.update(c.req.param('id') || '', c.get('user').userId, body);
+  if (!group) return c.json({ error: 'Not found' }, 404);
+  return c.json(group);
 });
 
 export default tgGroups;

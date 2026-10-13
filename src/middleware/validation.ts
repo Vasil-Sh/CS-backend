@@ -144,6 +144,15 @@ export const telegramGroupSchema = z.object({
   link: z.string().max(500).default(''),
   hasChannel: z.boolean().optional().default(false),
   comment: z.string().max(500).optional().default(''),
+  game: z.string().max(20).optional().default(''),
+});
+
+export const telegramGroupUpdateSchema = z.object({
+  name: z.string().min(1).max(200).optional(),
+  link: z.string().max(500).optional(),
+  hasChannel: z.boolean().optional(),
+  comment: z.string().max(500).optional(),
+  game: z.string().max(20).optional(),
 });
 
 export const riskyTeamSchema = z.object({
