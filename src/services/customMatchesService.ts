@@ -177,6 +177,7 @@ function parseMatchLine(line: string, date: string): TipsGgMatch | null {
     coeff2,
     positionTeam1: null,
     positionTeam2: null,
+    tournamentLogo: null,
   };
 
   return match;

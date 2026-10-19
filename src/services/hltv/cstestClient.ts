@@ -143,6 +143,7 @@ function cstestToTipsGgMatch(g: CstestGame): TipsGgMatch {
     coeff2: g.bettingCoefficientTeam2 ?? null,
     positionTeam1: g.positionTeam1 ?? null,
     positionTeam2: g.positionTeam2 ?? null,
+    tournamentLogo: null,
   };
 }
 

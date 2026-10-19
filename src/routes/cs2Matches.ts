@@ -56,6 +56,7 @@ async function fetchCs2MatchesAll(): Promise<TipsGgMatch[]> {
     if (existing) {
       if (!existing.tournament && tm.tournament) { existing.tournament = tm.tournament; enriched++; }
       if (!existing.stage && tm.stage) existing.stage = tm.stage;
+      if (!existing.tournamentLogo && tm.tournamentLogo) existing.tournamentLogo = tm.tournamentLogo;
       if (existing.coeff1 == null && tm.coeff1 != null) existing.coeff1 = tm.coeff1;
       if (existing.coeff2 == null && tm.coeff2 != null) existing.coeff2 = tm.coeff2;
       if (existing.tipsCount === 0 && tm.tipsCount > 0) existing.tipsCount = tm.tipsCount;
@@ -67,6 +68,7 @@ async function fetchCs2MatchesAll(): Promise<TipsGgMatch[]> {
     if (fuzzyDupe) {
       if (!fuzzyDupe.tournament && tm.tournament) { fuzzyDupe.tournament = tm.tournament; enriched++; }
       if (!fuzzyDupe.stage && tm.stage) fuzzyDupe.stage = tm.stage;
+      if (!fuzzyDupe.tournamentLogo && tm.tournamentLogo) fuzzyDupe.tournamentLogo = tm.tournamentLogo;
       if (fuzzyDupe.coeff1 == null && tm.coeff1 != null) fuzzyDupe.coeff1 = tm.coeff1;
       if (fuzzyDupe.coeff2 == null && tm.coeff2 != null) fuzzyDupe.coeff2 = tm.coeff2;
       if (fuzzyDupe.tipsCount === 0 && tm.tipsCount > 0) fuzzyDupe.tipsCount = tm.tipsCount;

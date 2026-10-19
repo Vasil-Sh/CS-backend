@@ -527,6 +527,10 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
         // ── Try exact ID match first ──
         const prev = existingMap.get(tm.id);
         if (prev) {
+          // Enrich tournament/logo metadata from fresh tips.gg parse (best-effort)
+          if (!prev.tournament && tm.tournament) prev.tournament = tm.tournament;
+          if (!prev.stage && tm.stage) prev.stage = tm.stage;
+          if (!prev.tournamentLogo && tm.tournamentLogo) prev.tournamentLogo = tm.tournamentLogo;
           if (prev.status !== 'finished') {
             // Validate scores before writing — reject impossible values
             const err = validateScores(tm.score1, tm.score2, tm.type || prev.type || '');
@@ -555,6 +559,9 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
         const rev = `${normalizeTeam(tm.nameTeam2)}|||${normalizeTeam(tm.nameTeam1)}`;
         const fuzzyHit = fuzzyIndex.get(fwd) || fuzzyIndex.get(rev);
         if (fuzzyHit) {
+          if (!fuzzyHit.match.tournament && tm.tournament) fuzzyHit.match.tournament = tm.tournament;
+          if (!fuzzyHit.match.stage && tm.stage) fuzzyHit.match.stage = tm.stage;
+          if (!fuzzyHit.match.tournamentLogo && tm.tournamentLogo) fuzzyHit.match.tournamentLogo = tm.tournamentLogo;
           if (fuzzyHit.match.status !== 'finished') {
             if (tm.score1 != null) fuzzyHit.match.score1 = tm.score1;
             if (tm.score2 != null) fuzzyHit.match.score2 = tm.score2;

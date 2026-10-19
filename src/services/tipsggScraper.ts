@@ -39,6 +39,7 @@ export interface TipsGgMatch {
   coeff2: number | null;
   positionTeam1: number | null; // HLTV ranking position
   positionTeam2: number | null;
+  tournamentLogo: string | null; // operator/tournament logo CDN URL
 }
 
 interface JsonLdSportsEvent {
@@ -63,7 +64,24 @@ interface JsonLdSportsEvent {
   organizer?: {
     '@type': 'SportsOrganization';
     name: string;
+    url?: string;
   };
+}
+
+/**
+ * Derive a tournament/operator logo CDN URL from the organizer's tips.gg URL.
+ * The tournament page's logo is served from:
+ *   https://files.tips.gg/static/image/tournaments/{slug}.png
+ * where {slug} is the last path segment of /tournament/{slug}/.
+ * Returns null when the URL isn't a tips.gg tournament link.
+ */
+function tournamentLogoFromOrganizerUrl(organizerUrl?: string): string | null {
+  if (!organizerUrl) return null;
+  const m = organizerUrl.match(/tips\.gg\/tournament\/([^/?#]+)/i);
+  if (!m) return null;
+  const slug = m[1];
+  if (!slug) return null;
+  return `https://files.tips.gg/static/image/tournaments/${slug}.png`;
 }
 
 function parseIsoDate(dateStr: string): string {
@@ -323,6 +341,7 @@ export async function parseMatchesFromHtml(html: string, game: 'dota2' | 'cs2' =
         coeff2: null,
         positionTeam1: null,
         positionTeam2: null,
+        tournamentLogo: tournamentLogoFromOrganizerUrl(ld.organizer?.url),
       });
     } catch (err) {
       // Log malformed entries for debugging
@@ -573,6 +592,7 @@ export async function fetchMatchDetail(matchUrl: string, game: 'dota2' | 'cs2' =
     coeff2: null,
     positionTeam1: null,
     positionTeam2: null,
+    tournamentLogo: tournamentLogoFromOrganizerUrl(ld.organizer?.url),
   };
 
   // Try to enrich with real coefficients (best-effort, don't fail on error)
