@@ -430,7 +430,7 @@ async function fetchTipsGgMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[]>
   });
   if (needsBackfill.length > 0) {
     const scoreBackfillStart = Date.now();
-    const DETAIL_CONCURRENCY = 2;
+    const DETAIL_CONCURRENCY = 1; // one at a time — minimize request burst
     for (let i = 0; i < needsBackfill.length; i += DETAIL_CONCURRENCY) {
       const batch = needsBackfill.slice(i, i + DETAIL_CONCURRENCY);
       const batchResults = await Promise.allSettled(
@@ -447,6 +447,10 @@ async function fetchTipsGgMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[]>
           match.score1 = detail.score1;
           match.score2 = detail.score2;
         }
+      }
+      // Pause between detail-page requests to avoid Cloudflare rate-limiting
+      if (i + DETAIL_CONCURRENCY < needsBackfill.length) {
+        await new Promise(r => setTimeout(r, 3000));
       }
     }
     const filled = needsBackfill.filter(m => {
@@ -721,7 +725,7 @@ export async function cacheTeamLogos(matches: TipsGgMatch[], game: string): Prom
  * Raw HTML: <span class="avg-odd">16.20</span>
  * team-first = team1, team-second = team2 (skip team-draw).
  */
-async function fetchCoefficientsFromPredictions(link: string, retries = 2): Promise<{ coeff1: number; coeff2: number } | null> {
+async function fetchCoefficientsFromPredictions(link: string, retries = 1): Promise<{ coeff1: number; coeff2: number } | null> {
   const slug = slugFromUrl(link);
 
   // Check file cache first — coefficients change slowly (~20 min TTL)
@@ -732,11 +736,9 @@ async function fetchCoefficientsFromPredictions(link: string, retries = 2): Prom
     try {
       const predPath = link.endsWith('/') ? link + 'predictions/' : link + '/predictions/';
       const predUrl = `${TIPSGG_BASE}${predPath}`;
-      // Fast HTTP first, fallback to Puppeteer
-      let html = await fetchLiveHtml(predUrl, 1);
-      if (!html) {
-        try { html = await fetchHtml(predUrl, 1); } catch { continue; }
-      }
+      // HTTP only — NO Puppeteer fallback. Puppeteer is heavy and amplifies the
+      // Cloudflare ban signal (each headless navigation looks like a bot).
+      const html = await fetchLiveHtml(predUrl, 0);
       if (!html) continue;
 
       // Find bookmakers analysis counters section
@@ -779,16 +781,8 @@ async function fetchCoefficientsFromPredictions(link: string, retries = 2): Prom
         return result;
       }
 
-      // No odds matched — retry with backoff if attempts remain
-      if (attempt < retries) {
-        await new Promise(r => setTimeout(r, (attempt + 1) * 500));
-      } else {
-        // Log diagnostic: found bookmakers-analysis-counters but couldn't extract odds
-        const odc = (html.match(/avg-odd/gi) || []).length;
-        const bam = (html.match(/bookmakers-analysis-counters/gi) || []).length;
-        console.warn(`[tipsgg] Coefficients extraction failed for ${link} — bookmakers-counters: ${bam}, avg-odd spans: ${odc}`);
-        return null;
-      }
+      // No odds matched
+      return null;
     } catch {
       if (attempt === retries) return null;
       await new Promise(r => setTimeout(r, (attempt + 1) * 500));
@@ -798,20 +792,31 @@ async function fetchCoefficientsFromPredictions(link: string, retries = 2): Prom
 }
 
 async function enrichCoefficients(matches: TipsGgMatch[]): Promise<void> {
-  const CONCURRENCY = 2;
-  const BATCH_PAUSE_MS = 2000; // 2s between batches — reduced aggressiveness to avoid Cloudflare rate-limiting
-  const PER_MATCH_TIMEOUT_MS = 25000; // 25s hard cap per match
+  const CONCURRENCY = 1; // one at a time — minimal footprint
+  const BATCH_PAUSE_MS = 5000; // 5s between requests — avoid Cloudflare rate-limiting
+  const PER_MATCH_TIMEOUT_MS = 12000; // 12s hard cap per match
+  const MAX_MATCHES = 25; // hard cap — never request more than this per cycle
   const now = Date.now();
-  const MAX_FUTURE_MS = 12 * 60 * 60 * 1000; // 12h — skip matches starting too far into the future
-  const toFetch = matches.filter(m => {
-    if (m.status === 'finished') return false;
-    // Skip matches starting more than 12h from now (predictions page may not exist yet)
-    try {
-      const start = new Date(m.startDate).getTime();
-      if (start - now > MAX_FUTURE_MS) return false;
-    } catch { /* include if date is unparseable */ }
-    return true;
-  });
+  const todayKey = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+
+  // Only fetch coefficients for TODAY's matches. Coefficients for future days
+  // are not urgent and were the main driver of the ban (139 requests/cycle).
+  const toFetch = matches
+    .filter((m) => {
+      if (m.status === 'finished') return false;
+      // Only today's matches
+      try {
+        const start = new Date(m.startDate).getTime();
+        if (Number.isNaN(start)) return false;
+        return m.startDate.slice(0, 10) === todayKey;
+      } catch {
+        return false;
+      }
+    })
+    .slice(0, MAX_MATCHES);
+
+  if (toFetch.length === 0) return;
+
   let successCount = 0;
 
   for (let i = 0; i < toFetch.length; i += CONCURRENCY) {
@@ -846,9 +851,7 @@ async function enrichCoefficients(matches: TipsGgMatch[]): Promise<void> {
     }
   }
 
-  if (successCount > 0 || toFetch.length > 0) {
-    console.log(`[tipsgg] Coefficients: ${successCount}/${toFetch.length} enriched`);
-  }
+  console.log(`[tipsgg] Coefficients: ${successCount}/${toFetch.length} enriched (today only, cap ${MAX_MATCHES})`);
 }
 
 // ── Helpers ──
