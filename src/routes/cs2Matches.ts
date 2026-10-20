@@ -10,6 +10,7 @@ import { createMatchesRouter } from '../services/createMatchesRouter';
 import { fetchCs2Matches, type TipsGgMatch } from '../services/tipsggScraper';
 import { cstestLiveScoresStore } from '../services/hltv/cstestClient';
 import { fetchCstestMatches } from '../services/hltv/cstestClient';
+import { lookupHltvEventLogo, enrichTournamentLogos } from '../services/hltv/hltvEventsScraper';
 import { normalizeTeam, isSameMatch } from '../utils/matchUtils.js';
 import { join } from 'node:path';
 import {
@@ -96,9 +97,18 @@ async function fetchCs2MatchesAll(): Promise<TipsGgMatch[]> {
     console.log(`[cs2Matches] Custom matches: ${customMatches.length} (after dedup in ${all.length} total)`);
   }
 
+  // ── Enrich tournament logos from HLTV /events ──
+  // tips.gg CDN is missing many minor-tournament logos (their URLs 404), so
+  // prefer HLTV's comprehensive event-logo map via fuzzy name matching.
+  // Only overrides when HLTV yields a confident match (numeric-token agreement
+  // + Jaccard ≥ 0.6); otherwise the existing tips.gg logo is kept.
+  const hltvEnriched = await enrichTournamentLogos(all);
+  if (hltvEnriched > 0) console.log(`[cs2Matches] HLTV event logos enriched: ${hltvEnriched}`);
+
   const parts = [`cstest: ${cstest.length}`, `tips.gg: ${tipsgg.length}`];
   if (enriched > 0) parts.push(`enriched: ${enriched}`);
   if (fuzzyDeduped > 0) parts.push(`fuzzyDeduped: ${fuzzyDeduped}`);
+  if (hltvEnriched > 0) parts.push(`hltvLogos: ${hltvEnriched}`);
   console.log(`[cs2Matches] Merged: ${all.length} total (${parts.join(', ')})`);
 
   return all;

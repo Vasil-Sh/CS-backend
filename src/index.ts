@@ -42,6 +42,7 @@ import publicProfileRoutes from './routes/publicProfile';
 import matchesHistoryRoutes from './routes/matchesHistory';
 import { closeBrowser } from './services/tipsggScraper';
 import { fetchDota2Matches, fetchCs2Matches, fetchTodayMatches } from './services/tipsggScraper';
+import { enrichTournamentLogos } from './services/hltv/hltvEventsScraper';
 import { join } from 'node:path';
 import { readFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { execSync } from 'node:child_process';
@@ -673,6 +674,9 @@ function startFullRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: string)
           } catch { /* stale */ }
           const merged = new Map<string, any>(existing.map((m: any) => [m.id, m]));
           for (const m of fresh) merged.set(m.id, m);
+          // Enrich tournament logos from HLTV (tips.gg 404s for minor events)
+          const enriched = await enrichTournamentLogos([...merged.values()]);
+          if (enriched > 0) console.log(`[full-refresh] ${tag}: ${enriched} HLTV logos`);
           writeFileCacheInternal([...merged.values()], cacheFile);
           persistFinishedToHistory([...merged.values()], game, `full-refresh:${tag}`);
           console.log(`[full-refresh] ${tag}: ${fresh.length} fresh merged into ${merged.size} total`);

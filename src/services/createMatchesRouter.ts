@@ -13,9 +13,11 @@ import { recordFailure } from '../services/circuitBreaker';
 import type { ILiveScoresStore } from '../services/liveScoresStore';
 import { upsertMatchHistoryBatch } from '../services/matchHistoryService';
 import { getHltvLogoCache } from '../services/hltv/hltvRankingScraper';
+import { readTournamentLogo } from '../services/hltv/hltvEventsScraper';
 import { batchComputeTeamForms } from './teamFormService';
 import { lookupLocalLogo, lookupLocalLogoRank, lookupDota2LocalLogoRank, getLocalLogoDir, lookupTipsggLogo, lookupDota2LocalLogo, getDota2LogoDir } from '../services/logoStore';
 import { touchActivity } from './activityTracker';
+import { withHltvMarkets } from './hltv/hltvMarketCache';
 
 interface MatchRouterConfig {
   game: 'dota2' | 'cs2';
@@ -659,7 +661,7 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       // Matches are highly dynamic (incremental refresh every 2min, live scores every 7s).
       // Server-side SWR cache handles load — never let the browser cache this JSON.
       c.header('Cache-Control', 'no-store');
-      return c.json(filtered);
+      return c.json(game === 'cs2' ? withHltvMarkets(filtered) : filtered);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';
       console.error(`[${prefix}Matches] Scrape failed:`, message);
@@ -794,6 +796,30 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       const ext = filename.split('.').pop()?.toLowerCase() || 'png';
       const ct = ext === 'svg' ? 'image/svg+xml' : `image/${ext === 'jpg' ? 'jpeg' : ext}`;
       return new Response(readFileSync(filePath), {
+        headers: {
+          'Content-Type': ct,
+          'Cache-Control': 'public, max-age=86400, immutable',
+          'Access-Control-Allow-Origin': '*',
+        },
+      });
+    }
+    return c.json({ error: 'Not found' }, 404);
+  });
+
+  // ── GET /logo/tournament/:filename — serve locally-downloaded tournament logos ──
+  router.get('/logo/tournament/:filename', (c) => {
+    const filename = c.req.param('filename');
+    if (!filename) return c.json({ error: 'Not found' }, 404);
+
+    if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+      return c.json({ error: 'Invalid filename' }, 400);
+    }
+
+    const buf = readTournamentLogo(filename);
+    if (buf) {
+      const ext = filename.split('.').pop()?.toLowerCase() || 'png';
+      const ct = ext === 'svg' ? 'image/svg+xml' : `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+      return new Response(buf, {
         headers: {
           'Content-Type': ct,
           'Cache-Control': 'public, max-age=86400, immutable',
