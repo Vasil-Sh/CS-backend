@@ -26,6 +26,7 @@ function ensureDir() {
 const toCampaign = (b: {
   id: number;
   active: boolean;
+  slot: number | null;
   title: string;
   description: string | null;
   imageUrl: string | null;
@@ -33,6 +34,7 @@ const toCampaign = (b: {
 }) => ({
   id: String(b.id),
   active: b.active,
+  slot: b.slot ?? 1,
   title: b.title,
   description: b.description || '',
   imageUrl: b.imageUrl || '',
@@ -47,6 +49,44 @@ banners.get('/active', async (c) => {
   } catch (err: unknown) {
     console.error('[Banners/Active] Error:', (err as Error).message);
     return c.json({ error: 'Failed to fetch banners' }, 500);
+  }
+});
+
+/** GET /banners/slots — placeholder-enabled state per slot (public). */
+banners.get('/slots', async (c) => {
+  try {
+    const rows = await bannerService.listSlots();
+    return c.json({
+      slots: rows.map((r) => ({
+        slot: r.slot,
+        placeholderEnabled: r.placeholderEnabled,
+      })),
+    });
+  } catch (err: unknown) {
+    console.error('[Banners/Slots] Error:', (err as Error).message);
+    return c.json({ error: 'Failed to fetch banner slots' }, 500);
+  }
+});
+
+/** PUT /banners/slots/:slot — enable/disable placeholder for a slot (admin). */
+banners.put('/slots/:slot', requireAuth, requireAdmin, async (c) => {
+  const slot = parseInt(c.req.param('slot') || '', 10);
+  if (slot !== 1 && slot !== 2) return c.json({ error: 'Invalid slot' }, 400);
+  let body: { placeholderEnabled?: boolean };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid body' }, 400);
+  }
+  try {
+    const result = await bannerService.setSlotPlaceholder(
+      slot,
+      body.placeholderEnabled ?? false,
+    );
+    return c.json(result);
+  } catch (err: unknown) {
+    console.error('[Banners/SetSlot] Error:', (err as Error).message);
+    return c.json({ error: 'Failed to update slot' }, 500);
   }
 });
 
@@ -76,6 +116,7 @@ banners.post('/', requireAuth, requireAdmin, async (c) => {
   try {
     const banner = await bannerService.create({
       active: body.active ?? false,
+      slot: body.slot ?? 1,
       title,
       description: body.description || '',
       imageUrl: body.imageUrl || '',
@@ -104,6 +145,7 @@ banners.put('/:id', requireAuth, requireAdmin, async (c) => {
   try {
     const banner = await bannerService.update(id, {
       ...(body.active !== undefined ? { active: body.active } : {}),
+      ...(body.slot !== undefined ? { slot: body.slot } : {}),
       ...(body.title !== undefined ? { title: body.title.trim() } : {}),
       ...(body.description !== undefined ? { description: body.description } : {}),
       ...(body.imageUrl !== undefined ? { imageUrl: body.imageUrl } : {}),

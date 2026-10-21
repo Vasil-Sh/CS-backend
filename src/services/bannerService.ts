@@ -7,6 +7,7 @@ import { db, schema } from '../db/client';
 
 export type BannerInput = {
   active?: boolean;
+  slot?: number;
   title: string;
   description?: string;
   imageUrl?: string;
@@ -28,11 +29,32 @@ export class BannerService {
       .orderBy(asc(schema.banners.id));
   }
 
+  /** Placeholder-enabled state per slot (independent of banners). */
+  async listSlots() {
+    return db
+      .select()
+      .from(schema.bannerSlots)
+      .orderBy(asc(schema.bannerSlots.slot));
+  }
+
+  /** Enable/disable the demo placeholder for a slot. */
+  async setSlotPlaceholder(slot: number, enabled: boolean) {
+    await db
+      .insert(schema.bannerSlots)
+      .values({ slot, placeholderEnabled: enabled })
+      .onConflictDoUpdate({
+        target: schema.bannerSlots.slot,
+        set: { placeholderEnabled: enabled },
+      });
+    return { slot, placeholderEnabled: enabled };
+  }
+
   async create(data: BannerInput) {
     const [banner] = await db
       .insert(schema.banners)
       .values({
         active: data.active ?? false,
+        slot: data.slot ?? 1,
         title: data.title,
         description: data.description || '',
         imageUrl: data.imageUrl || '',
@@ -47,6 +69,7 @@ export class BannerService {
       .update(schema.banners)
       .set({
         ...(data.active !== undefined ? { active: data.active } : {}),
+        ...(data.slot !== undefined ? { slot: data.slot } : {}),
         ...(data.title !== undefined ? { title: data.title } : {}),
         ...(data.description !== undefined ? { description: data.description } : {}),
         ...(data.imageUrl !== undefined ? { imageUrl: data.imageUrl } : {}),

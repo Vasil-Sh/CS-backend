@@ -10,6 +10,7 @@ import {
   boolean,
   jsonb,
   integer,
+  smallint,
   uniqueIndex,
   index,
 } from 'drizzle-orm/pg-core';
@@ -344,6 +345,7 @@ export const banners = pgTable(
   {
     id: serial('id').primaryKey(),
     active: boolean('active').notNull().default(false),
+    slot: smallint('slot').notNull().default(1),
     title: varchar('title', { length: 200 }).notNull(),
     description: text('description').default(''),
     imageUrl: varchar('image_url', { length: 500 }).default(''),
@@ -356,6 +358,12 @@ export const banners = pgTable(
   },
   (table) => [index('banners_active_idx').on(table.active)]
 );
+
+// ── Per-slot placeholder toggles (independent of banner rows) ──
+export const bannerSlots = pgTable('banner_slots', {
+  slot: smallint('slot').primaryKey(),
+  placeholderEnabled: boolean('placeholder_enabled').notNull().default(false),
+});
 
 // ── Type exports ──
 
@@ -375,3 +383,4 @@ export type MatchHistory = typeof matchesHistory.$inferSelect;
 export type NewMatchHistory = typeof matchesHistory.$inferInsert;
 export type Banner = typeof banners.$inferSelect;
 export type NewBanner = typeof banners.$inferInsert;
+export type BannerSlot = typeof bannerSlots.$inferSelect;
