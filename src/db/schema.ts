@@ -87,6 +87,7 @@ export const bets = pgTable(
 
     logoTeam1: varchar('logo_team1', { length: 500 }),
     logoTeam2: varchar('logo_team2', { length: 500 }),
+    tournamentLogo: varchar('tournament_logo', { length: 500 }),
     expressLogos: jsonb('express_logos')
       .$type<{ logoTeam1?: string | null; logoTeam2?: string | null }[]>()
       .default([]),

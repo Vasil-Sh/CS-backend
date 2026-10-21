@@ -51,6 +51,7 @@ export const createBetSchema = z.object({
   tournament: z.string().max(200).optional().default(''),
   logoTeam1: z.string().nullable().optional(),
   logoTeam2: z.string().nullable().optional(),
+  tournamentLogo: z.string().nullable().optional(),
   expressLogos: z
     .array(
       z.object({

@@ -194,13 +194,14 @@ export class BetService {
       tournament: body.tournament || '',
       logoTeam1: body.logoTeam1,
       logoTeam2: body.logoTeam2,
+      tournamentLogo: body.tournamentLogo,
       expressLogos: body.expressLogos || [],
     };
   }
 
   private buildUpdateData(body: UpdateBetInput): Record<string, unknown> {
     const NUMERIC = new Set(['profit','odds','amount','roi','stake','originalAmount','exchangeRate','originalProfit','winProbability']);
-    const PASSTHROUGH = new Set(['result','notes','strategy','risk','match','team1','team2','betType','date','format','game','currency','goalId','selection','matchUrl','riskyTeams','tournament','logoTeam1','logoTeam2','expressLogos']);
+    const PASSTHROUGH = new Set(['result','notes','strategy','risk','match','team1','team2','betType','date','format','game','currency','goalId','selection','matchUrl','riskyTeams','tournament','logoTeam1','logoTeam2','tournamentLogo','expressLogos']);
     const data: Record<string, any> = {};
     for (const [key, value] of Object.entries(body)) {
       if (value === undefined) continue;
