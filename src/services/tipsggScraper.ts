@@ -1086,6 +1086,10 @@ function isQuietHours(): boolean {
  * Reasons: ban fallback, quiet hours, active cooldown.
  */
 export function shouldSkipTipsgg(): boolean {
+  // Kill switch — env flag disables ALL tips.gg traffic (manual unblock period)
+  if (process.env.TIPSGG_DISABLED === '1' || process.env.TIPSGG_DISABLED === 'true') {
+    return true;
+  }
   // Fallback mode (#16): banned until next morning
   if (Date.now() < _fallbackUntil) return true;
   // Quiet hours (#14): no scraping at night
@@ -1107,6 +1111,18 @@ function triggerBanCooldown(): void {
       `[tipsgg] Cloudflare ban detected — fallback-only mode until 6am UTC (${hours}h). `
     );
   }
+}
+
+/**
+ * Hard IP block — Cloudflare serves "Sorry, you have been blocked".
+ * These blocks last 24h+ and are NOT cleared by a single successful request,
+ * so we freeze tips.gg traffic for a full day instead of retrying every cycle.
+ */
+function triggerHardBan(): void {
+  const HARD_BAN_MS = 24 * 60 * 60 * 1000;
+  _fallbackUntil = Math.max(_fallbackUntil, Date.now() + HARD_BAN_MS);
+  const hours = Math.round((_fallbackUntil - Date.now()) / 3600000);
+  console.warn(`[tipsgg] HARD IP block detected — tips.gg traffic frozen for ${hours}h`);
 }
 
 function resetBanBackoff(): void {
@@ -1190,15 +1206,26 @@ export async function fetchLiveHtml(url: string, retries = 1): Promise<string | 
       });
       if (!resp.ok) {
         if (resp.status === 403 || resp.status === 429 || resp.status === 503) {
-          if (resp.status === 429) {
-            // Rate limited — definitely banned
-            triggerBanCooldown();
+          if (resp.status === 403 || resp.status === 429) {
+            // 403 = IP block, 429 = rate limit — both mean "stop hammering"
+            triggerHardBan();
           }
           continue; // retry on Cloudflare / rate limit
         }
         return null;
       }
       const html = await resp.text();
+      // Hard block page is short — detect BEFORE the length check,
+      // otherwise it slips through and the scraper retries forever.
+      if (
+        html.includes('Sorry, you have been blocked') ||
+        html.includes('You are unable to access') ||
+        html.includes('has been blocked')
+      ) {
+        console.warn('[fetchLiveHtml] Hard IP block detected on tips.gg');
+        triggerHardBan();
+        return null;
+      }
       if (html.length < 2000) return null;
       // Detect Cloudflare challenge
       const isCloudflare =
