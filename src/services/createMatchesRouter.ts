@@ -6,7 +6,7 @@
  */
 
 import { Hono } from 'hono';
-import { fetchMatchDetail, getBrowser, fetchHtml, type TipsGgMatch } from '../services/tipsggScraper';
+import { fetchMatchDetail, getBrowser, fetchHtml, shouldSkipTipsgg, type TipsGgMatch } from '../services/tipsggScraper';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, renameSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordFailure } from '../services/circuitBreaker';
@@ -925,6 +925,10 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       let buf: Buffer | null = null;
 
       if (isTipsGgCdn) {
+        // If tips.gg is banned (Cloudflare block), don't hang in Puppeteer —
+        // fall through to stale cache / 404 so the frontend shows its fallback icon.
+        if (shouldSkipTipsgg()) throw new Error('TIPSGG_SKIP');
+
         // Build variant URLs to try (tips.gg CDN filenames are unpredictable)
         const baseUrl = externalUrl.replace(/\.(png|svg|webp)$/i, '');
         const candidateUrls = [externalUrl];
