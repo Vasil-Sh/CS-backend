@@ -13,6 +13,15 @@ import { join } from 'node:path';
 import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { getCachedCoefficients, setCachedCoefficients } from './coefficientsCache';
 import { isOpen, recordSuccess, recordFailure } from './circuitBreaker';
+import {
+  hasProxies,
+  proxyCount,
+  currentProxy,
+  banProxy,
+  proxyDispatcher,
+  currentProxyUrl,
+  currentProxyAuth,
+} from './proxyPool';
 
 const TIPSGG_BASE = 'https://tips.gg';
 
@@ -1005,6 +1014,19 @@ let _browser: Browser | null = null;
 let _browserAge = 0;
 const MAX_BROWSER_AGE = 15 * 60 * 1000;
 
+/** Build a Chromium `--proxy-server` arg from the current pool proxy URL. */
+function chromiumProxyArg(): string {
+  const url = currentProxyUrl();
+  if (!url) return '';
+  try {
+    const u = new URL(url);
+    // Chromium wants scheme + host:port only (auth handled via page.authenticate).
+    return `--proxy-server=${u.protocol}//${u.host}`;
+  } catch {
+    return '';
+  }
+}
+
 /** Get or create a shared browser instance. */
 export async function getBrowser(): Promise<Browser> {
   // Browserless mode: connect via WebSocket (no lifecycle management needed)
@@ -1014,7 +1036,8 @@ export async function getBrowser(): Promise<Browser> {
       await _browser.close().catch(() => {});
       _browser = null;
     }
-    const wsUrl = `${BROWSERLESS_URL}?stealth&--disable-blink-features=AutomationControlled&--headless=new`;
+    const proxy = chromiumProxyArg();
+    const wsUrl = `${BROWSERLESS_URL}?stealth&--disable-blink-features=AutomationControlled&--headless=new${proxy ? `&${encodeURIComponent(proxy)}` : ''}`;
     _browser = await puppeteerExtra.connect({ browserWSEndpoint: wsUrl }) as Browser;
     console.log('[scraper] Connected to browserless');
     return _browser;
@@ -1033,6 +1056,7 @@ export async function getBrowser(): Promise<Browser> {
     await _browser.close().catch(() => {});
     _browser = null;
   }
+  const proxyArg = chromiumProxyArg();
   _browser = await puppeteerExtra.launch({
     headless: true,
     args: [
@@ -1043,6 +1067,7 @@ export async function getBrowser(): Promise<Browser> {
       '--disable-blink-features=AutomationControlled',
       '--headless=new',
       '--window-position=-32000,-32000',
+      ...(proxyArg ? [proxyArg] : []),
     ],
   });
   _browserAge = now;
@@ -1055,6 +1080,7 @@ export async function getBrowser(): Promise<Browser> {
 
 let _lastTipsggRequest = 0;
 const TIPSGG_MIN_DELAY_MS = 800; // minimum 800ms between HTTP requests to tips.gg
+const PROXY_BAN_MS = 10 * 60 * 1000; // ban a blocked proxy for 10 min before reusing
 
 // ═══════════════════════════════════════════════════════════════
 // Fallback-only mode (#16): once banned, don't touch tips.gg
@@ -1090,10 +1116,11 @@ export function shouldSkipTipsgg(): boolean {
   if (process.env.TIPSGG_DISABLED === '1' || process.env.TIPSGG_DISABLED === 'true') {
     return true;
   }
-  // Fallback mode (#16): banned until next morning
-  if (Date.now() < _fallbackUntil) return true;
   // Quiet hours (#14): no scraping at night
   if (isQuietHours()) return true;
+  // Fallback mode (#16): banned until next morning — but only when we have
+  // no proxies to rotate through. With proxies, keep trying other IPs.
+  if (Date.now() < _fallbackUntil && !hasProxies()) return true;
   return false;
 }
 
@@ -1178,18 +1205,24 @@ function nextUA(): string {
  */
 export async function fetchLiveHtml(url: string, retries = 1): Promise<string | null> {
   await tipsggRateLimit();
-  for (let attempt = 0; attempt <= retries; attempt++) {
+  // With proxies, retry once per proxy so a blocked IP rotates to the next one.
+  const maxAttempts = hasProxies() ? Math.max(retries, proxyCount() - 1) : retries;
+  for (let attempt = 0; attempt <= maxAttempts; attempt++) {
     try {
       if (attempt > 0) {
         await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 500));
       }
       const ua = nextUA();
+      const dispatcher = proxyDispatcher();
+      const proxyUrl = currentProxyUrl();
       // Build Referer: match listing → game root, detail → listing page
       const urlObj = new URL(url);
       const referer = url.includes('/matches/')
         ? `https://tips.gg/${urlObj.pathname.split('/')[1] || ''}/`
         : 'https://tips.gg/';
-      const resp = await fetch(url, {
+      // `dispatcher` is an undici extension to fetch — not part of RequestInit.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const init: any = {
         headers: {
           'User-Agent': ua,
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -1203,10 +1236,18 @@ export async function fetchLiveHtml(url: string, retries = 1): Promise<string | 
           'Upgrade-Insecure-Requests': '1',
         },
         signal: AbortSignal.timeout(8000),
-      });
+      };
+      if (dispatcher) init.dispatcher = dispatcher;
+      const resp = await fetch(url, init);
       if (!resp.ok) {
         if (resp.status === 403 || resp.status === 429 || resp.status === 503) {
-          if (resp.status === 403 || resp.status === 429) {
+          if (hasProxies()) {
+            // Ban this proxy; the next iteration auto-skips to a non-banned one.
+            banProxy(currentProxy(), PROXY_BAN_MS);
+            console.warn(
+              `[fetchLiveHtml] proxy blocked (${resp.status}) — rotating ${proxyUrl || '(none)'}`,
+            );
+          } else if (resp.status === 403 || resp.status === 429) {
             // 403 = IP block, 429 = rate limit — both mean "stop hammering"
             triggerHardBan();
           }
@@ -1222,6 +1263,11 @@ export async function fetchLiveHtml(url: string, retries = 1): Promise<string | 
         html.includes('You are unable to access') ||
         html.includes('has been blocked')
       ) {
+        if (hasProxies()) {
+          console.warn(`[fetchLiveHtml] Hard block via proxy ${proxyUrl || '(none)'} — rotating`);
+          banProxy(currentProxy(), PROXY_BAN_MS);
+          continue;
+        }
         console.warn('[fetchLiveHtml] Hard IP block detected on tips.gg');
         triggerHardBan();
         return null;
@@ -1234,6 +1280,11 @@ export async function fetchLiveHtml(url: string, retries = 1): Promise<string | 
         html.includes('Attention Required') || /Ray ID: [0-9a-f]+/.test(html) ||
         (html.length < 5000 && !html.includes('class="element match') && !html.includes('application/ld+json'));
       if (isCloudflare) {
+        if (hasProxies()) {
+          console.warn(`[fetchLiveHtml] Cloudflare challenge via proxy ${proxyUrl || '(none)'} — rotating`);
+          banProxy(currentProxy(), PROXY_BAN_MS);
+          continue;
+        }
         console.warn('[fetchLiveHtml] Cloudflare challenge detected');
         triggerBanCooldown();
         return null;
@@ -1259,7 +1310,7 @@ export async function fetchLiveHtml(url: string, retries = 1): Promise<string | 
         console.warn(`[fetchLiveHtml] Skipping — banned`);
         return null;
       }
-      if (attempt === retries) {
+      if (attempt === maxAttempts) {
         console.warn(`[fetchLiveHtml] HTTP fetch failed for ${url}: ${msg}`);
         return null;
       }
@@ -1285,6 +1336,10 @@ export async function fetchHtml(url: string, retries = 3): Promise<string> {
       page = await browser.newPage();
       await page.setUserAgent(PUPPETEER_UA);
       await page.setViewport({ width: 1920, height: 1080 });
+      const proxyAuth = currentProxyAuth();
+      if (proxyAuth) {
+        await page.authenticate(proxyAuth).catch(() => {});
+      }
       await page.setExtraHTTPHeaders({
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9,uk;q=0.8',
