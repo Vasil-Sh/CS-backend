@@ -33,6 +33,15 @@ python -m venv .venv
 .venv\Scripts\python scripts\scrapling\scrapling_scrape.py hltv
 ```
 
+Or use the wrapper, which loads `backend/.env` (so `TIPSGG_PROXIES` reaches the
+Python process) and tees output to a timestamped log under `.cache/logs`:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File run-scrapling.ps1 -Target all
+powershell -NoProfile -ExecutionPolicy Bypass -File run-scrapling.ps1 -Target tipsgg   # dota2 + cs2
+powershell -NoProfile -ExecutionPolicy Bypass -File run-scrapling.ps1 -Target hltv
+```
+
 Options:
 
 | Flag | Default | Meaning |
