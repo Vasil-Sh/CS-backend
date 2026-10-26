@@ -3,3 +3,8 @@ dist/
 .env
 *.log
 .cache/
+
+# Python (Scrapling scraper)
+.venv/
+__pycache__/
+*.pyc

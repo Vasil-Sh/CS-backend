@@ -9,8 +9,35 @@
  */
 
 import { getBrowser } from '../tipsggScraper';
+import { readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
 
 const HLTV_RANKING_URL = 'https://www.hltv.org/ranking/teams';
+
+/** File cache written by the Scrapling Python script (scripts/scrapling/). */
+const HLTV_LOGO_CACHE_FILE = join(process.cwd(), '.cache', 'hltv_logos.json');
+
+/**
+ * Read HLTV logo map from disk (written by the Scrapling Python script).
+ * Returns null when the file is missing, stale (>24h), or malformed.
+ */
+function readHltvLogosFromDisk(): HltvLogoMap | null {
+  try {
+    if (!existsSync(HLTV_LOGO_CACHE_FILE)) return null;
+    const raw = readFileSync(HLTV_LOGO_CACHE_FILE, 'utf-8');
+    const entry = JSON.parse(raw);
+    if (!entry || typeof entry !== 'object' || typeof entry.data !== 'object') return null;
+    const ts = typeof entry.ts === 'number' ? entry.ts : 0;
+    if (Date.now() - ts > 24 * 60 * 60 * 1000) return null;
+    const map = new Map<string, string>();
+    for (const [k, v] of Object.entries(entry.data)) {
+      if (typeof v === 'string') map.set(k, v);
+    }
+    return map.size > 0 ? map : null;
+  } catch {
+    return null;
+  }
+}
 
 /** Map of normalized team name → logo CDN URL */
 export type HltvLogoMap = Map<string, string>;
@@ -32,6 +59,15 @@ function normalizeTeamName(name: string): string {
  * HLTV serves team logos via img-cdn.hltv.org (not behind Cloudflare).
  */
 export async function scrapeHltvRankingLogos(): Promise<HltvLogoMap> {
+  // Fast path: use the cache written by the Scrapling Python script. It bypasses
+  // the Cloudflare 403 that blocks our in-process HTTP fetch of the ranking page.
+  const fromDisk = readHltvLogosFromDisk();
+  if (fromDisk) {
+    _globalHltvLogoMap = fromDisk;
+    console.log(`[hltvRanking] Loaded ${fromDisk.size} team logos from Scrapling cache`);
+    return fromDisk;
+  }
+
   const map = new Map<string, string>();
 
   try {
@@ -93,6 +129,7 @@ export async function scrapeHltvRankingLogos(): Promise<HltvLogoMap> {
     }
 
     console.log(`[hltvRanking] Scraped ${map.size / 2} team logos from HLTV ranking`);
+    _globalHltvLogoMap = map;
   } catch (err) {
     console.warn('[hltvRanking] Scrape failed:', (err as Error).message);
   }
