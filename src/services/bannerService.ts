@@ -2,12 +2,21 @@
 // Banner Service — global advertising banners for the matches schedule
 // ═══════════════════════════════════════════
 
-import { asc, eq } from 'drizzle-orm';
-import { db, schema } from '../db/client';
+import { asc, eq, and, or, isNull, lte, gte, sql } from "drizzle-orm";
+import { db, schema } from "../db/client";
+import {
+  periodsOverlap,
+  validPlacement,
+  BannerConflict,
+  BannerPeriodError,
+} from "./bannerRules";
 
 export type BannerInput = {
   active?: boolean;
   slot?: number;
+  screen?: string;
+  startsOn?: string | null;
+  endsOn?: string | null;
   title: string;
   description?: string;
   imageUrl?: string;
@@ -21,11 +30,30 @@ export class BannerService {
   }
 
   /** Active banner(s) exposed to the public schedule. */
-  async listActive() {
+  async listActive(screen = "matches") {
     return db
       .select()
       .from(schema.banners)
-      .where(eq(schema.banners.active, true))
+      .where(
+        and(
+          eq(schema.banners.active, true),
+          eq(schema.banners.screen, screen),
+          or(
+            isNull(schema.banners.startsOn),
+            lte(
+              schema.banners.startsOn,
+              sql`(now() AT TIME ZONE 'Europe/Kyiv')::date`,
+            ),
+          ),
+          or(
+            isNull(schema.banners.endsOn),
+            gte(
+              schema.banners.endsOn,
+              sql`(now() AT TIME ZONE 'Europe/Kyiv')::date`,
+            ),
+          ),
+        ),
+      )
       .orderBy(asc(schema.banners.id));
   }
 
@@ -50,34 +78,76 @@ export class BannerService {
   }
 
   async create(data: BannerInput) {
-    const [banner] = await db
-      .insert(schema.banners)
-      .values({
-        active: data.active ?? false,
-        slot: data.slot ?? 1,
-        title: data.title,
-        description: data.description || '',
-        imageUrl: data.imageUrl || '',
-        href: data.href || '',
-      })
-      .returning();
+    const banner = await this.save(undefined, data);
+    if (!banner) throw new Error("Banner creation failed");
     return banner;
   }
 
   async update(id: number, data: Partial<BannerInput>) {
-    const [banner] = await db
-      .update(schema.banners)
-      .set({
-        ...(data.active !== undefined ? { active: data.active } : {}),
-        ...(data.slot !== undefined ? { slot: data.slot } : {}),
-        ...(data.title !== undefined ? { title: data.title } : {}),
-        ...(data.description !== undefined ? { description: data.description } : {}),
-        ...(data.imageUrl !== undefined ? { imageUrl: data.imageUrl } : {}),
-        ...(data.href !== undefined ? { href: data.href } : {}),
-      })
-      .where(eq(schema.banners.id, id))
-      .returning();
-    return banner;
+    return this.save(id, data);
+  }
+
+  private async save(id: number | undefined, data: Partial<BannerInput>) {
+    return db.transaction(async (tx) => {
+      // Serialize placement changes so simultaneous administrators cannot book the same slot.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(7492011)`);
+      const rows = await tx.select().from(schema.banners);
+      const existing =
+        id === undefined ? undefined : rows.find((row) => row.id === id);
+      if (id !== undefined && !existing) return undefined;
+      const candidate = {
+        active: false,
+        slot: 1,
+        screen: "matches",
+        startsOn: null,
+        endsOn: null,
+        title: "",
+        description: "",
+        imageUrl: "",
+        href: "",
+        ...existing,
+        ...data,
+      };
+      if (!validPlacement(candidate))
+        throw new BannerPeriodError(
+          "Завершення показу не може бути раніше початку",
+        );
+      if (
+        candidate.active &&
+        rows.some(
+          (row) =>
+            row.id !== id &&
+            row.active &&
+            row.screen === candidate.screen &&
+            row.slot === candidate.slot &&
+            periodsOverlap(row, candidate),
+        )
+      ) {
+        throw new BannerConflict(
+          "Цей слот уже зайнятий активним банером у вибраний період. Змініть дати, слот або вимкніть інший банер.",
+        );
+      }
+      const values = {
+        active: candidate.active,
+        slot: candidate.slot,
+        screen: candidate.screen,
+        startsOn: candidate.startsOn,
+        endsOn: candidate.endsOn,
+        title: candidate.title,
+        description: candidate.description,
+        imageUrl: candidate.imageUrl,
+        href: candidate.href,
+      };
+      const [banner] =
+        id === undefined
+          ? await tx.insert(schema.banners).values(values).returning()
+          : await tx
+              .update(schema.banners)
+              .set(values)
+              .where(eq(schema.banners.id, id))
+              .returning();
+      return banner;
+    });
   }
 
   async remove(id: number): Promise<void> {

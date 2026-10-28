@@ -6,8 +6,8 @@ import sharp from 'sharp';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { bannerService, type BannerInput } from '../services/bannerService';
 
+import { bannerScreens as screens, validPlacement, BannerConflict, BannerPeriodError } from '../services/bannerRules';
 const banners = new Hono();
-
 const BANNER_DIR = join(process.cwd(), '.cache', 'banners');
 
 const MIME_EXT: Record<string, string> = {
@@ -27,6 +27,9 @@ const toCampaign = (b: {
   id: number;
   active: boolean;
   slot: number | null;
+  screen: string;
+  startsOn: string | null;
+  endsOn: string | null;
   title: string;
   description: string | null;
   imageUrl: string | null;
@@ -35,6 +38,9 @@ const toCampaign = (b: {
   id: String(b.id),
   active: b.active,
   slot: b.slot ?? 1,
+  screen: b.screen,
+  startsOn: b.startsOn,
+  endsOn: b.endsOn,
   title: b.title,
   description: b.description || '',
   imageUrl: b.imageUrl || '',
@@ -44,7 +50,9 @@ const toCampaign = (b: {
 /** GET /banners/active — active campaigns for the public schedule (no auth). */
 banners.get('/active', async (c) => {
   try {
-    const rows = await bannerService.listActive();
+    const screen = c.req.query('screen') || 'matches';
+    if (!screens.includes(screen)) return c.json({ error: 'Invalid screen' }, 400);
+    const rows = await bannerService.listActive(screen);
     return c.json({ banners: rows.map(toCampaign) });
   } catch (err: unknown) {
     console.error('[Banners/Active] Error:', (err as Error).message);
@@ -109,7 +117,8 @@ banners.post('/', requireAuth, requireAdmin, async (c) => {
   } catch {
     return c.json({ error: 'Invalid body' }, 400);
   }
-  const title = (body.title || '').trim();
+  if (!validPlacement(body)) return c.json({ error: 'Невірний екран, слот або період показу' }, 400);
+  const title = typeof body.title === 'string' ? body.title.trim() : '';
   if (!title || title.length > 200) {
     return c.json({ error: 'Назва банера обовʼязкова (до 200 символів)' }, 400);
   }
@@ -117,6 +126,9 @@ banners.post('/', requireAuth, requireAdmin, async (c) => {
     const banner = await bannerService.create({
       active: body.active ?? false,
       slot: body.slot ?? 1,
+      screen: body.screen ?? "matches",
+      startsOn: body.startsOn ?? null,
+      endsOn: body.endsOn ?? null,
       title,
       description: body.description || '',
       imageUrl: body.imageUrl || '',
@@ -124,6 +136,8 @@ banners.post('/', requireAuth, requireAdmin, async (c) => {
     });
     return c.json(toCampaign(banner), 201);
   } catch (err: unknown) {
+    if (err instanceof BannerConflict) return c.json({error:err.message},409);
+    if (err instanceof BannerPeriodError) return c.json({error:err.message},400);
     console.error('[Banners/Create] Error:', (err as Error).message);
     return c.json({ error: 'Failed to create banner' }, 500);
   }
@@ -139,13 +153,17 @@ banners.put('/:id', requireAuth, requireAdmin, async (c) => {
   } catch {
     return c.json({ error: 'Invalid body' }, 400);
   }
-  if (body.title !== undefined && !(body.title || '').trim()) {
+  if (!validPlacement(body)) return c.json({ error: 'Невірний екран, слот або період показу' }, 400);
+  if (body.title !== undefined && (typeof body.title !== 'string' || !body.title.trim() || body.title.length > 200)) {
     return c.json({ error: 'Назва банера не може бути порожньою' }, 400);
   }
   try {
     const banner = await bannerService.update(id, {
       ...(body.active !== undefined ? { active: body.active } : {}),
       ...(body.slot !== undefined ? { slot: body.slot } : {}),
+      ...(body.screen !== undefined ? { screen: body.screen } : {}),
+      ...(body.startsOn !== undefined ? { startsOn: body.startsOn } : {}),
+      ...(body.endsOn !== undefined ? { endsOn: body.endsOn } : {}),
       ...(body.title !== undefined ? { title: body.title.trim() } : {}),
       ...(body.description !== undefined ? { description: body.description } : {}),
       ...(body.imageUrl !== undefined ? { imageUrl: body.imageUrl } : {}),
@@ -154,6 +172,8 @@ banners.put('/:id', requireAuth, requireAdmin, async (c) => {
     if (!banner) return c.json({ error: 'Banner not found' }, 404);
     return c.json(toCampaign(banner));
   } catch (err: unknown) {
+    if (err instanceof BannerConflict) return c.json({error:err.message},409);
+    if (err instanceof BannerPeriodError) return c.json({error:err.message},400);
     console.error('[Banners/Update] Error:', (err as Error).message);
     return c.json({ error: 'Failed to update banner' }, 500);
   }

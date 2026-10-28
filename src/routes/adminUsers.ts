@@ -1,3 +1,4 @@
+import { pool } from '../db/client';
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { adminUsersService } from '../services/adminUsersService';
@@ -28,4 +29,13 @@ adminUsers.get('/admin/users/:id/bets', requireAuth, requireAdmin, async (c) => 
   }
 });
 
+adminUsers.get('/admin/audit', requireAuth, requireAdmin, async (c) => {
+ const page = Math.max(1, Math.min(100000, Number(c.req.query('page')) || 1));
+ const offset = (Math.floor(page) - 1) * 30;
+ const result = await pool.query(`SELECT a.*, COALESCE(a.details->>'targetUsername', a.details->>'username', u.username) AS target_username
+ FROM admin_audit_log a
+ LEFT JOIN users u ON u.id::text = substring(a.target from '^/auth/users/([0-9]+)')
+ ORDER BY a.created_at DESC, a.id DESC LIMIT 31 OFFSET $1`, [offset]);
+ return c.json({ entries: result.rows.slice(0,30), hasMore: result.rows.length > 30 });
+});
 export default adminUsers;

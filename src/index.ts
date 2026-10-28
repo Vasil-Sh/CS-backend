@@ -11,6 +11,7 @@ import { csrf } from 'hono/csrf';
 import { compress } from 'hono/compress';
 import { serve } from '@hono/node-server';
 import { authMiddleware } from './middleware/auth';
+import { adminAudit } from './middleware/adminAudit';
 import { loggerMiddleware } from './middleware/logger';
 import { rateLimiterMiddleware } from './middleware/rateLimiter';
 import { bodyLimit } from './middleware/bodyLimit';
@@ -97,6 +98,7 @@ app.use('*', loggerMiddleware);
 app.use('*', rateLimiterMiddleware);
 app.use('*', bodyLimit(2_100_000)); // 2.1MB max body (1.5MB file + base64 overhead)
 app.use('*', authMiddleware);
+app.use('*', adminAudit);
 
 // ── Convert ALL string numbers to real numbers in JSON responses ──
 // Skips responses smaller than 1KB (auth, health, tokens etc.) to avoid
