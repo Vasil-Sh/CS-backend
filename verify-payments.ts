@@ -22,7 +22,9 @@ try {
  assert.equal((await client.query('SELECT COUNT(*)::int AS count FROM admin_payments')).rows[0].count,1);
  assert.equal((await send('/admin/users/6/payments',{...data,amount:'251'})).status,409);
  const list=await app.request('/admin/users/6/payments',{headers:{'x-test-role':'admin'}});assert.equal(list.status,200);assert.equal((await list.json() as {payments:unknown[]}).payments.length,1);
+ const summaryBefore:any=await (await app.request('/admin/users/6/payments?page=2',{headers:{'x-test-role':'admin'}})).json();assert.equal(Number(summaryBefore.summary.total),250.5);assert.equal(summaryBefore.summary.latest.id,id);
  assert.equal((await send(`/admin/payments/${id}/cancel`,{reason:'wrong entry'})).status,200);
+ const summaryAfter:any=await (await app.request('/admin/users/6/payments',{headers:{'x-test-role':'admin'}})).json();assert.equal(Number(summaryAfter.summary.total),0);assert.equal(summaryAfter.summary.latest,null);
  assert.equal((await send(`/admin/payments/${id}/cancel`,{reason:'again'})).status,200);
  assert.equal((await client.query("SELECT COUNT(*)::int AS count FROM admin_audit_log")).rows[0].count,2);
  assert.equal((await client.query("SELECT COALESCE(SUM(amount),0)::text AS amount FROM admin_payments WHERE status='recorded'")).rows[0].amount,'0');

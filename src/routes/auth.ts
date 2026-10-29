@@ -75,7 +75,7 @@ auth.post('/logout', async (c) => {
 auth.post('/register', requireAuth, requireAdmin, async (c) => {
   let body;
   try { body = registerSchema.parse(await c.req.json()); } catch { return c.json({ error: 'Invalid input' }, 400); }
-  const result = await authService.register(body);
+  const result = await authService.register(body, c.get('user'));
   if (!result) return c.json({ error: 'Username already exists' }, 409);
   return c.json({ success: true, userId: result.userId, username: result.username, password: result.password }, 201);
 });

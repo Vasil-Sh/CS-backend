@@ -4,7 +4,7 @@
 
 import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { db, schema } from '../db/client';
 import { signToken, signRefreshToken } from '../utils/jwt';
 import type { AuthResult } from './types';
@@ -43,24 +43,37 @@ export class AuthService {
 
   async register(data: {
     username: string; password?: string; telegram?: string; role?: string;
-    priceMonth?: string; endDate?: string;
-  }) {
+    priceMonth?: string; startDate?: string; endDate?: string;
+  }, actor?: {userId:number; username:string}) {
     const existing = await db.select().from(schema.users).where(eq(schema.users.username, data.username)).limit(1);
     if (existing.length > 0) return null;
 
     const plainPassword = data.password || generatePassword();
     const passwordHash = await bcrypt.hash(plainPassword, 10);
 
-    const [user] = await db.insert(schema.users).values({
+    return db.transaction(async tx => {
+    const [user] = await tx.insert(schema.users).values({
       username: data.username,
       passwordHash,
       role: data.role || 'user',
       telegram: data.telegram || '',
       priceMonth: data.priceMonth || '0',
+      startDate: toPgDate(data.startDate),
       endDate: toPgDate(data.endDate),
     }).returning();
 
+    if (actor && Number(user.priceMonth) > 0) {
+      const paidOn = new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Kyiv',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+      const start = user.startDate || paidOn;
+      const end = user.endDate || start;
+      if (end < start) throw new Error('Дата завершення має бути не раніше початку підписки');
+      await tx.execute(sql`INSERT INTO admin_payments(request_id,user_id,username,amount,paid_on,period_start,period_end,note,extend_subscription,created_by,created_by_name)
+        VALUES(${crypto.randomUUID()},${user.id},${user.username},${user.priceMonth},${paidOn},${start},${end},'Перша оплата при створенні користувача',false,${actor.userId},${actor.username})`);
+      const details=JSON.stringify({targetUsername:user.username,_targetUserId:String(user.id),amount:user.priceMonth,currency:'UAH',paidOn,periodStart:start,periodEnd:end,source:'registration'});
+      await tx.execute(sql`INSERT INTO admin_audit_log(actor_id,actor_name,action,target,details,status) VALUES(${actor.userId},${actor.username},'POST',${`/admin/users/${user.id}/payments`},${details},'success')`);
+    }
     return { userId: user.id, username: user.username, password: plainPassword };
+    });
   }
 
   /** Public register result — no password exposure */

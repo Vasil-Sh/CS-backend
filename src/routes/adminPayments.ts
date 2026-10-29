@@ -8,7 +8,9 @@ routes.get('/admin/users/:id/payments',requireAuth,requireAdmin,async c=>{
  const id=c.req.param('id')||'';if(!/^\d+$/.test(id))return c.json({error:'Invalid user'},400);
  const page=Math.max(1,Math.min(100000,Math.floor(Number(c.req.query('page'))||1)));
  const result=await pool.query(`SELECT ${columns} FROM admin_payments WHERE user_id::text=$1 ORDER BY paid_on DESC,id DESC LIMIT 21 OFFSET $2`,[id,(page-1)*20]);
- return c.json({payments:result.rows.slice(0,20),hasMore:result.rows.length>20});
+ const summary=await pool.query(`SELECT COALESCE(SUM(amount),0)::text AS total, COUNT(*)::int AS count FROM admin_payments WHERE user_id::text=$1 AND status='recorded'`,[id]);
+ const latest=await pool.query(`SELECT ${columns} FROM admin_payments WHERE user_id::text=$1 AND status='recorded' ORDER BY paid_on DESC,id DESC LIMIT 1`,[id]);
+ return c.json({payments:result.rows.slice(0,20),hasMore:result.rows.length>20,summary:{...summary.rows[0],latest:latest.rows[0]||null}});
 });
 routes.post('/admin/users/:id/payments',requireAuth,requireAdmin,async c=>{
  const id=c.req.param('id')||'';if(!/^\d+$/.test(id))return c.json({error:'Invalid user'},400);
