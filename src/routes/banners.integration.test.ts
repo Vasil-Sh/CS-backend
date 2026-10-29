@@ -62,7 +62,18 @@ describe("banner and audit API", () => {
     const response = await app("admin").request("/admin/audit?page=2");
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ entries: [], hasMore: false });
-    expect(vi.mocked(pool.query).mock.calls[0][1]).toEqual([30]);
+    expect(vi.mocked(pool.query).mock.calls[0][1]).toEqual([30, "all", "all", "", null, null, null, false]);
+  });
+  it("passes audit filters to the database and rejects unknown filters", async () => {
+    expect((await app('admin').request('/admin/audit?category=banners&status=failed')).status).toBe(200);
+    expect(vi.mocked(pool.query).mock.calls[0][1]).toEqual([0,'banners','failed','',null,null,null,false]);
+    expect((await app('admin').request('/admin/audit?category=unknown')).status).toBe(400);
+  });
+  it("validates audit dates and passes username and subscription filters",async()=>{
+    const result=await app('admin').request('/admin/audit?q=test_user&from=2026-10-01&to=2026-10-29&userId=6&history=subscription');
+    expect(result.status).toBe(200);
+    expect(vi.mocked(pool.query).mock.calls[0][1]).toEqual([0,'all','all','test_user','2026-10-01','2026-10-29','6',true]);
+    for(const query of ['from=2026-02-30','from=2026-11-01&to=2026-10-01','userId=bad']) expect((await app('admin').request('/admin/audit?'+query)).status).toBe(400);
   });
   it("rejects invalid dates before saving", async () => {
     const response = await app("admin").request("/banners", {

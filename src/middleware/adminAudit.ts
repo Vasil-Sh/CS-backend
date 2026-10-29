@@ -1,4 +1,5 @@
 import type { Context, Next } from "hono";
+import { auditChanges, type AuditSnapshot } from "../services/auditChanges";
 import { pool } from "../db/client";
 
 export async function adminAudit(c: Context, next: Next) {
@@ -46,11 +47,20 @@ export async function adminAudit(c: Context, next: Next) {
     )
       details[key] = typeof value === "string" ? value.slice(0, 200) : value;
   }
-  const targetUserId = path.match(/^\/auth\/users\/(\d+)(?:\/reset-password)?$/)?.[1];
-  if (targetUserId) {
-    const user = await pool.query('SELECT username FROM users WHERE id::text = $1', [targetUserId]);
-    if (user.rows[0]?.username) details.targetUsername = user.rows[0].username;
+  let targetId = path.match(/^\/auth\/users\/(\d+)(?:\/reset-password)?$/)?.[1] || path.match(/^\/banners\/(\d+)$/)?.[1] || path.match(/^\/banners\/slots\/([12])$/)?.[1];
+  const isUser = path.startsWith('/auth/');
+  const isSlot = path.startsWith('/banners/slots/');
+  async function snapshot(id?: string): Promise<AuditSnapshot | null> {
+    if(!id) return null;
+    const query = isUser
+     ? 'SELECT username, telegram, role, price_month::text AS "priceMonth", start_date::text AS "startDate", end_date::text AS "endDate" FROM users WHERE id::text=$1'
+     : isSlot ? 'SELECT placeholder_enabled AS "placeholderEnabled" FROM banner_slots WHERE slot::text=$1'
+     : 'SELECT title, description, href, active, screen, slot, starts_on::text AS "startsOn", ends_on::text AS "endsOn" FROM banners WHERE id::text=$1';
+    const result=await pool.query(query,[id]);
+    return result.rows[0] || null;
   }
+  const before = await snapshot(targetId);
+  if (isUser && before?.username) details.targetUsername = before.username;
   // Record the attempt before mutation; never store passwords, tokens or uploaded data.
   const result = await pool.query(
     "INSERT INTO admin_audit_log (actor_id,actor_name,action,target,details) VALUES ($1,$2,$3,$4,$5) RETURNING id",
@@ -60,10 +70,19 @@ export async function adminAudit(c: Context, next: Next) {
     await next();
   } finally {
     try {
-      await pool.query("UPDATE admin_audit_log SET status=$1 WHERE id=$2", [
-        c.error || c.res.status >= 400 ? "failed" : "success",
-        result.rows[0].id,
-      ]);
+      const status = c.error || c.res.status >= 400 ? "failed" : "success";
+      if(status === "success") {
+        if(method === "POST" && !targetId) {
+          const response = await c.res.clone().json().catch(()=>({})) as {userId?: number; id?: number | string};
+          const createdId = response.userId ?? response.id;
+          if(createdId != null) targetId=String(createdId);
+        }
+        const after = method === "DELETE" ? null : await snapshot(targetId);
+        if(!path.endsWith('/reset-password')) details._changes=auditChanges(before,after);
+        if(isUser && targetId) details._targetUserId=targetId;
+        if(isUser && !details.targetUsername && after?.username) details.targetUsername=after.username;
+      }
+      await pool.query("UPDATE admin_audit_log SET status=$1, details=$3 WHERE id=$2", [status,result.rows[0].id,JSON.stringify(details)]);
     } catch (error) {
       console.error("[Audit] Could not finalize event", result.rows[0].id);
     }
