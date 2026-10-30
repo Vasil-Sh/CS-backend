@@ -62,7 +62,7 @@ adminUsers.put('/admin/users/:id/note', requireAuth, requireAdmin, async c => {
 
 adminUsers.get('/admin/audit', requireAuth, requireAdmin, async (c) => {
  const page = Math.max(1, Math.min(100000, Number(c.req.query('page')) || 1));
- const offset = (Math.floor(page) - 1) * 30;
+ const offset = (Math.floor(page) - 1) * 25;
  const category = c.req.query('category') || 'all';
  const status = c.req.query('status') || 'all';
  const search = (c.req.query('q') || '').trim().slice(0,100);
@@ -82,8 +82,8 @@ adminUsers.get('/admin/audit', requireAuth, requireAdmin, async (c) => {
  AND ($6::date IS NULL OR a.created_at < (($6::date + 1)::timestamp AT TIME ZONE 'Europe/Kyiv'))
  AND ($7::text IS NULL OR substring(a.target from '^/auth/users/([0-9]+)') = $7 OR a.details->>'_targetUserId' = $7)
  AND (NOT $8::boolean OR (a.status='success' AND (a.target LIKE '/auth/%' OR a.target LIKE '/admin/users/%/payments') AND ((CASE WHEN a.details ? '_changes' THEN (a.details->'_changes') ?| ARRAY['startDate','endDate','priceMonth'] ELSE a.details ?| ARRAY['startDate','endDate','priceMonth'] END) OR a.target='/auth/register')))
- ORDER BY a.created_at DESC, a.id DESC LIMIT 31 OFFSET $1`, [offset, category, status, search, from, to, userId, history]);
- return c.json({ entries: result.rows.slice(0,30), hasMore: result.rows.length > 30 });
+ ORDER BY a.created_at DESC, a.id DESC LIMIT 26 OFFSET $1`, [offset, category, status, search, from, to, userId, history]);
+ return c.json({ entries: result.rows.slice(0,25), hasMore: result.rows.length > 25 });
 });
 
 /** GET /admin/audit/export — full CSV export honoring the same filters. */
