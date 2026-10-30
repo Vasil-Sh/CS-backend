@@ -369,6 +369,16 @@ export const bannerSlots = pgTable('banner_slots', {
   placeholderEnabled: boolean('placeholder_enabled').notNull().default(false),
 });
 
+// ── App settings (admin-managed key/value) ──
+export const appSettings = pgTable('app_settings', {
+  key: varchar('key', { length: 100 }).primaryKey(),
+  value: text('value').notNull().default(''),
+  updatedAt: timestamp('updated_at')
+    .defaultNow()
+    .$onUpdate(() => new Date())
+    .notNull(),
+});
+
 // ── Type exports ──
 
 export type User = typeof users.$inferSelect;
@@ -388,3 +398,4 @@ export type NewMatchHistory = typeof matchesHistory.$inferInsert;
 export type Banner = typeof banners.$inferSelect;
 export type NewBanner = typeof banners.$inferInsert;
 export type BannerSlot = typeof bannerSlots.$inferSelect;
+export type AppSetting = typeof appSettings.$inferSelect;

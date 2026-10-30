@@ -5,6 +5,10 @@
 import { db, pool } from '../db/client';
 import { users } from '../db/schema';
 import { sql, count, sum, eq, gte, and } from 'drizzle-orm';
+import { cache } from '../utils/cache';
+
+const STATS_CACHE_KEY = 'admin:stats';
+const STATS_TTL_MS = 30_000; // 30s — short enough for freshness, avoids ~10 queries/refresh
 
 export const MONTHLY_SUBSCRIPTIONS_SQL = `WITH months AS (
            SELECT generate_series(
@@ -24,6 +28,9 @@ export const MONTHLY_SUBSCRIPTIONS_SQL = `WITH months AS (
 
 export class AdminStatsService {
   async getStats(): Promise<AdminStats> {
+    const cached = cache.get<AdminStats>(STATS_CACHE_KEY);
+    if (cached) return cached;
+
     const client = await pool.connect();
     try {
       const [totalRow] = await db.select({ total: count() }).from(users).where(eq(users.role, 'user'));
@@ -72,7 +79,7 @@ export class AdminStatsService {
       const totalUsers = Number(totalRow?.total ?? 0);
       const activeUsers = Number(activeRow?.count ?? 0);
 
-      return {
+      const stats: AdminStats = {
         paymentsByMonth: payments.rows.map(r=>({month:r.month,amount:Number(r.amount),count:r.count})),
         totalUsers, activeUsers,
         adminUsers: Number(adminRow?.count ?? 0),
@@ -102,9 +109,16 @@ export class AdminStatsService {
           count: Number(r.count),
         })),
       };
+      cache.set(STATS_CACHE_KEY, stats, STATS_TTL_MS);
+      return stats;
     } finally {
       client.release();
     }
+  }
+
+  /** Invalidate the cached stats (call after user/payment mutations). */
+  invalidate(): void {
+    cache.del(STATS_CACHE_KEY);
   }
 }
 

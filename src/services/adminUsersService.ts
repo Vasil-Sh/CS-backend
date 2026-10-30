@@ -3,6 +3,10 @@
 // ═══════════════════════════════════════════
 
 import { pool } from '../db/client';
+import { cache } from '../utils/cache';
+
+const OVERVIEW_CACHE_KEY = 'admin:users:overview';
+const OVERVIEW_TTL_MS = 15_000; // 15s — shared by users list + betting activity
 
 export interface AdminUserOverview {
   id: number;
@@ -62,6 +66,9 @@ export interface AdminUserBet {
 
 export class AdminUsersService {
   async getUsersOverview(): Promise<AdminUserOverview[]> {
+    const cached = cache.get<AdminUserOverview[]>(OVERVIEW_CACHE_KEY);
+    if (cached) return cached;
+
     const client = await pool.connect();
     try {
       const result = await client.query(`
@@ -152,7 +159,7 @@ export class AdminUsersService {
         gamesMap.set(uid, list);
       });
 
-      return result.rows.map((r: any) => {
+      const overview = result.rows.map((r: any) => {
         const wins = Number(r.wins);
         const losses = Number(r.losses);
         const decided = wins + losses;
@@ -185,9 +192,16 @@ export class AdminUsersService {
           games: gamesMap.get(r.id) || [],
         };
       });
+      cache.set(OVERVIEW_CACHE_KEY, overview, OVERVIEW_TTL_MS);
+      return overview;
     } finally {
       client.release();
     }
+  }
+
+  /** Invalidate the overview cache (call after user/bet mutations). */
+  invalidateOverview(): void {
+    cache.del(OVERVIEW_CACHE_KEY);
   }
 
   async getUserBets(userId: number): Promise<AdminUserBet[]> {

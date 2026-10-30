@@ -37,6 +37,7 @@ import bannerRoutes from './routes/banners';
 import adminRoutes from './routes/admin';
 import adminStatsRoutes from './routes/adminStats';
 import adminUsersRoutes from './routes/adminUsers';
+import settingsRoutes from './routes/settings';
 import dota2MatchesRoutes from './routes/dota2Matches';
 import cs2MatchesRoutes from './routes/cs2Matches';
 import publicProfileRoutes from './routes/publicProfile';
@@ -204,6 +205,7 @@ v1.route('/matches-history', matchesHistoryRoutes);
 v1.route('', adminRoutes);
 v1.route('', adminStatsRoutes);
 v1.route('', adminUsersRoutes);
+v1.route('', settingsRoutes);
 v1.route('/public-profile', publicProfileRoutes);
 
 app.route('/api/v1', v1);

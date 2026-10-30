@@ -2,19 +2,37 @@ import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { loginSchema, registerSchema, updateUserSchema } from '../middleware/validation';
 import { authService } from '../services/authService';
+import { adminUsersService } from '../services/adminUsersService';
+import { adminStatsService } from '../services/adminStatsService';
 import { verifyRefreshToken, signToken, signRefreshToken } from '../utils/jwt';
 import { blocklistJti } from '../utils/jwtBlocklist';
 import { AppError } from '../utils/AppError';
+import { clientIp, recordLoginFailure, clearLoginFailures, loginBlockedMs } from '../utils/loginRateLimit';
 import jwt from 'jsonwebtoken';
 
 const auth = new Hono();
+
+/** Invalidate the cached admin overviews + stats after any user mutation. */
+function invalidateAdminCaches(): void {
+  adminUsersService.invalidateOverview();
+  adminStatsService.invalidate();
+}
 
 auth.post('/login', async (c) => {
   try {
     let body;
     try { body = loginSchema.parse(await c.req.json()); } catch { return c.json({ error: 'Invalid input: username and password required' }, 400); }
+    const ip = clientIp(c.req.header());
+    const blocked = loginBlockedMs(ip, body.username);
+    if (blocked > 0) {
+      return c.json({ success: false, error: `Забагато спроб. Спробуйте за ${Math.ceil(blocked / 60000)} хв` }, 429);
+    }
     const result = await authService.login(body.username, body.password);
-    if (!result.success) return c.json({ success: false, error: result.error }, result.status as any);
+    if (!result.success) {
+      recordLoginFailure(ip, body.username);
+      return c.json({ success: false, error: result.error }, result.status as any);
+    }
+    clearLoginFailures(ip, body.username);
     const isProd = process.env.NODE_ENV === 'production';
     c.header('Set-Cookie', `auth_token=${result.token}; HttpOnly; ${isProd ? 'Secure; ' : ''}SameSite=Lax; Path=/; Max-Age=${7 * 24 * 60 * 60}`, { append: true });
     return c.json({ success: true, isAdmin: result.isAdmin, token: result.token, refreshToken: result.refreshToken, user: result.user });
@@ -77,6 +95,7 @@ auth.post('/register', requireAuth, requireAdmin, async (c) => {
   try { body = registerSchema.parse(await c.req.json()); } catch { return c.json({ error: 'Invalid input' }, 400); }
   const result = await authService.register(body, c.get('user'));
   if (!result) return c.json({ error: 'Username already exists' }, 409);
+  invalidateAdminCaches();
   return c.json({ success: true, userId: result.userId, username: result.username, password: result.password }, 201);
 });
 
@@ -95,6 +114,7 @@ auth.delete('/users/:id', requireAuth, requireAdmin, async (c) => {
   const id = parseInt(c.req.param('id') || '', 10);
   if (isNaN(id)) return c.json({ error: 'Invalid ID' }, 400);
   await authService.deleteUser(id);
+  invalidateAdminCaches();
   return c.json({ success: true });
 });
 
@@ -105,6 +125,7 @@ auth.put('/users/:id', requireAuth, requireAdmin, async (c) => {
   try { body = updateUserSchema.parse(await c.req.json()); } catch { return c.json({ error: 'Invalid input' }, 400); }
   const updated = await authService.updateUser(id, body);
   if (!updated) return c.json({ error: 'User not found' }, 404);
+  invalidateAdminCaches();
   return c.json({ id: updated.id, username: updated.username, role: updated.role, telegram: updated.telegram, priceMonth: updated.priceMonth, startDate: updated.startDate, endDate: updated.endDate });
 });
 
