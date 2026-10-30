@@ -6,7 +6,7 @@ import { generateLogoFallback } from '../services/createMatchesRouter';
 
 const riskyTeams = new Hono();
 
-const logoPrefix = (game?: string): 'cs2' | 'dota2' =>
+const logoPrefix = (game?: string | null): 'cs2' | 'dota2' =>
   (game || '').toLowerCase().includes('dota') || game === 'Дота' ? 'dota2' : 'cs2';
 
 riskyTeams.get('/', requireAuth, async (c) => {

@@ -68,7 +68,7 @@ export class AdminStatsService {
          GROUP BY price_month ORDER BY price_month`
       );
 
-      const payments = await client.query(`SELECT to_char(paid_on,'YYYY-MM') AS month,SUM(amount)::text AS amount,COUNT(*)::int AS count FROM admin_payments WHERE status='recorded' AND paid_on >= date_trunc('year',(now() AT TIME ZONE 'Europe/Kyiv')::date) AND paid_on <= (now() AT TIME ZONE 'Europe/Kyiv')::date GROUP BY 1 ORDER BY 1`);
+      const payments = await client.query(`SELECT to_char(paid_on,'YYYY-MM') AS month,SUM(amount)::text AS amount,COUNT(*)::int AS count FROM admin_payments WHERE status='recorded' AND user_id IS NOT NULL AND paid_on >= date_trunc('year',(now() AT TIME ZONE 'Europe/Kyiv')::date) AND paid_on <= (now() AT TIME ZONE 'Europe/Kyiv')::date GROUP BY 1 ORDER BY 1`);
       const totalUsers = Number(totalRow?.total ?? 0);
       const activeUsers = Number(activeRow?.count ?? 0);
 

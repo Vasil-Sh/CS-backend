@@ -69,7 +69,10 @@ export async function scrapeHltvEventLogos(): Promise<HltvEventLogoMap> {
       // are required — the unsigned base URL is rejected by Cloudflare).
       const pairs = await page.evaluate(() => {
         const out: Array<{ name: string; url: string }> = [];
-        const imgs = Array.from(document.querySelectorAll('img')).filter((i) =>
+        // This callback runs in Chromium; keep its DOM shape local to avoid
+        // changing the Node server's global fetch/Response types.
+        const browserDocument = (globalThis as unknown as {document:{querySelectorAll(selector:string):ArrayLike<{src:string;alt:string}>}}).document;
+        const imgs = Array.from(browserDocument.querySelectorAll('img')).filter((i) =>
           (i.src || '').includes('eventlogo'),
         );
         for (const img of imgs) {
