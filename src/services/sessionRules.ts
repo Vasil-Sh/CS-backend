@@ -27,8 +27,8 @@ export function sessionProblem(tokenVersion: number | undefined, state: UserStat
 }
 
 export const sessionProblemMessage: Record<SessionProblem, string> = {
-  deleted: 'User not found',
-  revoked: 'Session ended. Please sign in again',
-  expired: 'Subscription expired',
-  not_started: 'Subscription has not started yet',
+  deleted: 'Обліковий запис не знайдено',
+  revoked: 'Сесію завершено. Увійдіть знову',
+  expired: 'Термін підписки закінчився. Зверніться до адміністратора, щоб продовжити',
+  not_started: 'Підписка ще не почалася',
 };

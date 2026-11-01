@@ -23,7 +23,7 @@ function invalidateAdminCaches(): void {
 auth.post('/login', async (c) => {
   try {
     let body;
-    try { body = loginSchema.parse(await c.req.json()); } catch { return c.json({ error: 'Invalid input: username and password required' }, 400); }
+    try { body = loginSchema.parse(await c.req.json()); } catch { return c.json({ error: 'Введіть логін і пароль' }, 400); }
     const ip = clientIp(c.req.header());
     const blocked = loginBlockedMs(ip, body.username);
     if (blocked > 0) {
@@ -40,7 +40,7 @@ auth.post('/login', async (c) => {
     return c.json({ success: true, isAdmin: result.isAdmin, token: result.token, refreshToken: result.refreshToken, user: result.user });
   } catch (err: any) {
     console.error('[Auth/Login] Unexpected error:', err.message, err.stack);
-    return c.json({ error: 'Login failed: ' + (err.message || 'unknown error') }, 500);
+    return c.json({ error: 'Не вдалося увійти. Спробуйте ще раз' }, 500); // details stay in the server log
   }
 });
 
@@ -63,7 +63,7 @@ auth.post('/refresh', async (c) => {
     const isProd = process.env.NODE_ENV === 'production';
     c.header('Set-Cookie', `auth_token=${token}; HttpOnly; ${isProd ? 'Secure; ' : ''}SameSite=Lax; Path=/; Max-Age=${7 * 24 * 60 * 60}`, { append: true });
     return c.json({ token, refreshToken });
-  } catch { return c.json({ error: 'Invalid or expired refresh token' }, 401); }
+  } catch { return c.json({ error: 'Сесію завершено. Увійдіть знову' }, 401); }
 });
 
 // ── POST /api/auth/logout ──

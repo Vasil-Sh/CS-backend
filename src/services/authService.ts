@@ -19,10 +19,10 @@ export class AuthService {
       .where(eq(schema.users.username, username))
       .limit(1);
 
-    if (!user) return { success: false, error: 'Invalid credentials', status: 401 };
+    if (!user) return { success: false, error: 'Невірний логін або пароль', status: 401 };
 
     const valid = await bcrypt.compare(password, user.passwordHash);
-    if (!valid) return { success: false, error: 'Invalid credentials', status: 401 };
+    if (!valid) return { success: false, error: 'Невірний логін або пароль', status: 401 };
 
     const problem = sessionProblem(user.tokenVersion, { role: user.role, tokenVersion: user.tokenVersion, startDate: user.startDate, endDate: user.endDate });
     if (problem) return { success: false, error: sessionProblemMessage[problem], status: 403 };
