@@ -113,6 +113,8 @@ auth.get('/users', requireAuth, requireAdmin, async (c) => {
 auth.delete('/users/:id', requireAuth, requireAdmin, async (c) => {
   const id = parseInt(c.req.param('id') || '', 10);
   if (isNaN(id)) return c.json({ error: 'Invalid ID' }, 400);
+  // Deleting yourself could leave the platform without any admin.
+  if (id === c.get('user').userId) return c.json({ error: 'Не можна видалити власний обліковий запис' }, 400);
   await authService.deleteUser(id);
   invalidateAdminCaches();
   return c.json({ success: true });
@@ -123,6 +125,9 @@ auth.put('/users/:id', requireAuth, requireAdmin, async (c) => {
   if (isNaN(id)) return c.json({ error: 'Invalid ID' }, 400);
   let body;
   try { body = updateUserSchema.parse(await c.req.json()); } catch { return c.json({ error: 'Invalid input' }, 400); }
+  if (id === c.get('user').userId && body.role && body.role !== 'admin') {
+    return c.json({ error: 'Не можна зняти роль адміністратора з власного облікового запису' }, 400);
+  }
   const updated = await authService.updateUser(id, body);
   if (!updated) return c.json({ error: 'User not found' }, 404);
   invalidateAdminCaches();
