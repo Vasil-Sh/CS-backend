@@ -19,6 +19,7 @@ export interface JwtPayload {
   username: string;
   role: 'admin' | 'user';
   jti: string; // unique token ID — used for blocklisting
+  tv?: number; // users.token_version at issue time; bumped on password reset
   iat: number; // issued at (Unix seconds)
   exp: number; // expiration (Unix seconds)
 }

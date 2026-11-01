@@ -1,25 +1,35 @@
 import type { Context, Next } from 'hono';
 import { verifyToken, type JwtPayload } from '../utils/jwt';
 import { isBlocked } from '../utils/jwtBlocklist';
+import { getUserState } from '../utils/userState';
+import { sessionProblem } from '../services/sessionRules';
 
 /**
  * Attach user to context if valid Bearer token present or httpOnly cookie set.
  * Also checks JWT blocklist for revoked tokens.
  * Does NOT reject — routes that require auth call `requireAuth` after.
  */
+/** Accept a verified token only if the account still allows it (see sessionRules). */
+async function acceptToken(c: Context, payload: JwtPayload): Promise<void> {
+  if (await isBlocked(payload.jti)) return; // revoked by logout
+  const state = await getUserState(payload.userId);
+  if (state === undefined) { c.set('user', payload); return; } // DB unreachable — trust the signed token
+  if (sessionProblem(payload.tv, state)) return;
+  // Role comes from the DB, so demoting an admin takes effect immediately.
+  c.set('user', state!.role === payload.role ? payload : { ...payload, role: state!.role as JwtPayload['role'] });
+}
+
+/**
+ * Attach user to context if valid Bearer token present or httpOnly cookie set.
+ * Checks the JWT blocklist and the account's current state.
+ * Does NOT reject — routes that require auth call `requireAuth` after.
+ */
 export async function authMiddleware(c: Context, next: Next) {
   // 1. Try Authorization header first
   const auth = c.req.header('Authorization');
   if (auth?.startsWith('Bearer ')) {
-    const token = auth.slice(7);
     try {
-      const payload = verifyToken(token);
-      // Check blocklist before accepting
-      if (await isBlocked(payload.jti)) {
-        // Token revoked — silently continue (will hit requireAuth below)
-      } else {
-        c.set('user', payload);
-      }
+      await acceptToken(c, verifyToken(auth.slice(7)));
     } catch {
       // Invalid/expired token — silently continue
     }
@@ -30,12 +40,7 @@ export async function authMiddleware(c: Context, next: Next) {
     const cookieToken = c.req.header('Cookie')?.match(/auth_token=([^;]+)/)?.[1];
     if (cookieToken) {
       try {
-        const payload = verifyToken(cookieToken);
-        if (await isBlocked(payload.jti)) {
-          // Revoked — treat as no user
-        } else {
-          c.set('user', payload);
-        }
+        await acceptToken(c, verifyToken(cookieToken));
       } catch {
         // Invalid/expired cookie — silently continue
       }

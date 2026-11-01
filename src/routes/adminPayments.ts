@@ -2,6 +2,7 @@ import {Hono} from 'hono';
 import {pool} from '../db/client';
 import {requireAuth,requireAdmin} from '../middleware/auth';
 import {parsePayment,extendedEnd} from '../services/paymentRules';
+import {invalidateUserState} from '../utils/userState';
 const routes=new Hono();
 const columns=`id::text,user_id AS "userId",username,amount::text,currency,paid_on::text AS "paidOn",period_start::text AS "periodStart",period_end::text AS "periodEnd",note,extend_subscription AS "extendSubscription",created_by_name AS "createdBy",created_at AS "createdAt",status,cancelled_by_name AS "cancelledBy",cancelled_at AS "cancelledAt",cancel_reason AS "cancelReason"`;
 routes.get('/admin/users/:id/payments',requireAuth,requireAdmin,async c=>{
@@ -29,6 +30,7 @@ routes.post('/admin/users/:id/payments',requireAuth,requireAdmin,async c=>{
   const result=await client.query(`INSERT INTO admin_payments(request_id,user_id,username,amount,paid_on,period_start,period_end,note,extend_subscription,created_by,created_by_name) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id::text`,[input.requestId,id,user.rows[0].username,input.amount,input.paidOn,input.periodStart,input.periodEnd,input.note,input.extendSubscription,actor.userId,actor.username]);
   const before=user.rows[0].endDate;const after=input.extendSubscription?extendedEnd(before,input.periodEnd):before;
   if(after!==before)await client.query('UPDATE users SET end_date=$2,updated_at=now() WHERE id::text=$1',[id,after]);
+  if(after!==before)invalidateUserState(Number(id));
   await client.query(`INSERT INTO admin_audit_log(actor_id,actor_name,action,target,details,status) VALUES($1,$2,'POST',$3,$4,'success')`,[actor.userId,actor.username,`/admin/users/${id}/payments`,JSON.stringify({targetUsername:user.rows[0].username,_targetUserId:id,paymentId:result.rows[0].id,amount:input.amount,currency:'UAH',paidOn:input.paidOn,periodStart:input.periodStart,periodEnd:input.periodEnd,extendSubscription:input.extendSubscription,...(after!==before?{_changes:{endDate:{before,after}}}:{})})]);
   await client.query('COMMIT');return c.json({id:result.rows[0].id},201);
  }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}

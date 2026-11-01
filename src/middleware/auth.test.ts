@@ -15,6 +15,10 @@ vi.mock('../utils/jwt', () => ({
   }),
 }));
 
+// Account-state lookup (DB) is covered by sessionRules tests; here the DB is "unreachable",
+// so the middleware falls back to the signed token as before.
+vi.mock('../utils/userState', () => ({ getUserState: vi.fn(async () => undefined) }));
+
 import { verifyToken } from '../utils/jwt';
 
 describe('authMiddleware', () => {

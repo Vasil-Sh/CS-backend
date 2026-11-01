@@ -3,6 +3,7 @@ import { requireAuth, requireAdmin } from '../middleware/auth';
 import { loginSchema, registerSchema, updateUserSchema } from '../middleware/validation';
 import { authService } from '../services/authService';
 import { checkDelete, checkResetPassword, checkUpdate } from '../services/ownerRules';
+import { sessionProblem, sessionProblemMessage } from '../services/sessionRules';
 import { adminUsersService } from '../services/adminUsersService';
 import { adminStatsService } from '../services/adminStatsService';
 import { verifyRefreshToken, signToken, signRefreshToken } from '../utils/jwt';
@@ -51,9 +52,13 @@ auth.post('/refresh', async (c) => {
   try {
     const payload = verifyRefreshToken(body.refreshToken);
     const user = await authService.getMe(payload.userId);
-    if (!user) return c.json({ error: 'User not found' }, 401);
-    const token = signToken({ userId: user.id, username: user.username, role: user.role as 'admin' | 'user' });
-    const refreshToken = signRefreshToken({ userId: user.id, username: user.username, role: user.role as 'admin' | 'user' });
+    // Re-check the account on every refresh: deleted, password reset,
+    // subscription ended or not started → the session ends here.
+    const problem = sessionProblem(payload.tv, user && { role: user.role, tokenVersion: user.tokenVersion, startDate: user.startDate, endDate: user.endDate });
+    if (problem || !user) return c.json({ error: sessionProblemMessage[problem ?? 'deleted'] }, 401);
+    const claims = { userId: user.id, username: user.username, role: user.role as 'admin' | 'user', tv: user.tokenVersion };
+    const token = signToken(claims);
+    const refreshToken = signRefreshToken(claims);
     const isProd = process.env.NODE_ENV === 'production';
     c.header('Set-Cookie', `auth_token=${token}; HttpOnly; ${isProd ? 'Secure; ' : ''}SameSite=Lax; Path=/; Max-Age=${7 * 24 * 60 * 60}`, { append: true });
     return c.json({ token, refreshToken });

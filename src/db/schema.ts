@@ -29,6 +29,8 @@ export const users = pgTable(
     role: varchar('role', { length: 20 }).notNull().default('user'),
     /** Owner = admin who may also delete/demote admins and appoint owners (migration 0016). */
     isOwner: boolean('is_owner').notNull().default(false),
+    /** Bumped on password reset/change to end all existing sessions (migration 0017). */
+    tokenVersion: integer('token_version').notNull().default(0),
     telegram: varchar('telegram', { length: 100 }).default(''),
     priceMonth: numeric('price_month', { precision: 10, scale: 2 }).default('0'),
     startDate: date('start_date').default(sql`CURRENT_DATE`),

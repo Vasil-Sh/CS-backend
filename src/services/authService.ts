@@ -8,7 +8,8 @@ import { eq, sql } from 'drizzle-orm';
 import { db, schema } from '../db/client';
 import { signToken, signRefreshToken } from '../utils/jwt';
 import type { AuthResult } from './types';
-import { isSubscriptionExpired } from '../utils/kyivDate';
+import { sessionProblem, sessionProblemMessage } from './sessionRules';
+import { invalidateUserState } from '../utils/userState';
 
 export class AuthService {
   async login(username: string, password: string): Promise<AuthResult> {
@@ -23,12 +24,12 @@ export class AuthService {
     const valid = await bcrypt.compare(password, user.passwordHash);
     if (!valid) return { success: false, error: 'Invalid credentials', status: 401 };
 
-    if (user.role !== 'admin' && isSubscriptionExpired(user.endDate)) {
-      return { success: false, error: 'Subscription expired', status: 403 };
-    }
+    const problem = sessionProblem(user.tokenVersion, { role: user.role, tokenVersion: user.tokenVersion, startDate: user.startDate, endDate: user.endDate });
+    if (problem) return { success: false, error: sessionProblemMessage[problem], status: 403 };
 
-    const token = signToken({ userId: user.id, username: user.username, role: user.role as 'admin' | 'user' });
-    const refreshToken = signRefreshToken({ userId: user.id, username: user.username, role: user.role as 'admin' | 'user' });
+    const claims = { userId: user.id, username: user.username, role: user.role as 'admin' | 'user', tv: user.tokenVersion };
+    const token = signToken(claims);
+    const refreshToken = signRefreshToken(claims);
 
     return {
       success: true,
@@ -113,6 +114,7 @@ export class AuthService {
 
   async deleteUser(id: number) {
     await db.delete(schema.users).where(eq(schema.users.id, id));
+    invalidateUserState(id);
   }
 
   async updateUser(id: number, data: Record<string, unknown>) {
@@ -123,7 +125,10 @@ export class AuthService {
       if (existing && existing.id !== id) return null;
       updateData.username = data.username;
     }
-    if (data.password) updateData.passwordHash = await bcrypt.hash(String(data.password), 10);
+    if (data.password) {
+      updateData.passwordHash = await bcrypt.hash(String(data.password), 10);
+      updateData.tokenVersion = sql`${schema.users.tokenVersion} + 1`; // log out everywhere
+    }
     if (data.role !== undefined) updateData.role = data.role;
     if (data.isOwner !== undefined) updateData.isOwner = data.isOwner;
     if (data.priceMonth !== undefined) updateData.priceMonth = data.priceMonth;
@@ -131,13 +136,18 @@ export class AuthService {
     if (data.endDate !== undefined) updateData.endDate = toPgDate(String(data.endDate));
 
     const [updated] = await db.update(schema.users).set(updateData).where(eq(schema.users.id, id)).returning();
+    invalidateUserState(id);
     return updated || null;
   }
 
   async resetPassword(id: number) {
     const newPassword = generatePassword();
     const passwordHash = await bcrypt.hash(newPassword, 10);
-    const [updated] = await db.update(schema.users).set({ passwordHash }).where(eq(schema.users.id, id)).returning();
+    // Bumping the token version ends every existing session of this account.
+    const [updated] = await db.update(schema.users)
+      .set({ passwordHash, tokenVersion: sql`${schema.users.tokenVersion} + 1` })
+      .where(eq(schema.users.id, id)).returning();
+    invalidateUserState(id);
     if (!updated) return null;
     return { username: updated.username, password: newPassword };
   }
