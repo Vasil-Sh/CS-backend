@@ -40,7 +40,6 @@ export class AdminStatsService {
       const [newMonthRow] = await db.select({ count: count() }).from(users).where(and(eq(users.role, 'user'), gte(users.createdAt, sql`date_trunc('month', now() AT TIME ZONE 'Europe/Kyiv')`)));
 
       const [mrrRow] = await db.select({ total: sum(users.priceMonth) }).from(users).where(and(eq(users.role, 'user'), gte(users.endDate, sql`(now() AT TIME ZONE 'Europe/Kyiv')::date`), sql`COALESCE(${users.startDate}, ${users.createdAt}::date) <= (now() AT TIME ZONE 'Europe/Kyiv')::date`));
-      const [totalRevenueRow] = await db.select({ total: sum(users.priceMonth) }).from(users).where(eq(users.role, 'user'));
 
       const revenueResult = await client.query(
         MONTHLY_SUBSCRIPTIONS_SQL
@@ -50,17 +49,6 @@ export class AdminStatsService {
         `SELECT to_char(created_at, 'YYYY-MM') as month, COUNT(*) as count
          FROM users WHERE role = 'user' AND created_at >= date_trunc('year', (now() AT TIME ZONE 'Europe/Kyiv')::date)
          GROUP BY month ORDER BY month`
-      );
-
-      const topResult = await client.query(
-        `SELECT username, telegram, price_month::numeric as revenue, end_date
-         FROM users WHERE role = 'user' ORDER BY price_month DESC LIMIT 5`
-      );
-
-      const expiringResult = await client.query(
-        `SELECT username, telegram, end_date, price_month::numeric as price_month
-         FROM users WHERE end_date BETWEEN (now() AT TIME ZONE 'Europe/Kyiv')::date AND (now() AT TIME ZONE 'Europe/Kyiv')::date + INTERVAL '7 days'
-         ORDER BY end_date`
       );
 
       const recentResult = await client.query(
@@ -86,19 +74,8 @@ export class AdminStatsService {
         inactiveUsers: totalUsers - activeUsers,
         newThisMonth: Number(newMonthRow?.count ?? 0),
         mrr: Number(mrrRow?.total ?? 0),
-        totalRevenue: Number(totalRevenueRow?.total ?? 0),
         revenueByMonth: revenueResult.rows.map((r: any) => ({ month: r.month, revenue: Number(r.revenue), paidUsers: Number(r.paid_users) })),
         registrationsByMonth: regResult.rows.map((r: any) => ({ month: r.month, count: Number(r.count) })),
-        topUsers: topResult.rows.map((r: any) => ({
-          username: r.username, telegram: r.telegram || '',
-          revenue: Number(r.revenue),
-          endDate: r.end_date ? new Date(r.end_date).toISOString().split('T')[0] : '',
-        })),
-        expiringSubscriptions: expiringResult.rows.map((r: any) => ({
-          username: r.username, telegram: r.telegram || '',
-          endDate: r.end_date ? new Date(r.end_date).toISOString().split('T')[0] : '',
-          priceMonth: r.price_month,
-        })),
         recentRegistrations: recentResult.rows.map((r: any) => ({
           username: r.username,
           date: r.created_at ? new Date(r.created_at).toISOString().split('T')[0] : '',
@@ -125,11 +102,9 @@ export class AdminStatsService {
 export interface AdminStats {
   paymentsByMonth: {month:string;amount:number;count:number}[];
   totalUsers: number; activeUsers: number; adminUsers: number; inactiveUsers: number;
-  newThisMonth: number; mrr: number; totalRevenue: number;
+  newThisMonth: number; mrr: number;
   revenueByMonth: { month: string; revenue: number; paidUsers: number }[];
   registrationsByMonth: { month: string; count: number }[];
-  topUsers: { username: string; telegram: string; revenue: number; endDate: string }[];
-  expiringSubscriptions: { username: string; telegram: string; endDate: string; priceMonth: number }[];
   recentRegistrations: { username: string; date: string; price: number }[];
   planDistribution: { price: number; count: number }[];
 }
