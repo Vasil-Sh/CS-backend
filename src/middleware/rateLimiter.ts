@@ -8,7 +8,7 @@ const WINDOW_MS = 60_000; // 1 minute
 const USER_MAX_REQUESTS = 300;
 
 /**
- * Rate limiting middleware: 100 req/min per IP, + 300 req/min per user.
+ * Rate limiting middleware: 100 req/min per IP (per-user limit: userRateLimiterMiddleware).
  * Uses Redis when REDIS_URL is configured, falls back to in-memory Map.
  * Free tier (health, login) is exempt.
  */
@@ -34,7 +34,15 @@ export async function rateLimiterMiddleware(c: Context, next: Next) {
     return c.json({ error: 'Too many requests. Try again later.' }, 429);
   }
 
-  // Per-user rate limiting (only for authenticated users)
+  await next();
+}
+
+/**
+ * Per-user limit (300 req/min). Must run AFTER authMiddleware — before it
+ * the user is not known yet, which is why this check never fired when it
+ * lived inside rateLimiterMiddleware.
+ */
+export async function userRateLimiterMiddleware(c: Context, next: Next) {
   const user = c.get('user') as { userId?: number } | undefined;
   if (user?.userId) {
     const userResult = await limiter.check(`rate:user:${user.userId}`, USER_MAX_REQUESTS, WINDOW_MS);
@@ -42,6 +50,5 @@ export async function rateLimiterMiddleware(c: Context, next: Next) {
       return c.json({ error: 'Too many requests. Try again later.' }, 429);
     }
   }
-
   await next();
 }

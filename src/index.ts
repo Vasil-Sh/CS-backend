@@ -13,7 +13,7 @@ import { serve } from '@hono/node-server';
 import { authMiddleware } from './middleware/auth';
 import { adminAudit } from './middleware/adminAudit';
 import { loggerMiddleware } from './middleware/logger';
-import { rateLimiterMiddleware } from './middleware/rateLimiter';
+import { rateLimiterMiddleware, userRateLimiterMiddleware } from './middleware/rateLimiter';
 import { bodyLimit } from './middleware/bodyLimit';
 import { securityHeaders } from './middleware/securityHeaders';
 import { numericNormalizer } from './middleware/numericNormalizer';
@@ -85,6 +85,7 @@ app.use('*', loggerMiddleware);
 app.use('*', rateLimiterMiddleware);
 app.use('*', bodyLimit(2_100_000)); // 2.1MB max body (1.5MB file + base64 overhead)
 app.use('*', authMiddleware);
+app.use('*', userRateLimiterMiddleware); // needs the user from authMiddleware
 app.use('*', adminAudit);
 
 // ── Convert ALL string numbers to real numbers in JSON responses ──
