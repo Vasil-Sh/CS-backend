@@ -4,6 +4,7 @@ import { pool } from '../db/client';
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { adminUsersService } from '../services/adminUsersService';
+import { csvCell } from '../utils/csv';
 
 const adminUsers = new Hono();
 adminUsers.route("/",adminPayments);
@@ -107,7 +108,7 @@ adminUsers.get('/admin/audit/export', requireAuth, requireAdmin, async (c) => {
  AND ($6::text IS NULL OR substring(a.target from '^/auth/users/([0-9]+)') = $6 OR a.details->>'_targetUserId' = $6)
  ORDER BY a.created_at DESC, a.id DESC LIMIT 50000`, [category, status, search, from, to, userId]);
 
- const escape = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+ const escape = csvCell; // quotes + neutralizes =,+,-,@ formulas
  const header = ['Дата','Автор','Дія','Обʼєкт','Користувач','Результат'].map(escape).join(',');
  const rows = result.rows.map((r: any) => [
    r.created_at ? new Date(r.created_at).toISOString() : '',
