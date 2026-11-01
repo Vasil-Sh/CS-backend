@@ -8,6 +8,7 @@ import { eq, sql } from 'drizzle-orm';
 import { db, schema } from '../db/client';
 import { signToken, signRefreshToken } from '../utils/jwt';
 import type { AuthResult } from './types';
+import { isSubscriptionExpired } from '../utils/kyivDate';
 
 export class AuthService {
   async login(username: string, password: string): Promise<AuthResult> {
@@ -22,10 +23,8 @@ export class AuthService {
     const valid = await bcrypt.compare(password, user.passwordHash);
     if (!valid) return { success: false, error: 'Invalid credentials', status: 401 };
 
-    if (user.role !== 'admin' && user.endDate) {
-      const now = new Date();
-      const end = new Date(user.endDate);
-      if (end < now) return { success: false, error: 'Subscription expired', status: 403 };
+    if (user.role !== 'admin' && isSubscriptionExpired(user.endDate)) {
+      return { success: false, error: 'Subscription expired', status: 403 };
     }
 
     const token = signToken({ userId: user.id, username: user.username, role: user.role as 'admin' | 'user' });
