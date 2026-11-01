@@ -55,6 +55,7 @@ import { scrapeHltvRankingLogos } from './services/hltv/hltvRankingScraper';
 import { buildLocalLogoStore, loadTipsggLogos, buildDota2LocalStore } from './services/logoStore';
 import { runWithRequestContext } from './utils/requestContext';
 import { AppError } from './utils/AppError';
+import { allowedOrigins, isAllowedOrigin } from './utils/allowedOrigins';
 
 const app = new Hono();
 
@@ -63,15 +64,8 @@ const app = new Hono();
 app.use('*', async (c, next) => runWithRequestContext(() => next()));
 app.use('*', cors({
   origin: (origin) => {
-    const isDev = process.env.NODE_ENV !== 'production';
-    const allowed = isDev
-      ? ['http://localhost:5173','http://localhost:5174','http://localhost:5175','http://localhost:5176','http://localhost:5199','http://localhost:3001','https://matchiq.vercel.app']
-      : (process.env.CORS_ORIGINS || 'https://matchiq.pro,https://www.matchiq.pro').split(',');
-    if (!origin) return isDev ? allowed[0] : allowed[0];
-    // Allow all vercel.app subdomains — only in dev/preview
-    if (isDev && origin.endsWith('.vercel.app')) return origin;
-    if (allowed.some(a => origin.startsWith(a))) return origin;
-    return null;
+    if (!origin) return allowedOrigins()[0];
+    return isAllowedOrigin(origin) ? origin : null;
   },
   credentials: true,
 }));
@@ -82,16 +76,8 @@ app.use('*', compress());
 // Non-browser clients (no Origin header) are allowed — they can't be CSRF attacks.
 // GET/HEAD/OPTIONS are never checked — they don't modify state.
 app.use('*', csrf({
-  origin: (origin) => {
-    if (!origin) return true; // non-browser: curl, mobile app, server-to-server
-    const isDev = process.env.NODE_ENV !== 'production';
-    if (isDev) {
-      // Dev: localhost + vercel previews
-      return origin.startsWith('http://localhost') || origin.endsWith('.vercel.app');
-    }
-    // Prod: matchiq.pro only
-    return origin === 'https://matchiq.pro' || origin === 'https://www.matchiq.pro';
-  },
+  // Same allow-list as CORS (CORS_ORIGINS in production).
+  origin: (origin) => !origin || isAllowedOrigin(origin),
 }));
 
 app.use('*', securityHeaders);
