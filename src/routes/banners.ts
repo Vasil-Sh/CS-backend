@@ -1,13 +1,17 @@
 import { Hono } from 'hono';
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import sharp from 'sharp';
 import { requireAuth, requireAdmin } from '../middleware/auth';
+import { pool } from '../db/client';
 import { bannerService, type BannerInput } from '../services/bannerService';
 
 import { bannerScreens as screens, validPlacement, BannerConflict, BannerPeriodError } from '../services/bannerRules';
 const banners = new Hono();
+// Legacy location: uploads used to be written here. New uploads go to the
+// banner_files table (migration 0015); this dir is only read as a fallback
+// for files uploaded before the change, if they still exist.
 const BANNER_DIR = join(process.cwd(), '.cache', 'banners');
 
 const MIME_EXT: Record<string, string> = {
@@ -17,10 +21,6 @@ const MIME_EXT: Record<string, string> = {
   'image/gif': 'gif',
   'image/svg+xml': 'svg',
 };
-
-function ensureDir() {
-  mkdirSync(BANNER_DIR, { recursive: true });
-}
 
 /** Map a DB row to the public campaign shape used by the frontend. */
 const toCampaign = (b: {
@@ -204,7 +204,6 @@ banners.post('/upload', requireAuth, requireAdmin, async (c) => {
   if (!raw) return c.json({ error: 'No image data' }, 400);
   const mime = body.mime || 'image/png';
   const ext = MIME_EXT[mime] || 'png';
-  ensureDir();
   const filename = `${Date.now()}_${randomBytes(4).toString('hex')}.${ext}`;
 
   let buffer = Buffer.from(raw, 'base64');
@@ -221,12 +220,12 @@ banners.post('/upload', requireAuth, requireAdmin, async (c) => {
     }
   }
 
-  writeFileSync(join(BANNER_DIR, filename), buffer);
+  await pool.query('INSERT INTO banner_files (filename, mime, data) VALUES ($1, $2, $3)', [filename, mime in MIME_EXT ? mime : 'image/png', buffer]);
   return c.json({ url: `/api/v1/banners/file/${filename}` }, 201);
 });
 
 /** GET /banners/file/:filename — serve an uploaded banner image (public). */
-banners.get('/file/:filename', (c) => {
+banners.get('/file/:filename', async (c) => {
   const filename = c.req.param('filename');
   if (
     !filename ||
@@ -236,11 +235,18 @@ banners.get('/file/:filename', (c) => {
   ) {
     return c.json({ error: 'Invalid filename' }, 400);
   }
-  const filePath = join(BANNER_DIR, filename);
-  if (!existsSync(filePath)) return c.json({ error: 'Not found' }, 404);
   const ext = filename.split('.').pop()?.toLowerCase() || 'png';
   const ct = ext === 'svg' ? 'image/svg+xml' : `image/${ext === 'jpg' ? 'jpeg' : ext}`;
-  return new Response(readFileSync(filePath), {
+  const stored = await pool.query<{ data: Buffer }>('SELECT data FROM banner_files WHERE filename = $1', [filename]);
+  let body: Buffer;
+  if (stored.rows[0]) {
+    body = stored.rows[0].data;
+  } else {
+    const filePath = join(BANNER_DIR, filename); // pre-0015 upload
+    if (!existsSync(filePath)) return c.json({ error: 'Not found' }, 404);
+    body = readFileSync(filePath);
+  }
+  return new Response(body, {
     headers: {
       'Content-Type': ct,
       'Cache-Control': 'public, max-age=86400',
