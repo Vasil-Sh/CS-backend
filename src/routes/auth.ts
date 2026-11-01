@@ -7,7 +7,7 @@ import { sessionProblem, sessionProblemMessage } from '../services/sessionRules'
 import { adminUsersService } from '../services/adminUsersService';
 import { adminStatsService } from '../services/adminStatsService';
 import { verifyRefreshToken, signToken, signRefreshToken } from '../utils/jwt';
-import { blocklistJti } from '../utils/jwtBlocklist';
+import { blocklistJti, isBlocked } from '../utils/jwtBlocklist';
 import { AppError } from '../utils/AppError';
 import { clientIp, recordLoginFailure, clearLoginFailures, loginBlockedMs } from '../utils/loginRateLimit';
 import jwt from 'jsonwebtoken';
@@ -51,6 +51,7 @@ auth.post('/refresh', async (c) => {
   if (!body.refreshToken) return c.json({ error: 'Refresh token required' }, 400);
   try {
     const payload = verifyRefreshToken(body.refreshToken);
+    if (await isBlocked(payload.jti)) return c.json({ error: sessionProblemMessage.revoked }, 401); // logged out
     const user = await authService.getMe(payload.userId);
     // Re-check the account on every refresh: deleted, password reset,
     // subscription ended or not started → the session ends here.
@@ -68,6 +69,19 @@ auth.post('/refresh', async (c) => {
 // ── POST /api/auth/logout ──
 auth.post('/logout', async (c) => {
   try {
+    // Revoke the refresh token too (sent in the body), otherwise it could
+    // silently restore the session for another 30 days.
+    const body = await c.req.json().catch(() => ({})) as { refreshToken?: unknown };
+    if (typeof body.refreshToken === 'string') {
+      try {
+        const refresh = verifyRefreshToken(body.refreshToken);
+        const remainingMs = Math.max(0, refresh.exp * 1000 - Date.now());
+        await blocklistJti(refresh.jti, remainingMs);
+      } catch {
+        // Invalid/expired refresh token — nothing to revoke
+      }
+    }
+
     // Try to extract token from header or cookie
     let token: string | undefined;
     const authHeader = c.req.header('Authorization');
