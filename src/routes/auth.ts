@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { loginSchema, registerSchema, updateUserSchema } from '../middleware/validation';
 import { authService } from '../services/authService';
+import { checkDelete, checkResetPassword, checkUpdate } from '../services/ownerRules';
 import { adminUsersService } from '../services/adminUsersService';
 import { adminStatsService } from '../services/adminStatsService';
 import { verifyRefreshToken, signToken, signRefreshToken } from '../utils/jwt';
@@ -102,19 +103,24 @@ auth.post('/register', requireAuth, requireAdmin, async (c) => {
 auth.get('/me', requireAuth, async (c) => {
   const row = await authService.getMe(c.get('user').userId);
   if (!row) return c.json({ error: 'User not found' }, 404);
-  return c.json({ id: row.id, username: row.username, role: row.role, telegram: row.telegram, startDate: row.startDate, endDate: row.endDate });
+  return c.json({ id: row.id, username: row.username, role: row.role, isOwner: row.isOwner, telegram: row.telegram, startDate: row.startDate, endDate: row.endDate });
 });
 
 auth.get('/users', requireAuth, requireAdmin, async (c) => {
   const all = await authService.listUsers();
-  return c.json(all.map(u => ({ id: u.id, username: u.username, role: u.role, telegram: u.telegram, priceMonth: u.priceMonth, startDate: u.startDate, endDate: u.endDate, createdAt: u.createdAt })));
+  return c.json(all.map(u => ({ id: u.id, username: u.username, role: u.role, isOwner: u.isOwner, telegram: u.telegram, priceMonth: u.priceMonth, startDate: u.startDate, endDate: u.endDate, createdAt: u.createdAt })));
 });
 
 auth.delete('/users/:id', requireAuth, requireAdmin, async (c) => {
   const id = parseInt(c.req.param('id') || '', 10);
   if (isNaN(id)) return c.json({ error: 'Invalid ID' }, 400);
-  // Deleting yourself could leave the platform without any admin.
-  if (id === c.get('user').userId) return c.json({ error: 'Не можна видалити власний обліковий запис' }, 400);
+  const [actor, target, owners] = await Promise.all([
+    authService.getAccess(c.get('user').userId), authService.getAccess(id), authService.countOwners(),
+  ]);
+  if (!actor) return c.json({ error: 'Unauthorized' }, 401);
+  if (!target) return c.json({ error: 'User not found' }, 404);
+  const denied = checkDelete(actor, target, owners);
+  if (denied) return c.json({ error: denied.error }, denied.status);
   await authService.deleteUser(id);
   invalidateAdminCaches();
   return c.json({ success: true });
@@ -125,19 +131,28 @@ auth.put('/users/:id', requireAuth, requireAdmin, async (c) => {
   if (isNaN(id)) return c.json({ error: 'Invalid ID' }, 400);
   let body;
   try { body = updateUserSchema.parse(await c.req.json()); } catch { return c.json({ error: 'Invalid input' }, 400); }
-  if (id === c.get('user').userId && body.role && body.role !== 'admin') {
-    return c.json({ error: 'Не можна зняти роль адміністратора з власного облікового запису' }, 400);
-  }
-  const updated = await authService.updateUser(id, body);
+  const [actor, target, owners] = await Promise.all([
+    authService.getAccess(c.get('user').userId), authService.getAccess(id), authService.countOwners(),
+  ]);
+  if (!actor) return c.json({ error: 'Unauthorized' }, 401);
+  if (!target) return c.json({ error: 'User not found' }, 404);
+  const access = checkUpdate(actor, target, { role: body.role, isOwner: body.isOwner, password: !!body.password }, owners);
+  if ('error' in access) return c.json({ error: access.error }, access.status);
+  const updated = await authService.updateUser(id, { ...body, role: access.role, isOwner: access.isOwner });
   if (!updated) return c.json({ error: 'User not found' }, 404);
   invalidateAdminCaches();
-  return c.json({ id: updated.id, username: updated.username, role: updated.role, telegram: updated.telegram, priceMonth: updated.priceMonth, startDate: updated.startDate, endDate: updated.endDate });
+  return c.json({ id: updated.id, username: updated.username, role: updated.role, isOwner: updated.isOwner, telegram: updated.telegram, priceMonth: updated.priceMonth, startDate: updated.startDate, endDate: updated.endDate });
 });
 
 // ── POST /api/auth/users/:id/reset-password ──
 auth.post('/users/:id/reset-password', requireAuth, requireAdmin, async (c) => {
   const id = parseInt(c.req.param('id') || '', 10);
   if (isNaN(id)) return c.json({ error: 'Invalid ID' }, 400);
+  const [actor, target] = await Promise.all([authService.getAccess(c.get('user').userId), authService.getAccess(id)]);
+  if (!actor) return c.json({ error: 'Unauthorized' }, 401);
+  if (!target) return c.json({ error: 'User not found' }, 404);
+  const denied = checkResetPassword(actor, target);
+  if (denied) return c.json({ error: denied.error }, denied.status);
   const result = await authService.resetPassword(id);
   if (!result) return c.json({ error: 'User not found' }, 404);
   return c.json({ username: result.username, password: result.password });

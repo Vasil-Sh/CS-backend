@@ -30,6 +30,7 @@ export async function adminAudit(c: Context, next: Next) {
     "startDate",
     "priceMonth",
     "role",
+    "isOwner",
     "title",
     "active",
     "screen",
@@ -53,7 +54,7 @@ export async function adminAudit(c: Context, next: Next) {
   async function snapshot(id?: string): Promise<AuditSnapshot | null> {
     if(!id) return null;
     const query = isUser
-     ? 'SELECT username, telegram, role, price_month::text AS "priceMonth", start_date::text AS "startDate", end_date::text AS "endDate" FROM users WHERE id::text=$1'
+     ? 'SELECT username, telegram, role, is_owner AS "isOwner", price_month::text AS "priceMonth", start_date::text AS "startDate", end_date::text AS "endDate" FROM users WHERE id::text=$1'
      : isSlot ? 'SELECT placeholder_enabled AS "placeholderEnabled" FROM banner_slots WHERE slot::text=$1'
      : 'SELECT title, description, href, active, screen, slot, starts_on::text AS "startsOn", ends_on::text AS "endsOn" FROM banners WHERE id::text=$1';
     const result=await pool.query(query,[id]);

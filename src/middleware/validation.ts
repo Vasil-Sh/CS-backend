@@ -132,6 +132,7 @@ export const updateUserSchema = z.object({
   password: z.string().max(255).optional(),
   telegram: z.string().max(100).optional(),
   role: z.enum(['admin', 'user']).optional(),
+  isOwner: z.boolean().optional(),
   priceMonth: z.coerce.number().optional(),
   startDate: z.string().optional(),
   endDate: z.string().optional(),

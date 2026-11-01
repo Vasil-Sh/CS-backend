@@ -35,7 +35,7 @@ export class AuthService {
       isAdmin: user.role === 'admin',
       token,
       refreshToken,
-      user: { username: user.username, role: user.role, telegram: user.telegram || undefined },
+      user: { username: user.username, role: user.role, telegram: user.telegram || undefined, isOwner: user.isOwner },
       status: 200,
     };
   }
@@ -90,12 +90,25 @@ export class AuthService {
       id: schema.users.id,
       username: schema.users.username,
       role: schema.users.role,
+      isOwner: schema.users.isOwner,
       telegram: schema.users.telegram,
       priceMonth: schema.users.priceMonth,
       startDate: schema.users.startDate,
       endDate: schema.users.endDate,
       createdAt: schema.users.createdAt,
     }).from(schema.users).orderBy(schema.users.username);
+  }
+
+  /** Role + owner flag, read fresh from the DB (JWT claims may be stale). */
+  async getAccess(id: number): Promise<{ id: number; role: string; isOwner: boolean } | null> {
+    const [row] = await db.select({ id: schema.users.id, role: schema.users.role, isOwner: schema.users.isOwner })
+      .from(schema.users).where(eq(schema.users.id, id)).limit(1);
+    return row || null;
+  }
+
+  async countOwners(): Promise<number> {
+    const [row] = await db.select({ n: sql<number>`count(*)::int` }).from(schema.users).where(eq(schema.users.isOwner, true));
+    return Number(row?.n ?? 0);
   }
 
   async deleteUser(id: number) {
@@ -112,6 +125,7 @@ export class AuthService {
     }
     if (data.password) updateData.passwordHash = await bcrypt.hash(String(data.password), 10);
     if (data.role !== undefined) updateData.role = data.role;
+    if (data.isOwner !== undefined) updateData.isOwner = data.isOwner;
     if (data.priceMonth !== undefined) updateData.priceMonth = data.priceMonth;
     if (data.startDate !== undefined) updateData.startDate = toPgDate(String(data.startDate));
     if (data.endDate !== undefined) updateData.endDate = toPgDate(String(data.endDate));

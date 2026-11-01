@@ -35,7 +35,7 @@ adminUsers.get('/admin/users/:id/bets', requireAuth, requireAdmin, async (c) => 
 
 adminUsers.get('/admin/users/:id/card', requireAuth, requireAdmin, async c => {
  const id=c.req.param('id') || ''; if(!/^\d+$/.test(id))return c.json({error:'Invalid user'},400);
- const user=await pool.query('SELECT id,username,telegram,role,start_date::text AS "startDate",end_date::text AS "endDate",price_month::text AS "priceMonth",created_at AS "createdAt" FROM users WHERE id::text=$1',[id]);
+ const user=await pool.query('SELECT id,username,telegram,role,is_owner AS "isOwner",start_date::text AS "startDate",end_date::text AS "endDate",price_month::text AS "priceMonth",created_at AS "createdAt" FROM users WHERE id::text=$1',[id]);
  if(!user.rows.length)return c.json({error:'Користувача не знайдено'},404);
  const [note,stats]=await Promise.all([
  pool.query('SELECT content,version,updated_by AS "updatedBy",updated_at AS "updatedAt" FROM admin_user_notes WHERE user_id::text=$1',[id]),

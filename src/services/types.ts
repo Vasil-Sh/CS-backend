@@ -21,7 +21,7 @@ export interface AuthResult {
   token?: string;
   refreshToken?: string;
   isAdmin?: boolean;
-  user?: { username: string; role: string; telegram?: string };
+  user?: { username: string; role: string; telegram?: string; isOwner?: boolean };
   error?: string;
   status: number;
 }
