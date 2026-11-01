@@ -23,7 +23,7 @@ try {
  (3,'user',0,date_trunc('year',now()),now()::date+30,now()),
  (4,'admin',999,date_trunc('year',now()),now()::date+30,now()),
  (5,'user',500,now()::date+10,now()::date+40,now())`);
- const result=await client.query(MONTHLY_SUBSCRIPTIONS_SQL);
+ const result=await client.query(MONTHLY_SUBSCRIPTIONS_SQL,[new Date().getFullYear()]);
  for(const row of result.rows){assert.equal(Number(row.revenue),30);assert.equal(Number(row.paid_users),2);assert.equal(Number(row.revenue)/Number(row.paid_users),15)}
  console.log('Monthly SQL: paid denominator, free accounts, admin exclusion, future subscriptions passed. Current stats consistency passed.');
 } finally {await client.query('ROLLBACK');client.release();await pool.end()}

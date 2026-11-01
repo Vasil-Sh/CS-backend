@@ -8,12 +8,14 @@ import { sql, count, sum, eq, gte, and } from 'drizzle-orm';
 import { cache } from '../utils/cache';
 
 const STATS_CACHE_KEY = 'admin:stats';
+const kyivYear = () => Number(new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Kyiv', year: 'numeric' }).format(new Date()));
 const STATS_TTL_MS = 30_000; // 30s — short enough for freshness, avoids ~10 queries/refresh
 
+/** $1 = report year. Months of that year up to the current month (all 12 for past years). */
 export const MONTHLY_SUBSCRIPTIONS_SQL = `WITH months AS (
            SELECT generate_series(
-             date_trunc('year', (now() AT TIME ZONE 'Europe/Kyiv')::date),
-             date_trunc('month', (now() AT TIME ZONE 'Europe/Kyiv')::date),
+             make_date($1::int, 1, 1),
+             LEAST(date_trunc('month', (now() AT TIME ZONE 'Europe/Kyiv')::date)::date, make_date($1::int, 12, 1)),
              '1 month'
            )::date AS month_start
          )
@@ -27,8 +29,10 @@ export const MONTHLY_SUBSCRIPTIONS_SQL = `WITH months AS (
          GROUP BY m.month_start ORDER BY m.month_start`;
 
 export class AdminStatsService {
-  async getStats(): Promise<AdminStats> {
-    const cached = cache.get<AdminStats>(STATS_CACHE_KEY);
+  /** @param year report year for the monthly series (default: current year in Kyiv). Current-state KPIs ignore it. */
+  async getStats(year: number = kyivYear()): Promise<AdminStats> {
+    const cacheKey = `${STATS_CACHE_KEY}:${year}`;
+    const cached = cache.get<AdminStats>(cacheKey);
     if (cached) return cached;
 
     const client = await pool.connect();
@@ -41,14 +45,12 @@ export class AdminStatsService {
 
       const [mrrRow] = await db.select({ total: sum(users.priceMonth) }).from(users).where(and(eq(users.role, 'user'), gte(users.endDate, sql`(now() AT TIME ZONE 'Europe/Kyiv')::date`), sql`COALESCE(${users.startDate}, ${users.createdAt}::date) <= (now() AT TIME ZONE 'Europe/Kyiv')::date`));
 
-      const revenueResult = await client.query(
-        MONTHLY_SUBSCRIPTIONS_SQL
-      );
+      const revenueResult = await client.query(MONTHLY_SUBSCRIPTIONS_SQL, [year]);
 
       const regResult = await client.query(
         `SELECT to_char(created_at, 'YYYY-MM') as month, COUNT(*) as count
-         FROM users WHERE role = 'user' AND created_at >= date_trunc('year', (now() AT TIME ZONE 'Europe/Kyiv')::date)
-         GROUP BY month ORDER BY month`
+         FROM users WHERE role = 'user' AND created_at >= make_date($1::int, 1, 1) AND created_at < make_date($1::int + 1, 1, 1)
+         GROUP BY month ORDER BY month`, [year]
       );
 
       const recentResult = await client.query(
@@ -63,11 +65,12 @@ export class AdminStatsService {
          GROUP BY price_month ORDER BY price_month`
       );
 
-      const payments = await client.query(`SELECT to_char(paid_on,'YYYY-MM') AS month,SUM(amount)::text AS amount,COUNT(*)::int AS count FROM admin_payments WHERE status='recorded' AND user_id IS NOT NULL AND paid_on >= date_trunc('year',(now() AT TIME ZONE 'Europe/Kyiv')::date) AND paid_on <= (now() AT TIME ZONE 'Europe/Kyiv')::date GROUP BY 1 ORDER BY 1`);
+      const payments = await client.query(`SELECT to_char(paid_on,'YYYY-MM') AS month,SUM(amount)::text AS amount,COUNT(*)::int AS count FROM admin_payments WHERE status='recorded' AND user_id IS NOT NULL AND paid_on >= make_date($1::int,1,1) AND paid_on < make_date($1::int + 1,1,1) AND paid_on <= (now() AT TIME ZONE 'Europe/Kyiv')::date GROUP BY 1 ORDER BY 1`,[year]);
       const totalUsers = Number(totalRow?.total ?? 0);
       const activeUsers = Number(activeRow?.count ?? 0);
 
       const stats: AdminStats = {
+        year,
         paymentsByMonth: payments.rows.map(r=>({month:r.month,amount:Number(r.amount),count:r.count})),
         totalUsers, activeUsers,
         adminUsers: Number(adminRow?.count ?? 0),
@@ -86,7 +89,7 @@ export class AdminStatsService {
           count: Number(r.count),
         })),
       };
-      cache.set(STATS_CACHE_KEY, stats, STATS_TTL_MS);
+      cache.set(cacheKey, stats, STATS_TTL_MS);
       return stats;
     } finally {
       client.release();
@@ -95,11 +98,13 @@ export class AdminStatsService {
 
   /** Invalidate the cached stats (call after user/payment mutations). */
   invalidate(): void {
-    cache.del(STATS_CACHE_KEY);
+    cache.delByPrefix(STATS_CACHE_KEY);
   }
 }
 
 export interface AdminStats {
+  /** Year of the monthly series below. */
+  year: number;
   paymentsByMonth: {month:string;amount:number;count:number}[];
   totalUsers: number; activeUsers: number; adminUsers: number; inactiveUsers: number;
   newThisMonth: number; mrr: number;
