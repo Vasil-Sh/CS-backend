@@ -65,4 +65,14 @@ describe('numericNormalizer', () => {
     expect(numericNormalizer(true)).toBe(true);
     expect(numericNormalizer(false)).toBe(false);
   });
+
+  it('keeps identity and free-text fields as strings', () => {
+    const input = { username: '12345', telegram: '380501234567', amount: '125.00', title: '2024' };
+    expect(numericNormalizer(input)).toEqual({ username: '12345', telegram: '380501234567', amount: 125, title: '2024' });
+  });
+
+  it('does not turn "Infinity" or "NaN" into numbers', () => {
+    expect(numericNormalizer('Infinity')).toBe('Infinity');
+    expect(numericNormalizer({ team: 'Infinity' })).toEqual({ team: 'Infinity' });
+  });
 });
