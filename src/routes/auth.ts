@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { loginSchema, registerSchema, updateUserSchema } from '../middleware/validation';
-import { authService } from '../services/authService';
+import { authService, toPgDate } from '../services/authService';
 import { checkDelete, checkResetPassword, checkUpdate } from '../services/ownerRules';
 import { sessionProblem, sessionProblemMessage } from '../services/sessionRules';
 import { adminUsersService } from '../services/adminUsersService';
@@ -143,8 +143,19 @@ auth.put('/users/:id', requireAuth, requireAdmin, async (c) => {
   if (!target) return c.json({ error: 'User not found' }, 404);
   const access = checkUpdate(actor, target, { role: body.role, isOwner: body.isOwner, password: !!body.password }, owners);
   if ('error' in access) return c.json({ error: access.error }, access.status);
+  // The subscription must not end before it starts (checked against stored dates
+  // when only one of them changes).
+  if (body.startDate !== undefined || body.endDate !== undefined) {
+    const current = await authService.getMe(id);
+    const start = body.startDate !== undefined ? toPgDate(body.startDate) : current?.startDate;
+    const end = body.endDate !== undefined ? toPgDate(body.endDate) : current?.endDate;
+    if (start && end && String(end).slice(0, 10) < String(start).slice(0, 10)) {
+      return c.json({ error: 'Дата закінчення має бути не раніше дати початку' }, 400);
+    }
+  }
   const updated = await authService.updateUser(id, { ...body, role: access.role, isOwner: access.isOwner });
-  if (!updated) return c.json({ error: 'User not found' }, 404);
+  // The target exists (checked above), so null here means the new username is taken.
+  if (!updated) return c.json({ error: 'Користувач з таким логіном уже існує' }, 409);
   invalidateAdminCaches();
   return c.json({ id: updated.id, username: updated.username, role: updated.role, isOwner: updated.isOwner, telegram: updated.telegram, priceMonth: updated.priceMonth, startDate: updated.startDate, endDate: updated.endDate });
 });

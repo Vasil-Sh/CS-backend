@@ -157,7 +157,8 @@ function generatePassword(): string {
   return crypto.randomBytes(12).toString('base64url').slice(0, 16);
 }
 
-function toPgDate(dateStr?: string): string | undefined {
+/** DD/MM/YYYY or YYYY-MM-DD → YYYY-MM-DD (empty → undefined). */
+export function toPgDate(dateStr?: string): string | undefined {
   if (!dateStr) return undefined;
   const parts = dateStr.includes('/') ? dateStr.split('/') : dateStr.split('-');
   if (parts.length === 3 && parts[2]?.length === 4) return `${parts[2]}-${parts[1]}-${parts[0]}`;
