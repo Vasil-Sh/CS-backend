@@ -39,6 +39,16 @@ auth.post('/login', async (c) => {
       return c.json({ success: false, error: result.error, attemptsLeft }, result.status as any);
     }
     clearLoginFailures(ip, body.username);
+    {
+      // An active self-limitation closes the app for the user (admins are never self-limited).
+      const blocked = await pool.query(
+        `SELECT MAX(t.until) AS until FROM tilt_blocks t JOIN users u ON u.id = t.user_id
+          WHERE lower(u.username) = lower($1) AND u.role <> 'admin' AND t.reason = 'Самообмеження користувача' AND t.until > now()`,
+        [body.username.trim()],
+      ).catch(() => ({ rows: [] as any[] }));
+      const until = blocked.rows[0]?.until;
+      if (until) return c.json({ success: false, error: 'Акаунт заблоковано самообмеженням', code: 'SELF_LIMITED', until: new Date(until).toISOString() }, 403);
+    }
     if (result.token && result.refreshToken && result.user) {
       void sessionsService.record(result.refreshToken, result.user.id, ip, c.req.header('user-agent') || '');
     }

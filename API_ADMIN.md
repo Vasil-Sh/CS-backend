@@ -191,7 +191,7 @@
 ## Самообмеження
 
 ### `POST /self-limitation` (auth)
-Тіло `{ periodDays: number, reason?: string }` → `{ id, until }` (201). Застосовується одразу: статус `applied`, створюється блок до `until`; зняти раніше не може ні адмін, ні овнер.
+Тіло `{ periodDays: number, reason?: string }` → `{ id, until }` (201). Застосовується одразу: статус `applied`, створюється блок до `until`; зняти раніше не може ні адмін, ні овнер, ні сам користувач (`DELETE /tilt-blocks/:id` → 403). Активна підписка зсувається на час блоку. Під час блоку вхід повертає `403 { code: "SELF_LIMITED", until }`, а `POST /admin/users/:id/payments` — `409`.
 
 ### `GET /admin/self-limitations` (admin)
 Query `status`. → `{ requests: [{ id, userId, username, periodDays, reason, status, createdAt, decidedAt, decidedBy, until, plan, telegram }] }` — `until` для застосованих.

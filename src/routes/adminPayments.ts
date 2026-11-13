@@ -82,6 +82,8 @@ routes.post('/admin/users/:id/payments',requireAuth,requireAdmin,async c=>{
  const client=await pool.connect();
  try{await client.query('BEGIN');
   const user=await client.query('SELECT username,end_date::text AS "endDate" FROM users WHERE id::text=$1 FOR UPDATE',[id]);
+  const selfLim=await client.query(`SELECT 1 FROM tilt_blocks WHERE user_id::text=$1 AND reason='Самообмеження користувача' AND until>now() LIMIT 1`,[id]);
+  if(selfLim.rows.length){await client.query('ROLLBACK');return c.json({error:'Під час самообмеження оплати не приймаються'},409)}
   if(!user.rows.length){await client.query('ROLLBACK');return c.json({error:'Користувача не знайдено'},404)}
   const duplicate=await client.query('SELECT * FROM admin_payments WHERE request_id=$1',[input.requestId]);
   if(duplicate.rows.length){const d=duplicate.rows[0];const same=String(d.user_id)===id && Number(d.amount)===Number(input.amount) && d.note===input.note && d.extend_subscription===input.extendSubscription;

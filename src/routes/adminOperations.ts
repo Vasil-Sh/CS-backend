@@ -116,6 +116,11 @@ ops.post('/self-limitation', requireAuth, async (c) => {
       `INSERT INTO tilt_blocks(user_id, until, reason, strategy_name) VALUES($1, now() + ($2 || ' days')::interval, 'Самообмеження користувача', '')`,
       [user.userId, days],
     );
+    // Paid days are not lost: an active subscription moves by the length of the block.
+    await client.query(
+      `UPDATE users SET end_date = end_date + $2::int WHERE id = $1 AND role <> 'admin' AND end_date >= (now() AT TIME ZONE 'Europe/Kyiv')::date`,
+      [user.userId, days],
+    );
     await client.query('COMMIT');
     return c.json({ id: result.rows[0].id, until: new Date(result.rows[0].until).toISOString() }, 201);
   } catch (e) {

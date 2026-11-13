@@ -40,6 +40,10 @@ tiltBlocks.delete('/:id', requireAuth, async (c) => {
   const [found] = await db.select().from(schema.tiltBlocks)
     .where(eq(schema.tiltBlocks.id, id)).limit(1);
   if (!found || found.userId !== userId) return c.json({ error: 'Not found' }, 404);
+  // A self-limitation cannot be lifted early — by the user or anyone else.
+  if (found.reason === 'Самообмеження користувача' && found.until > new Date()) {
+    return c.json({ error: 'Самообмеження не можна зняти до кінця терміну' }, 403);
+  }
   await db.delete(schema.tiltBlocks).where(eq(schema.tiltBlocks.id, id));
   return c.json({ success: true });
 });
