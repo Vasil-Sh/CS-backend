@@ -4,6 +4,7 @@ import {requireAuth,requireAdmin} from '../middleware/auth';
 import {parsePayment,extendedEnd} from '../services/paymentRules';
 import {telegramBotService} from '../services/telegramBot';
 import {recordAudit} from '../services/auditLog';
+import {receiptCaption,isPng,telegramErrorMessage,RECEIPT_MAX_BYTES} from '../services/receipts';
 const routes=new Hono();
 const columns=`id::text,user_id AS "userId",username,amount::text,currency,paid_on::text AS "paidOn",period_start::text AS "periodStart",period_end::text AS "periodEnd",note,extend_subscription AS "extendSubscription",created_by_name AS "createdBy",created_at AS "createdAt",status,cancelled_by_name AS "cancelledBy",cancelled_at AS "cancelledAt",cancel_reason AS "cancelReason",payment_method AS "paymentMethod",refunded_amount::text AS "refundedAmount",refund_reason AS "refundReason",refunded_at AS "refundedAt",refunded_by AS "refundedBy",promo_code AS "promoCode"`;
 
@@ -38,6 +39,29 @@ routes.post('/admin/payments/:id/refund',requireAuth,requireAdmin,async c=>{
   await client.query(`INSERT INTO admin_audit_log(actor_id,actor_name,action,target,details,status) VALUES($1,$2,'POST',$3,$4,'success')`,[actor.userId,actor.username,`/admin/payments/${id}/refund`,JSON.stringify({targetUsername:payment.username,_targetUserId:String(payment.user_id||''),paymentId:id,amount:payment.amount,refundedAmount:refund,refundReason:body.reason.trim()})]);
   await client.query('COMMIT');return c.json({success:true,refundedAmount:refund});
  }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
+});
+// POST /admin/payments/:id/receipt/send — send a PNG receipt to the user's Telegram (multipart field "photo")
+routes.post('/admin/payments/:id/receipt/send',requireAuth,requireAdmin,async c=>{
+ const id=c.req.param('id')||'';if(!/^\d+$/.test(id))return c.json({error:'Invalid payment'},400);
+ let form:Record<string,unknown>;
+ try{form=await c.req.parseBody()}catch{return c.json({error:'Надішліть чек як multipart/form-data з полем photo'},400)}
+ const photo=form.photo;
+ if(!photo||typeof photo==='string'||typeof (photo as File).arrayBuffer!=='function')return c.json({error:'Додайте зображення чека (PNG) у поле photo'},400);
+ const file=photo as File;
+ if(file.size===0||file.size>RECEIPT_MAX_BYTES)return c.json({error:'Чек має бути PNG до 2 МБ'},400);
+ const buffer=Buffer.from(await file.arrayBuffer());
+ if(!isPng(buffer))return c.json({error:'Чек має бути PNG до 2 МБ'},400);
+ const result=await pool.query(`SELECT p.id::text,p.amount::text,p.paid_on::text AS "paidOn",p.period_start::text AS "periodStart",p.period_end::text AS "periodEnd",p.status,p.user_id AS "userId",p.username,u.telegram_chat_id AS "chatId" FROM admin_payments p LEFT JOIN users u ON u.id=p.user_id WHERE p.id::text=$1`,[id]);
+ const payment=result.rows[0];
+ if(!payment)return c.json({error:'Оплату не знайдено'},404);
+ if(payment.status!=='recorded')return c.json({error:'Скасовану або повернену оплату не надсилаємо'},409);
+ if(!payment.chatId)return c.json({error:'Користувач ще не запустив бота — попросіть натиснути /start'},409);
+ if(!telegramBotService.isConfigured())return c.json({error:'Telegram-бот не налаштований на сервері'},503);
+ try{await telegramBotService.sendPhoto(payment.chatId,buffer,receiptCaption(payment))}
+ catch(error){const t=telegramErrorMessage((error as Error).message);return c.json({error:t.message},t.status)}
+ const actor=c.get('user');const sentAt=new Date().toISOString();
+ await recordAudit(actor,'POST',`/admin/payments/${id}/receipt/send`,{fields:{targetUsername:payment.username,_targetUserId:String(payment.userId||''),paymentId:id,amount:payment.amount,sentAt}});
+ return c.json({success:true,sentAt});
 });
 routes.get('/admin/users/:id/payments',requireAuth,requireAdmin,async c=>{
  const id=c.req.param('id')||'';if(!/^\d+$/.test(id))return c.json({error:'Invalid user'},400);

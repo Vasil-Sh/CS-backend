@@ -41,6 +41,7 @@ import adminInsightsRoutes from './routes/adminInsights';
 import adminOperationsRoutes from './routes/adminOperations';
 import adminParsersRoutes from './routes/adminParsers';
 import adminAdsRoutes from './routes/adminAds';
+import adminTelegramGroupsRoutes from './routes/adminTelegramGroups';
 import settingsRoutes from './routes/settings';
 import dota2MatchesRoutes from './routes/dota2Matches';
 import cs2MatchesRoutes from './routes/cs2Matches';
@@ -199,6 +200,7 @@ v1.route('', adminInsightsRoutes);
 v1.route('', adminOperationsRoutes);
 v1.route('', adminParsersRoutes);
 v1.route('', adminAdsRoutes);
+v1.route('', adminTelegramGroupsRoutes);
 v1.route('', settingsRoutes);
 v1.route('/public-profile', publicProfileRoutes);
 

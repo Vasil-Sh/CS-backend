@@ -26,6 +26,9 @@
 ### `GET /auth/sessions` (auth)
 → `{ sessions: [{ id, refreshJti, ip, userAgent, createdAt, lastSeenAt, current }] }`.
 
+### `DELETE /auth/sessions/:id` (auth)
+Завершити одну зі своїх сесій → `{ success: true }`; `404`, якщо сесію не знайдено.
+
 ### `POST /auth/logout-all` (auth)
 → `{ success: true, revoked: number }`.
 
@@ -37,6 +40,18 @@
 
 ### `GET /auth/users` (admin)
 Список користувачів: `[{ id, username, role, isOwner, telegram, priceMonth, plan, trialEndDate, ageConfirmed, startDate, endDate, createdAt }]`.
+
+### `POST /auth/register` (admin)
+Створення користувача. Тіло: `{ username, telegram, role, priceMonth, startDate, endDate }` → `{ username, password }` (згенерований пароль показується один раз). Пишеться в аудит.
+
+### `PUT /auth/users/:id` (admin)
+Оновлення користувача. Приймає зокрема `plan` (`trial|basic|pro`), `trialEndDate`, `ageConfirmed`, `birthDate`, `priceMonth`, `startDate`, `endDate`, `telegram`, `role`, `isOwner`. Пишеться в аудит (до/після).
+
+### `DELETE /auth/users/:id` (admin)
+Видалення користувача (з перевіркою owner-правил). Пишеться в аудит.
+
+### `POST /auth/users/:id/reset-password` (admin)
+→ `{ password }` — новий тимчасовий пароль. Пишеться в аудит.
 
 ---
 
@@ -90,7 +105,7 @@
 ## Користувачі
 
 ### `GET /admin/users` (admin)
-Зведення зі ставками: `[{ id, username, role, telegram, priceMonth, plan, planLabel, trialEndDate, ageConfirmed, startDate, endDate, createdAt, betCount, wins, losses, pending, totalStaked, totalProfit, winRate, roi, initialBank, manualAdjustments, currentBank, lossStreak, lastBetDate, lastBetAt, extensions, lastPaymentDate, games: [...] }]`.
+Зведення зі ставками: `{ users: [{ id, username, role, telegram, priceMonth, plan, planLabel, trialEndDate, ageConfirmed, startDate, endDate, createdAt, betCount, wins, losses, pending, totalStaked, totalProfit, winRate, roi, initialBank, manualAdjustments, currentBank, lossStreak, lastBetDate, lastBetAt, extensions, lastPaymentDate, games: [...] }] }`.
 
 ### `GET /admin/users/:id/card` (admin)
 Картка користувача зі статистикою і нотаткою.
@@ -98,11 +113,7 @@
 ### `GET /admin/users/:id/bets` (admin)
 Список ставок користувача.
 
-### `PUT /admin/users/:id` (admin)
-Оновлення користувача. Приймає зокрема `plan` (`trial|basic|pro`), `trialEndDate`, `ageConfirmed`, `birthDate`, `priceMonth`, `startDate`, `endDate`, `telegram`, `role`, `isOwner`.
-
-### `DELETE /admin/users/:id` (admin)
-Видалення користувача (з перевіркою owner-правил).
+Редагування й видалення користувачів — через `PUT /auth/users/:id` і `DELETE /auth/users/:id` (розділ «Автентифікація»).
 
 ### `PUT /admin/users/:id/note` (admin)
 Нотатка (з версією для оптимістичного блокування).
@@ -126,6 +137,21 @@
 
 ### `POST /admin/payments/:id/refund` (admin)
 Тіло `{ reason, amount? }` → `{ success: true, refundedAmount }`.
+
+### `POST /admin/payments/:id/receipt/send` (admin)
+Надсилає чек користувачу в Telegram. `multipart/form-data`, поле `photo` — PNG до 2 МБ (картинку чека формує адмінка).
+Підпис під фото: сума, дата оплати й період підписки.
+
+Відповідь (200): `{ success: true, sentAt: ISO }`. Запис в аудит: `target = /admin/payments/:id/receipt/send`, `details: { targetUsername, _targetUserId, paymentId, amount, sentAt }`.
+
+Помилки:
+- `400` — немає поля `photo`, файл не PNG або більший за 2 МБ.
+- `404` — оплату не знайдено.
+- `409` — оплату скасовано/повернено; користувач ще не натиснув `/start` у боті (немає `telegram_chat_id`); користувач заблокував бота або чат не знайдено.
+- `502` — інша помилка Telegram API (текст помилки в `error`).
+- `503` — на сервері не задано `TELEGRAM_BOT_TOKEN`.
+
+`telegram_chat_id` зберігається автоматично, коли користувач надсилає боту `/start` (вебхук `POST /telegram/webhook`).
 
 ---
 
@@ -186,6 +212,21 @@ Query `status`. → `{ tickets: [...] }`.
 ### `PATCH /admin/support-tickets/:id` (admin)
 Тіло `{ status: 'resolved'|'closed' }`.
 
+### `GET /admin/telegram-groups` (admin)
+Модерація Telegram-груп, які додали користувачі. Query: `status` (`pending|approved|rejected|all`, за замовч. `all`), `q` (назва, посилання або логін), `page` (по 20).
+
+→ `{ groups: [{ id, name, link, game, hasChannel, comment, userId, addedBy, addedByPlan, moderationStatus, reviewedBy, reviewedAt, rejectReason, createdAt }], hasMore: boolean, counts: { pending, approved, rejected, all } }`. Спершу йдуть `pending`, далі за датою додавання.
+
+Нові групи створюються зі статусом `pending`; групи, що існували до міграції `0022`, — `approved`. Статус бачить лише адмінка — у застосунку користувач і далі бачить свої групи як раніше.
+
+### `POST /admin/telegram-groups/:id/approve` (admin)
+→ `{ success: true, moderationStatus: "approved" }`. Пише `reviewed_by`, `reviewed_at`, очищає `reject_reason`, запис в аудит.
+
+### `POST /admin/telegram-groups/:id/reject` (admin)
+Тіло `{ reason }` (обовʼязково, до 500 символів) → `{ success: true, moderationStatus: "rejected" }`. Запис в аудит з причиною.
+
+Помилки обох: `400` (некоректний id / немає причини), `404` (групу не знайдено).
+
 ### `GET /admin/support-templates` (admin)
 ### `POST /admin/support-templates` (admin)
 ### `DELETE /admin/support-templates/:id` (admin)
@@ -208,3 +249,17 @@ Query `status`. → `{ tickets: [...] }`.
 
 ### `GET /admin/audit` (admin)
 Query: `page`, `category` (`all|users|banners`), `status` (`all|success|failed|pending`), `q`, `from`, `to`, `userId`, `history` (`subscription`).
+
+### `GET /admin/audit/export` (admin)
+CSV з тими самими фільтрами, що й `GET /admin/audit` (формули в клітинках нейтралізуються).
+
+### `DELETE /admin/audit/cleanup` (admin)
+Query `days` (1–3650, за замовч. 180) — видаляє записи старші за N днів → `{ removed: number }`. Саме очищення теж записується в журнал.
+
+---
+
+## Службові
+
+### `POST /admin/reset` (auth)
+Попри назву, скидає дані **поточного** користувача (ставки, банк, групи тощо) → `{ success: true, counts }`. Не адміністративна дія над іншими.
+
