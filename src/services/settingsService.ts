@@ -8,12 +8,41 @@ export interface AppSettings {
   defaultMonthlyPrice: number;
   subscriptionDays: number;
   bannerSpecText: string;
+  /** Plan prices (UAH/month). */
+  basicPrice: number;
+  proPrice: number;
+  /** Plan feature lists (JSON string arrays). */
+  basicFeatures: string[];
+  proFeatures: string[];
+  /** Trial period config. */
+  trialEnabled: boolean;
+  trialDays: number;
+  trialPlan: string;
+  /** AI usage limits (per user per day). */
+  aiDailyLimit: number;
+  /** Warning thresholds. */
+  warningThreshold: number;
+  /** Receipt fields (JSON string array). */
+  receiptFields: string[];
+  /** Disclaimer text. */
+  disclaimerText: string;
 }
 
 const DEFAULTS: AppSettings = {
   defaultMonthlyPrice: 0,
   subscriptionDays: 30,
   bannerSpecText: '',
+  basicPrice: 300,
+  proPrice: 600,
+  basicFeatures: [],
+  proFeatures: [],
+  trialEnabled: false,
+  trialDays: 7,
+  trialPlan: 'basic',
+  aiDailyLimit: 5,
+  warningThreshold: 3,
+  receiptFields: [],
+  disclaimerText: '',
 };
 
 /** Normalize a raw DB row set into a typed settings object. */
@@ -25,10 +54,36 @@ function toSettings(rows: { key: string; value: string }[]): AppSettings {
     const n = Number(raw);
     return Number.isFinite(n) ? n : fallback;
   };
+  const bool = (key: string, fallback: boolean) => {
+    const raw = map.get(key);
+    if (raw == null) return fallback;
+    return raw === 'true' || raw === '1';
+  };
+  const jsonArr = (key: string, fallback: string[]) => {
+    const raw = map.get(key);
+    if (raw == null) return fallback;
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.map(String) : fallback;
+    } catch {
+      return fallback;
+    }
+  };
   return {
     defaultMonthlyPrice: num('default_monthly_price', DEFAULTS.defaultMonthlyPrice),
     subscriptionDays: num('subscription_days', DEFAULTS.subscriptionDays),
     bannerSpecText: map.get('banner_spec_text') ?? DEFAULTS.bannerSpecText,
+    basicPrice: num('basic_price', DEFAULTS.basicPrice),
+    proPrice: num('pro_price', DEFAULTS.proPrice),
+    basicFeatures: jsonArr('basic_features', DEFAULTS.basicFeatures),
+    proFeatures: jsonArr('pro_features', DEFAULTS.proFeatures),
+    trialEnabled: bool('trial_enabled', DEFAULTS.trialEnabled),
+    trialDays: num('trial_days', DEFAULTS.trialDays),
+    trialPlan: map.get('trial_plan') ?? DEFAULTS.trialPlan,
+    aiDailyLimit: num('ai_daily_limit', DEFAULTS.aiDailyLimit),
+    warningThreshold: num('warning_threshold', DEFAULTS.warningThreshold),
+    receiptFields: jsonArr('receipt_fields', DEFAULTS.receiptFields),
+    disclaimerText: map.get('disclaimer_text') ?? DEFAULTS.disclaimerText,
   };
 }
 
@@ -62,6 +117,23 @@ export class SettingsService {
           throw new Error('invalid spec text');
         entries.push(['banner_spec_text', patch.bannerSpecText]);
       }
+      const pushNum = (key: string, value: number | undefined, min = 0, max = 1_000_000) => {
+        if (value === undefined) return;
+        const n = Number(value);
+        if (!Number.isFinite(n) || n < min || n > max) throw new Error('invalid number');
+        entries.push([key, String(n)]);
+      };
+      pushNum('basic_price', patch.basicPrice);
+      pushNum('pro_price', patch.proPrice);
+      if (patch.basicFeatures !== undefined) entries.push(['basic_features', JSON.stringify(patch.basicFeatures)]);
+      if (patch.proFeatures !== undefined) entries.push(['pro_features', JSON.stringify(patch.proFeatures)]);
+      if (patch.trialEnabled !== undefined) entries.push(['trial_enabled', String(Boolean(patch.trialEnabled))]);
+      pushNum('trial_days', patch.trialDays, 1, 365);
+      if (patch.trialPlan !== undefined) entries.push(['trial_plan', String(patch.trialPlan)]);
+      pushNum('ai_daily_limit', patch.aiDailyLimit, 0, 1000);
+      pushNum('warning_threshold', patch.warningThreshold, 0, 100);
+      if (patch.receiptFields !== undefined) entries.push(['receipt_fields', JSON.stringify(patch.receiptFields)]);
+      if (patch.disclaimerText !== undefined) entries.push(['disclaimer_text', String(patch.disclaimerText)]);
       for (const [key, value] of entries) {
         await client.query(
           `INSERT INTO app_settings(key, value) VALUES($1, $2)

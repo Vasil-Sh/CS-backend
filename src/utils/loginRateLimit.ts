@@ -10,8 +10,8 @@ interface Bucket {
 }
 
 const WINDOW_MS = 15 * 60 * 1000; // 15 min sliding window
-const MAX_ATTEMPTS = 10;
-const BLOCK_MS = 15 * 60 * 1000; // lock after 10 failures
+const MAX_ATTEMPTS = 5;
+const BLOCK_MS = 5 * 60 * 1000; // lock after 5 failures (design requirement)
 
 const buckets = new Map<string, Bucket>();
 
@@ -62,6 +62,14 @@ export function loginBlockedMs(ip: string, username: string): number {
   if (!bucket) return 0;
   const remaining = bucket.blockedUntil - Date.now();
   return remaining > 0 ? remaining : 0;
+}
+
+/** Remaining attempts before the account is locked (for error responses). */
+export function loginAttemptsLeft(ip: string, username: string): number {
+  const bucket = buckets.get(keyFor(ip, username));
+  if (!bucket) return MAX_ATTEMPTS;
+  prune(bucket, Date.now());
+  return Math.max(0, MAX_ATTEMPTS - bucket.attempts.length);
 }
 
 // Periodic cleanup to avoid unbounded growth.

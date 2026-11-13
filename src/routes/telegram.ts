@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { pool } from '../db/client';
 import { telegramBotService } from '../services/telegramBot';
 
 const telegram = new Hono();
@@ -22,6 +23,30 @@ telegram.post('/webhook', async (c) => {
 
   try {
     const update = await c.req.json();
+    const msg = update.message || update.channel_post;
+
+    // ── /start: capture the user's chat id for future receipts ──
+    if (msg?.text) {
+      const { isStart, token } = telegramBotService.parseStartToken(msg.text);
+      if (isStart && msg.chat?.id > 0) {
+        const chatId = msg.chat.id;
+        // Match by deep-link token (username) or the sender's @username.
+        const handle = token || msg.from?.username || null;
+        if (handle) {
+          await pool.query(
+            `UPDATE users SET telegram_chat_id=$1, updated_at=now()
+             WHERE telegram=$2 OR username=$2`,
+            [chatId, handle],
+          ).catch((e) => console.warn('[Telegram] /start link failed:', (e as Error).message));
+        }
+        await telegramBotService.sendMessage(
+          chatId,
+          '👋 Привіт! Бот MatchIQ підключено. Чеки надходитимуть сюди.',
+        );
+        return c.json({ ok: true });
+      }
+    }
+
     const result = await telegramBotService.processUpdate(update);
 
     return c.json({

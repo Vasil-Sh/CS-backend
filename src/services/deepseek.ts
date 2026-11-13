@@ -4,6 +4,7 @@
 // ═══════════════════════════════════════════
 
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { recordAiUsage } from './insights';
 
 interface MatchData {
   team1: string;
@@ -74,8 +75,16 @@ class DeepSeekService {
       throw new Error(`DeepSeek API error ${response.status}: ${err}`);
     }
 
-    const data = await response.json() as { choices?: { message?: { content?: string } }[] };
+    const data = await response.json() as {
+      choices?: { message?: { content?: string } }[];
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+    };
     const text = data.choices?.[0]?.message?.content || '';
+    const promptTokens = data.usage?.prompt_tokens ?? 0;
+    const completionTokens = data.usage?.completion_tokens ?? 0;
+    // DeepSeek deepseek-chat pricing (USD per 1M tokens)
+    const cost = (promptTokens * 0.27 + completionTokens * 1.10) / 1_000_000;
+    void recordAiUsage({ provider: 'deepseek', model: this.model, promptTokens, completionTokens, cost, status: 'success' });
     return this.parseResponse(text);
   }
 
@@ -96,6 +105,11 @@ class DeepSeekService {
     ]);
 
     const text = (result as any).response.text();
+    const usage = (result as any).response?.usageMetadata;
+    const promptTokens = Number(usage?.promptTokenCount ?? 0);
+    const completionTokens = Number(usage?.candidatesTokenCount ?? 0);
+    // Gemini 2.0 Flash is free — track tokens, zero cost.
+    void recordAiUsage({ provider: 'gemini', model: 'gemini-2.0-flash', promptTokens, completionTokens, cost: 0, status: 'success' });
     return this.parseResponse(text);
   }
 

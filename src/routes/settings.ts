@@ -24,16 +24,25 @@ settings.put('/admin/settings', requireAuth, requireAdmin, async (c) => {
     return c.json({ error: 'Invalid body' }, 400);
   }
   try {
+    const num = (v: unknown): number | undefined =>
+      v === undefined || v === null ? undefined : Number(v);
+    const arr = (v: unknown): string[] | undefined =>
+      v === undefined || v === null ? undefined : Array.isArray(v) ? v.map(String) : undefined;
     const data = await settingsService.update({
-      ...(body.defaultMonthlyPrice !== undefined
-        ? { defaultMonthlyPrice: Number(body.defaultMonthlyPrice) }
-        : {}),
-      ...(body.subscriptionDays !== undefined
-        ? { subscriptionDays: Number(body.subscriptionDays) }
-        : {}),
-      ...(body.bannerSpecText !== undefined
-        ? { bannerSpecText: String(body.bannerSpecText) }
-        : {}),
+      defaultMonthlyPrice: num(body.defaultMonthlyPrice),
+      subscriptionDays: num(body.subscriptionDays),
+      bannerSpecText: body.bannerSpecText !== undefined ? String(body.bannerSpecText) : undefined,
+      basicPrice: num(body.basicPrice),
+      proPrice: num(body.proPrice),
+      basicFeatures: arr(body.basicFeatures),
+      proFeatures: arr(body.proFeatures),
+      trialEnabled: body.trialEnabled !== undefined ? Boolean(body.trialEnabled) : undefined,
+      trialDays: num(body.trialDays),
+      trialPlan: body.trialPlan !== undefined ? String(body.trialPlan) : undefined,
+      aiDailyLimit: num(body.aiDailyLimit),
+      warningThreshold: num(body.warningThreshold),
+      receiptFields: arr(body.receiptFields),
+      disclaimerText: body.disclaimerText !== undefined ? String(body.disclaimerText) : undefined,
     });
     return c.json({ settings: data });
   } catch (err) {

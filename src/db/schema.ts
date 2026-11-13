@@ -10,6 +10,7 @@ import {
   boolean,
   jsonb,
   integer,
+  bigint,
   smallint,
   uniqueIndex,
   index,
@@ -31,9 +32,18 @@ export const users = pgTable(
     isOwner: boolean('is_owner').notNull().default(false),
     telegram: varchar('telegram', { length: 100 }).default(''),
     priceMonth: numeric('price_month', { precision: 10, scale: 2 }).default('0'),
+    /** Subscription plan: 'trial' | 'basic' | 'pro' (migration 0018). */
+    plan: varchar('plan', { length: 20 }).notNull().default('trial'),
+    /** When the trial period ends (null = no trial / already converted). */
+    trialEndDate: date('trial_end_date'),
+    /** Whether the user's age has been verified. */
+    ageConfirmed: boolean('age_confirmed').notNull().default(false),
+    /** Telegram chat id captured on /start — used to send receipts. */
+    telegramChatId: bigint('telegram_chat_id', { mode: 'number' }),
     startDate: date('start_date').default(sql`CURRENT_DATE`),
     endDate: date('end_date').default(sql`CURRENT_DATE`),
     maxStakePercent: integer('max_stake_percent').default(7),
+    birthDate: date('birth_date'),
     preferences: jsonb('preferences').$type<{ theme?: string; lang?: string }>().default({}),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at')
@@ -232,6 +242,10 @@ export const telegramGroups = pgTable(
     hasChannel: boolean('has_channel').default(false).notNull(),
     comment: varchar('comment', { length: 500 }).default(''),
     game: varchar('game', { length: 20 }).default('').notNull(),
+    moderationStatus: varchar('moderation_status', { length: 20 }).notNull().default('pending'),
+    reviewedBy: varchar('reviewed_by', { length: 100 }),
+    reviewedAt: timestamp('reviewed_at'),
+    rejectReason: varchar('reject_reason', { length: 500 }),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at')
       .defaultNow()
@@ -381,6 +395,93 @@ export const appSettings = pgTable('app_settings', {
     .notNull(),
 });
 
+// ═══════════════════════════════════════════
+// AI Usage — per-call token + cost accounting (DeepSeek / Gemini)
+// ═══════════════════════════════════════════
+
+export const aiUsage = pgTable(
+  'ai_usage',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id').references(() => users.id, { onDelete: 'set null' }),
+    provider: varchar('provider', { length: 20 }).notNull(),
+    model: varchar('model', { length: 50 }).notNull().default(''),
+    promptTokens: integer('prompt_tokens').notNull().default(0),
+    completionTokens: integer('completion_tokens').notNull().default(0),
+    cost: numeric('cost', { precision: 12, scale: 6 }).notNull().default('0'),
+    status: varchar('status', { length: 20 }).notNull().default('success'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    index('ai_usage_created_idx').on(table.createdAt),
+    index('ai_usage_user_idx').on(table.userId),
+  ]
+);
+
+// ═══════════════════════════════════════════
+// Parser Failures — persistent scraper/parser failure log
+// ═══════════════════════════════════════════
+
+export const parserFailures = pgTable(
+  'parser_failures',
+  {
+    id: serial('id').primaryKey(),
+    source: varchar('source', { length: 50 }).notNull(),
+    message: text('message').notNull().default(''),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    index('parser_failures_created_idx').on(table.createdAt),
+    index('parser_failures_source_idx').on(table.source),
+  ]
+);
+
+// ═══════════════════════════════════════════
+// Support Tickets — user appeals / contact requests
+// ═══════════════════════════════════════════
+
+export const supportTickets = pgTable(
+  'support_tickets',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id').references(() => users.id, { onDelete: 'set null' }),
+    username: varchar('username', { length: 100 }).notNull().default(''),
+    subject: varchar('subject', { length: 200 }).notNull(),
+    message: text('message').notNull(),
+    status: varchar('status', { length: 20 }).notNull().default('open'),
+    resolvedAt: timestamp('resolved_at'),
+    resolvedBy: varchar('resolved_by', { length: 100 }),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    index('support_tickets_status_idx').on(table.status, table.createdAt),
+    index('support_tickets_user_idx').on(table.userId),
+  ]
+);
+
+// ═══════════════════════════════════════════
+// Self-Limitation Requests — user asks to pause betting
+// ═══════════════════════════════════════════
+
+export const selfLimitationRequests = pgTable(
+  'self_limitation_requests',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    username: varchar('username', { length: 100 }).notNull().default(''),
+    periodDays: integer('period_days').notNull(),
+    reason: varchar('reason', { length: 500 }).notNull().default(''),
+    status: varchar('status', { length: 20 }).notNull().default('new'),
+    decidedAt: timestamp('decided_at'),
+    decidedBy: varchar('decided_by', { length: 100 }),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    index('self_lim_req_status_idx').on(table.status, table.createdAt),
+    index('self_lim_req_user_idx').on(table.userId),
+  ]
+);
+
 // ── Type exports ──
 
 export type User = typeof users.$inferSelect;
@@ -399,5 +500,12 @@ export type MatchHistory = typeof matchesHistory.$inferSelect;
 export type NewMatchHistory = typeof matchesHistory.$inferInsert;
 export type Banner = typeof banners.$inferSelect;
 export type NewBanner = typeof banners.$inferInsert;
+export type AiUsage = typeof aiUsage.$inferSelect;
+export type NewAiUsage = typeof aiUsage.$inferInsert;
+export type ParserFailure = typeof parserFailures.$inferSelect;
+export type SupportTicket = typeof supportTickets.$inferSelect;
+export type NewSupportTicket = typeof supportTickets.$inferInsert;
+export type SelfLimitationRequest = typeof selfLimitationRequests.$inferSelect;
+export type NewSelfLimitationRequest = typeof selfLimitationRequests.$inferInsert;
 export type BannerSlot = typeof bannerSlots.$inferSelect;
 export type AppSetting = typeof appSettings.$inferSelect;

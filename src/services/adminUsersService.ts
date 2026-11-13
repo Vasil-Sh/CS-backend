@@ -4,6 +4,7 @@
 
 import { pool } from '../db/client';
 import { cache } from '../utils/cache';
+import { planKey, planLabel } from './planNames';
 
 const OVERVIEW_CACHE_KEY = 'admin:users:overview';
 const OVERVIEW_TTL_MS = 15_000; // 15s — shared by users list + betting activity
@@ -30,6 +31,22 @@ export interface AdminUserOverview {
   currentBank: number;
   /** Consecutive losses counting back from the most recent decided bet (0 if none). */
   lossStreak: number;
+  /** Stored plan key (trial/basic/pro). */
+  plan: string;
+  /** Human-readable plan label (Пробний/Базова/Pro). */
+  planLabel: string;
+  /** Trial end date ('' if none). */
+  trialEndDate: string;
+  /** Whether the user's age has been verified. */
+  ageConfirmed: boolean;
+  /** Date of the user's most recent bet ('' if none). */
+  lastBetDate: string;
+  /** ISO timestamp of the user's most recent bet ('' if none). */
+  lastBetAt: string;
+  /** Number of subscription extensions (payments with extend_subscription). */
+  extensions: number;
+  /** Date of the user's most recent payment ('' if none). */
+  lastPaymentDate: string;
   /** Per-game aggregated stats (profit/ROI separately for CS2, Dota2, …). */
   games: GameBreakdown[];
 }
@@ -78,6 +95,9 @@ export class AdminUsersService {
           u.role,
           u.telegram,
           u.price_month::numeric AS price_month,
+          u.plan,
+          u.trial_end_date::text AS trial_end_date,
+          u.age_confirmed,
           u.start_date::text AS start_date,
           u.end_date::text AS end_date,
           u.created_at,
@@ -131,9 +151,38 @@ export class AdminUsersService {
         ORDER BY user_id, game
       `);
 
+      // Last bet date per user (for churn/inactive analysis).
+      const lastBetResult = await client.query(
+        `SELECT user_id, MAX(date)::text AS last_bet_date, MAX(created_at) AS last_bet_at FROM bets GROUP BY user_id`
+      );
+
+      // Extension history per user: how many times extended, last payment date.
+      const paymentsResult = await client.query(
+        `SELECT user_id,
+                COUNT(*) FILTER (WHERE extend_subscription = true)::int AS extensions,
+                MAX(paid_on)::text AS last_payment_date
+         FROM admin_payments WHERE user_id IS NOT NULL GROUP BY user_id`
+      );
+
       const lossStreakMap = new Map<number, number>();
       streakResult.rows.forEach((r: any) =>
         lossStreakMap.set(Number(r.user_id), Number(r.loss_streak)),
+      );
+
+      const lastBetMap = new Map<number, { date: string; at: string }>();
+      lastBetResult.rows.forEach((r: any) =>
+        lastBetMap.set(Number(r.user_id), {
+          date: r.last_bet_date || '',
+          at: r.last_bet_at ? new Date(r.last_bet_at).toISOString() : '',
+        }),
+      );
+
+      const paymentsMap = new Map<number, { extensions: number; lastPaymentDate: string }>();
+      paymentsResult.rows.forEach((r: any) =>
+        paymentsMap.set(Number(r.user_id), {
+          extensions: Number(r.extensions),
+          lastPaymentDate: r.last_payment_date || '',
+        }),
       );
 
       const gamesMap = new Map<number, GameBreakdown[]>();
@@ -189,6 +238,14 @@ export class AdminUsersService {
           manualAdjustments: manual,
           currentBank: initialBank + manual + totalProfit,
           lossStreak: lossStreakMap.get(r.id) || 0,
+          plan: planKey(r.plan),
+          planLabel: planLabel(r.plan),
+          trialEndDate: r.trial_end_date || '',
+          ageConfirmed: Boolean(r.age_confirmed),
+          lastBetDate: lastBetMap.get(r.id)?.date || '',
+          lastBetAt: lastBetMap.get(r.id)?.at || '',
+          extensions: paymentsMap.get(r.id)?.extensions || 0,
+          lastPaymentDate: paymentsMap.get(r.id)?.lastPaymentDate || '',
           games: gamesMap.get(r.id) || [],
         };
       });

@@ -3,6 +3,8 @@
  * After `failureThreshold` consecutive failures, opens for `resetTimeoutMs`.
  */
 
+import { recordParserFailure } from './insights';
+
 interface CircuitState {
   failures: number;
   lastFailure: number;
@@ -43,6 +45,8 @@ export function recordFailure(name: string): void {
   const s = getState(name);
   s.failures++;
   s.lastFailure = Date.now();
+  // Persist to parser_failures (best-effort, throttled inside).
+  recordParserFailure(name, `Circuit breaker failure #${s.failures}`);
   if (s.failures >= FAILURE_THRESHOLD) {
     s.open = true;
     console.warn(`[circuit-breaker] ${name} OPEN (${s.failures} failures)`);
@@ -52,4 +56,21 @@ export function recordFailure(name: string): void {
 export function getStatus(name: string): { open: boolean; failures: number } {
   const s = getState(name);
   return { open: s.open, failures: s.failures };
+}
+
+/** List all registered circuits (for the admin parser status screen). */
+export function listCircuits(): { name: string; open: boolean; failures: number; lastFailure: number }[] {
+  return [...circuits.entries()].map(([name, s]) => ({
+    name,
+    open: s.open,
+    failures: s.failures,
+    lastFailure: s.lastFailure,
+  }));
+}
+
+/** Force-close a circuit (admin "run again" resets the breaker). */
+export function resetCircuit(name: string): void {
+  const s = getState(name);
+  s.open = false;
+  s.failures = 0;
 }

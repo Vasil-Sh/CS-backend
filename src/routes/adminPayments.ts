@@ -2,8 +2,43 @@ import {Hono} from 'hono';
 import {pool} from '../db/client';
 import {requireAuth,requireAdmin} from '../middleware/auth';
 import {parsePayment,extendedEnd} from '../services/paymentRules';
+import {telegramBotService} from '../services/telegramBot';
+import {recordAudit} from '../services/auditLog';
 const routes=new Hono();
-const columns=`id::text,user_id AS "userId",username,amount::text,currency,paid_on::text AS "paidOn",period_start::text AS "periodStart",period_end::text AS "periodEnd",note,extend_subscription AS "extendSubscription",created_by_name AS "createdBy",created_at AS "createdAt",status,cancelled_by_name AS "cancelledBy",cancelled_at AS "cancelledAt",cancel_reason AS "cancelReason"`;
+const columns=`id::text,user_id AS "userId",username,amount::text,currency,paid_on::text AS "paidOn",period_start::text AS "periodStart",period_end::text AS "periodEnd",note,extend_subscription AS "extendSubscription",created_by_name AS "createdBy",created_at AS "createdAt",status,cancelled_by_name AS "cancelledBy",cancelled_at AS "cancelledAt",cancel_reason AS "cancelReason",payment_method AS "paymentMethod",refunded_amount::text AS "refundedAmount",refund_reason AS "refundReason",refunded_at AS "refundedAt",refunded_by AS "refundedBy",promo_code AS "promoCode"`;
+
+// GET /admin/payments — platform-wide payments with optional status/month filters
+routes.get('/admin/payments',requireAuth,requireAdmin,async c=>{
+ const status=c.req.query('status')||'';
+ const month=c.req.query('month')||'';
+ if(status && !['recorded','cancelled','refunded'].includes(status))return c.json({error:'Invalid status'},400);
+ if(month && !/^\d{4}-\d{2}$/.test(month))return c.json({error:'Invalid month (YYYY-MM)'},400);
+ const page=Math.max(1,Math.min(100000,Math.floor(Number(c.req.query('page'))||1)));
+ const where:string[]=[];const params:any[]=[];
+ if(status){params.push(status);where.push(`status=$${params.length}`)}
+ if(month){params.push(month);where.push(`to_char(paid_on,'YYYY-MM')=$${params.length}`)}
+ const w=where.length?`WHERE ${where.join(' AND ')}`:'';
+ const result=await pool.query(`SELECT ${columns} FROM admin_payments ${w} ORDER BY paid_on DESC,id DESC LIMIT 21 OFFSET $${params.length+1}`,[...params,(page-1)*20]);
+ const summary=await pool.query(`SELECT COALESCE(SUM(amount) FILTER (WHERE status='recorded'),0)::text AS recorded, COALESCE(SUM(refunded_amount),0)::text AS refunded, COUNT(*)::int AS total FROM admin_payments ${w}`,[...params]);
+ return c.json({payments:result.rows.slice(0,20),hasMore:result.rows.length>20,summary:summary.rows[0]});
+});
+
+// POST /admin/payments/:id/refund — refund a recorded payment
+routes.post('/admin/payments/:id/refund',requireAuth,requireAdmin,async c=>{
+ const id=c.req.param('id')||'';const body=await c.req.json().catch(()=>null);
+ if(!/^\d+$/.test(id)||!body||typeof body.reason!=='string'||!body.reason.trim()||body.reason.length>500)return c.json({error:'Вкажіть причину повернення (до 500 символів)'},400);
+ const amount=body.amount===undefined||body.amount===null?null:Number(body.amount);
+ if(amount!==null && (!Number.isFinite(amount)||amount<=0))return c.json({error:'Некоректна сума повернення'},400);
+ const client=await pool.connect();try{await client.query('BEGIN');
+  const result=await client.query('SELECT * FROM admin_payments WHERE id::text=$1 FOR UPDATE',[id]);const payment=result.rows[0];
+  if(!payment){await client.query('ROLLBACK');return c.json({error:'Оплату не знайдено'},404)}
+  if(payment.status==='refunded'){await client.query('ROLLBACK');return c.json({success:true})}
+  const actor=c.get('user');const refund=amount??Number(payment.amount);
+  await client.query("UPDATE admin_payments SET status='refunded',refunded_amount=$2,refund_reason=$3,refunded_at=now(),refunded_by=$4 WHERE id::text=$1",[id,refund,body.reason.trim(),actor.username]);
+  await client.query(`INSERT INTO admin_audit_log(actor_id,actor_name,action,target,details,status) VALUES($1,$2,'POST',$3,$4,'success')`,[actor.userId,actor.username,`/admin/payments/${id}/refund`,JSON.stringify({targetUsername:payment.username,_targetUserId:String(payment.user_id||''),paymentId:id,amount:payment.amount,refundedAmount:refund,refundReason:body.reason.trim()})]);
+  await client.query('COMMIT');return c.json({success:true,refundedAmount:refund});
+ }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
+});
 routes.get('/admin/users/:id/payments',requireAuth,requireAdmin,async c=>{
  const id=c.req.param('id')||'';if(!/^\d+$/.test(id))return c.json({error:'Invalid user'},400);
  const page=Math.max(1,Math.min(100000,Math.floor(Number(c.req.query('page'))||1)));
@@ -26,7 +61,7 @@ routes.post('/admin/users/:id/payments',requireAuth,requireAdmin,async c=>{
    await client.query('ROLLBACK');if(!same || v.paid_on!==input.paidOn || v.period_start!==input.periodStart || v.period_end!==input.periodEnd)return c.json({error:'Запит уже використано для іншої оплати. Оновіть форму.'},409);
    return c.json({id:String(d.id),duplicate:true});}
   const actor=c.get('user');
-  const result=await client.query(`INSERT INTO admin_payments(request_id,user_id,username,amount,paid_on,period_start,period_end,note,extend_subscription,created_by,created_by_name) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id::text`,[input.requestId,id,user.rows[0].username,input.amount,input.paidOn,input.periodStart,input.periodEnd,input.note,input.extendSubscription,actor.userId,actor.username]);
+  const result=await client.query(`INSERT INTO admin_payments(request_id,user_id,username,amount,paid_on,period_start,period_end,note,extend_subscription,created_by,created_by_name,payment_method,promo_code) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id::text`,[input.requestId,id,user.rows[0].username,input.amount,input.paidOn,input.periodStart,input.periodEnd,input.note,input.extendSubscription,actor.userId,actor.username,input.paymentMethod,input.promoCode]);
   const before=user.rows[0].endDate;const after=input.extendSubscription?extendedEnd(before,input.periodEnd):before;
   if(after!==before)await client.query('UPDATE users SET end_date=$2,updated_at=now() WHERE id::text=$1',[id,after]);
   await client.query(`INSERT INTO admin_audit_log(actor_id,actor_name,action,target,details,status) VALUES($1,$2,'POST',$3,$4,'success')`,[actor.userId,actor.username,`/admin/users/${id}/payments`,JSON.stringify({targetUsername:user.rows[0].username,_targetUserId:id,paymentId:result.rows[0].id,amount:input.amount,currency:'UAH',paidOn:input.paidOn,periodStart:input.periodStart,periodEnd:input.periodEnd,extendSubscription:input.extendSubscription,...(after!==before?{_changes:{endDate:{before,after}}}:{})})]);

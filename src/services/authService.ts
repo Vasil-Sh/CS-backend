@@ -35,14 +35,15 @@ export class AuthService {
       isAdmin: user.role === 'admin',
       token,
       refreshToken,
-      user: { username: user.username, role: user.role, telegram: user.telegram || undefined, isOwner: user.isOwner },
+      user: { id: user.id, username: user.username, role: user.role, telegram: user.telegram || undefined, isOwner: user.isOwner },
       status: 200,
     };
   }
 
   async register(data: {
     username: string; password?: string; telegram?: string; role?: string;
-    priceMonth?: string; startDate?: string; endDate?: string;
+    priceMonth?: string; plan?: string; trialEndDate?: string; ageConfirmed?: boolean;
+    startDate?: string; endDate?: string;
   }, actor?: {userId:number; username:string}) {
     const existing = await db.select().from(schema.users).where(eq(schema.users.username, data.username)).limit(1);
     if (existing.length > 0) return null;
@@ -57,6 +58,9 @@ export class AuthService {
       role: data.role || 'user',
       telegram: data.telegram || '',
       priceMonth: data.priceMonth || '0',
+      plan: (data.plan as 'trial' | 'basic' | 'pro') || 'trial',
+      trialEndDate: toPgDate(data.trialEndDate),
+      ageConfirmed: data.ageConfirmed ?? false,
       startDate: toPgDate(data.startDate),
       endDate: toPgDate(data.endDate),
     }).returning();
@@ -93,6 +97,9 @@ export class AuthService {
       isOwner: schema.users.isOwner,
       telegram: schema.users.telegram,
       priceMonth: schema.users.priceMonth,
+      plan: schema.users.plan,
+      trialEndDate: schema.users.trialEndDate,
+      ageConfirmed: schema.users.ageConfirmed,
       startDate: schema.users.startDate,
       endDate: schema.users.endDate,
       createdAt: schema.users.createdAt,
@@ -127,6 +134,10 @@ export class AuthService {
     if (data.role !== undefined) updateData.role = data.role;
     if (data.isOwner !== undefined) updateData.isOwner = data.isOwner;
     if (data.priceMonth !== undefined) updateData.priceMonth = data.priceMonth;
+    if (data.plan !== undefined) updateData.plan = data.plan;
+    if (data.trialEndDate !== undefined) updateData.trialEndDate = toPgDate(String(data.trialEndDate));
+    if (data.ageConfirmed !== undefined) updateData.ageConfirmed = data.ageConfirmed;
+    if (data.birthDate !== undefined) updateData.birthDate = toPgDate(String(data.birthDate));
     if (data.startDate !== undefined) updateData.startDate = toPgDate(String(data.startDate));
     if (data.endDate !== undefined) updateData.endDate = toPgDate(String(data.endDate));
 
@@ -140,6 +151,21 @@ export class AuthService {
     const [updated] = await db.update(schema.users).set({ passwordHash }).where(eq(schema.users.id, id)).returning();
     if (!updated) return null;
     return { username: updated.username, password: newPassword };
+  }
+
+  /** Verify a plaintext password against a stored hash. */
+  async verifyPassword(plain: string, hash: string): Promise<boolean> {
+    try {
+      return await bcrypt.compare(plain, hash);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Set a new password for a user. */
+  async setPassword(id: number, plain: string): Promise<void> {
+    const passwordHash = await bcrypt.hash(plain, 10);
+    await db.update(schema.users).set({ passwordHash }).where(eq(schema.users.id, id));
   }
 }
 
