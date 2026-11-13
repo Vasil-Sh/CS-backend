@@ -30,7 +30,12 @@
 Завершити одну зі своїх сесій → `{ success: true }`; `404`, якщо сесію не знайдено.
 
 ### `POST /auth/logout-all` (auth)
-→ `{ success: true, revoked: number }`.
+Тіло (необовʼязково): `{ refreshToken }` поточного пристрою.
+Усі токени, видані до цього моменту, перестають працювати (час зберігається в `users.sessions_revoked_at`, міграція `0023`).
+→ `{ success: true, revoked: number, revokedAt: ISO, token, refreshToken }` — нова пара токенів для пристрою, з якого натиснули, щоб він лишився в системі.
+
+Інші пристрої на наступному запиті (або при оновленні токена) отримують `401 { error: "Session revoked", code: "SESSIONS_REVOKED", revokedAt }` — адмінка показує «Вас вийшло з усіх пристроїв (… HH:MM)».
+Одна завершена сесія (`DELETE /auth/sessions/:id`) дає `401 { code: "SESSION_REVOKED" }` при оновленні токена.
 
 ### `POST /auth/change-password` (auth)
 Тіло: `{ currentPassword: string, newPassword: string }` → `{ success: true }`.

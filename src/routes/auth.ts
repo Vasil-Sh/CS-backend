@@ -8,6 +8,7 @@ import { adminUsersService } from '../services/adminUsersService';
 import { adminStatsService } from '../services/adminStatsService';
 import { verifyRefreshToken, signToken, signRefreshToken } from '../utils/jwt';
 import { blocklistJti, isBlocked } from '../utils/jwtBlocklist';
+import { issuedBefore, revokeAllSessions, sessionsRevokedAt } from '../services/sessionRevocation';
 import { AppError } from '../utils/AppError';
 import { clientIp, recordLoginFailure, clearLoginFailures, loginBlockedMs, loginAttemptsLeft } from '../utils/loginRateLimit';
 import { sessionsService } from '../services/sessionsService';
@@ -57,7 +58,11 @@ auth.post('/refresh', async (c) => {
   if (!body.refreshToken) return c.json({ error: 'Refresh token required' }, 400);
   try {
     const payload = verifyRefreshToken(body.refreshToken);
-    if (await isBlocked(payload.jti)) return c.json({ error: 'Session revoked' }, 401);
+    if (await isBlocked(payload.jti)) return c.json({ error: 'Session revoked', code: 'SESSION_REVOKED' }, 401);
+    const revokedAt = await sessionsRevokedAt(payload.userId);
+    if (issuedBefore((payload as { iat?: number }).iat, revokedAt)) {
+      return c.json({ error: 'Session revoked', code: 'SESSIONS_REVOKED', revokedAt: new Date(revokedAt as number).toISOString() }, 401);
+    }
     const user = await authService.getMe(payload.userId);
     if (!user) return c.json({ error: 'User not found' }, 401);
     const token = signToken({ userId: user.id, username: user.username, role: user.role as 'admin' | 'user' });
@@ -125,32 +130,42 @@ auth.delete('/sessions/:id', requireAuth, async (c) => {
   if (!/^\d+$/.test(id)) return c.json({ error: 'Invalid session' }, 400);
   const userId = c.get('user').userId;
   const { rows } = await pool.query(
-    'SELECT refresh_jti AS jti FROM sessions WHERE id::text=$1 AND user_id=$2',
+    'SELECT refresh_jti AS jti, expires_at AS "expiresAt" FROM sessions WHERE id::text=$1 AND user_id=$2',
     [id, userId],
   );
   const row = rows[0] as any;
   if (!row) return c.json({ error: 'Session not found' }, 404);
-  // Blocklist the refresh token (access token expires on its own shortly).
-  const decoded = jwt.decode(row.jti as string) as { exp?: number } | null;
-  const remainingSec = decoded?.exp ? Math.max(0, decoded.exp - Math.floor(Date.now() / 1000)) : 0;
-  if (remainingSec > 0) await blocklistJti(row.jti, remainingSec * 1000);
+  // Blocklist the refresh token until it would expire (access token expires on its own within 15 min).
+  const remainingMs = row.expiresAt ? new Date(row.expiresAt).getTime() - Date.now() : 0;
+  if (remainingMs > 0) await blocklistJti(row.jti, remainingMs);
   await pool.query('DELETE FROM sessions WHERE id::text=$1', [id]);
   return c.json({ success: true });
 });
 
 // ── POST /api/auth/logout-all — sign out on all other devices ──
+// Every token issued before now stops working (other devices see code SESSIONS_REVOKED).
+// The calling device gets a fresh token pair so it stays signed in.
 auth.post('/logout-all', requireAuth, async (c) => {
-  const userId = c.get('user').userId;
+  const actor = c.get('user');
   const body = await c.req.json().catch(() => null);
   const current = refreshJti(body?.refreshToken);
-  const jtis = await sessionsService.jtisExcept(userId, current || null);
-  for (const jti of jtis) {
-    const decoded = jwt.decode(jti) as { exp?: number } | null;
-    const remainingSec = decoded?.exp ? Math.max(0, decoded.exp - Math.floor(Date.now() / 1000)) : 0;
-    if (remainingSec > 0) await blocklistJti(jti, remainingSec * 1000);
+  const revoked = await pool.query(
+    'DELETE FROM sessions WHERE user_id=$1 AND refresh_jti IS DISTINCT FROM $2 RETURNING refresh_jti AS jti, expires_at AS "expiresAt"',
+    [actor.userId, current || null],
+  );
+  for (const r of revoked.rows as { jti: string; expiresAt: string | null }[]) {
+    const ms = r.expiresAt ? new Date(r.expiresAt).getTime() - Date.now() : 0;
+    if (ms > 0) await blocklistJti(r.jti, ms);
   }
-  await pool.query('DELETE FROM sessions WHERE user_id=$1 AND refresh_jti IS DISTINCT FROM $2', [userId, current || null]);
-  return c.json({ success: true, revoked: jtis.length });
+  const revokedAt = await revokeAllSessions(actor.userId);
+  const user = await authService.getMe(actor.userId);
+  if (!user) return c.json({ success: true, revoked: revoked.rowCount ?? 0, revokedAt: new Date(revokedAt).toISOString() });
+  const claims = { userId: user.id, username: user.username, role: user.role as 'admin' | 'user' };
+  const token = signToken(claims);
+  const refreshToken = signRefreshToken(claims);
+  if (current) await pool.query('DELETE FROM sessions WHERE refresh_jti=$1', [current]);
+  void sessionsService.record(refreshToken, user.id, clientIp(c.req.header()), c.req.header('user-agent') || '');
+  return c.json({ success: true, revoked: revoked.rowCount ?? 0, revokedAt: new Date(revokedAt).toISOString(), token, refreshToken });
 });
 
 // ── POST /api/auth/change-password — change own password ──

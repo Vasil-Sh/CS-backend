@@ -1,6 +1,7 @@
 import type { Context, Next } from 'hono';
 import { verifyToken, type JwtPayload } from '../utils/jwt';
 import { isBlocked } from '../utils/jwtBlocklist';
+import { issuedBefore, sessionsRevokedAt } from '../services/sessionRevocation';
 
 /**
  * Attach user to context if valid Bearer token present or httpOnly cookie set.
@@ -18,7 +19,9 @@ export async function authMiddleware(c: Context, next: Next) {
       if (await isBlocked(payload.jti)) {
         // Token revoked — silently continue (will hit requireAuth below)
       } else {
-        c.set('user', payload);
+        const revokedAt = await sessionsRevokedAt(payload.userId);
+        if (issuedBefore((payload as JwtPayload & { iat?: number }).iat, revokedAt)) c.set('sessionsRevokedAt' as never, revokedAt as never);
+        else c.set('user', payload);
       }
     } catch {
       // Invalid/expired token — silently continue
@@ -34,7 +37,9 @@ export async function authMiddleware(c: Context, next: Next) {
         if (await isBlocked(payload.jti)) {
           // Revoked — treat as no user
         } else {
-          c.set('user', payload);
+          const revokedAt = await sessionsRevokedAt(payload.userId);
+          if (issuedBefore((payload as JwtPayload & { iat?: number }).iat, revokedAt)) c.set('sessionsRevokedAt' as never, revokedAt as never);
+          else c.set('user', payload);
         }
       } catch {
         // Invalid/expired cookie — silently continue
@@ -52,6 +57,8 @@ export async function authMiddleware(c: Context, next: Next) {
 export async function requireAuth(c: Context, next: Next) {
   const user = c.get('user') as JwtPayload | undefined;
   if (!user) {
+    const revokedAt = c.get('sessionsRevokedAt' as never) as unknown as number | undefined;
+    if (revokedAt) return c.json({ error: 'Session revoked', code: 'SESSIONS_REVOKED', revokedAt: new Date(revokedAt).toISOString() }, 401);
     return c.json({ error: 'Unauthorized' }, 401);
   }
   await next();
