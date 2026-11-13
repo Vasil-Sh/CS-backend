@@ -98,40 +98,6 @@ auth.post('/logout', async (c) => {
   }
 });
 
-// ── GET /api/auth/sessions — list active sessions for the current user ──
-auth.get('/sessions', requireAuth, async (c) => {
-  const user = c.get('user');
-  const currentJti = user.jti ?? null;
-  const sessions = await sessionsService.list(user.userId, currentJti);
-  return c.json({ sessions });
-});
-
-// ── POST /api/auth/logout-all — revoke all other sessions ──
-auth.post('/logout-all', requireAuth, async (c) => {
-  const user = c.get('user');
-  const currentJti = user.jti ?? null;
-  const jtis = await sessionsService.jtisExcept(user.userId, currentJti);
-  const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30d — matches refresh token lifetime
-  await Promise.all(jtis.map((jti) => blocklistJti(jti, REFRESH_TTL_MS)));
-  await pool.query('DELETE FROM sessions WHERE user_id=$1 AND refresh_jti IS DISTINCT FROM $2', [user.userId, currentJti]);
-  return c.json({ success: true, revoked: jtis.length });
-});
-
-// ── POST /api/auth/change-password — change own password ──
-auth.post('/change-password', requireAuth, async (c) => {
-  let body: { currentPassword?: string; newPassword?: string };
-  try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid input' }, 400); }
-  if (!body?.currentPassword || !body?.newPassword || body.newPassword.length < 4 || body.newPassword.length > 255) {
-    return c.json({ error: 'Новий пароль — від 4 до 255 символів' }, 400);
-  }
-  const user = await authService.getMe(c.get('user').userId);
-  if (!user) return c.json({ error: 'User not found' }, 404);
-  const valid = await authService.verifyPassword(body.currentPassword, user.passwordHash);
-  if (!valid) return c.json({ error: 'Неправильний поточний пароль' }, 401);
-  await authService.setPassword(user.id, body.newPassword);
-  return c.json({ success: true });
-});
-
 /** Decode the jti from a refresh token ('' if invalid). */
 function refreshJti(token?: string): string {
   if (!token) return '';
