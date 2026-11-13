@@ -248,7 +248,9 @@ Query `status`. → `{ tickets: [...] }`.
 ## Журнал дій
 
 ### `GET /admin/audit` (admin)
-Query: `page`, `category` (`all|users|banners`), `status` (`all|success|failed|pending`), `q`, `from`, `to`, `userId`, `history` (`subscription`).
+Query: `page`, `category` (`all|users|banners`), `status` (`all|success|failed|pending`), `q`, `from`, `to`, `userId`, `history` (`subscription`), `actor` (точний логін того, хто виконав дію — для «Мої дії в журналі»).
+
+→ `{ entries: [...], hasMore: boolean, total: number }` — `total` — скільки всього записів підходить під фільтри (по 25 на сторінку).
 
 ### `GET /admin/audit/export` (admin)
 CSV з тими самими фільтрами, що й `GET /admin/audit` (формули в клітинках нейтралізуються).

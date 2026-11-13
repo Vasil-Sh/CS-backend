@@ -70,9 +70,10 @@ adminUsers.get('/admin/audit', requireAuth, requireAdmin, async (c) => {
  const from = c.req.query('from') || null, to = c.req.query('to') || null;
  const userId = c.req.query('userId') || null;
  const history = c.req.query('history') === 'subscription';
+ const actor = (c.req.query('actor') || '').trim().slice(0,100);
  if(!validDate(from) || !validDate(to) || (from && to && from > to) || (userId && !/^\d+$/.test(userId))) return c.json({error:'Невірні дати або користувач'},400);
  if (!['all','users','banners'].includes(category) || !['all','success','failed','pending'].includes(status)) return c.json({error:'Invalid audit filter'},400);
- const result = await pool.query(`SELECT a.*, actor.telegram AS actor_telegram, COALESCE(a.details->>'targetUsername', a.details->>'username', u.username) AS target_username
+ const result = await pool.query(`SELECT a.*, actor.telegram AS actor_telegram, COALESCE(a.details->>'targetUsername', a.details->>'username', u.username) AS target_username, COUNT(*) OVER() AS _total
  FROM admin_audit_log a
  LEFT JOIN users actor ON actor.id = a.actor_id
  LEFT JOIN users u ON u.id::text = substring(a.target from '^/auth/users/([0-9]+)')
@@ -82,9 +83,11 @@ adminUsers.get('/admin/audit', requireAuth, requireAdmin, async (c) => {
  AND ($5::date IS NULL OR a.created_at >= ($5::date::timestamp AT TIME ZONE 'Europe/Kyiv'))
  AND ($6::date IS NULL OR a.created_at < (($6::date + 1)::timestamp AT TIME ZONE 'Europe/Kyiv'))
  AND ($7::text IS NULL OR substring(a.target from '^/auth/users/([0-9]+)') = $7 OR a.details->>'_targetUserId' = $7)
+ AND ($9 = '' OR lower(a.actor_name) = lower($9))
  AND (NOT $8::boolean OR (a.status='success' AND (a.target LIKE '/auth/%' OR a.target LIKE '/admin/users/%/payments') AND ((CASE WHEN a.details ? '_changes' THEN (a.details->'_changes') ?| ARRAY['startDate','endDate','priceMonth'] ELSE a.details ?| ARRAY['startDate','endDate','priceMonth'] END) OR a.target='/auth/register')))
- ORDER BY a.created_at DESC, a.id DESC LIMIT 26 OFFSET $1`, [offset, category, status, search, from, to, userId, history]);
- return c.json({ entries: result.rows.slice(0,25), hasMore: result.rows.length > 25 });
+ ORDER BY a.created_at DESC, a.id DESC LIMIT 26 OFFSET $1`, [offset, category, status, search, from, to, userId, history, actor]);
+ const total = result.rows.length ? Number(result.rows[0]._total) : 0;
+ return c.json({ entries: result.rows.slice(0,25).map(({ _total, ...r }: any) => r), hasMore: result.rows.length > 25, total });
 });
 
 /** GET /admin/audit/export — full CSV export honoring the same filters. */
