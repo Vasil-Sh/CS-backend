@@ -103,12 +103,27 @@ ops.post('/self-limitation', requireAuth, async (c) => {
   if (!b || !Number.isInteger(days) || days <= 0 || days > 365) return c.json({ error: 'Вкажіть період від 1 до 365 днів' }, 400);
   const reason = typeof b.reason === 'string' && b.reason.length <= 500 ? b.reason.trim() : '';
   const user = c.get('user');
-  const result = await pool.query(
-    `INSERT INTO self_limitation_requests(user_id, username, period_days, reason)
-     VALUES($1,$2,$3,$4) RETURNING id::text`,
-    [user.userId, user.username, days, reason],
-  );
-  return c.json({ id: result.rows[0].id }, 201);
+  // Applied at once: the account is blocked for the chosen period and nobody can lift it early.
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      `INSERT INTO self_limitation_requests(user_id, username, period_days, reason, status, decided_at, decided_by)
+       VALUES($1,$2,$3,$4,'applied',now(),'auto') RETURNING id::text, decided_at + ($3 || ' days')::interval AS until`,
+      [user.userId, user.username, days, reason],
+    );
+    await client.query(
+      `INSERT INTO tilt_blocks(user_id, until, reason, strategy_name) VALUES($1, now() + ($2 || ' days')::interval, 'Самообмеження користувача', '')`,
+      [user.userId, days],
+    );
+    await client.query('COMMIT');
+    return c.json({ id: result.rows[0].id, until: new Date(result.rows[0].until).toISOString() }, 201);
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
 });
 
 // Admin lists self-limitation requests.
@@ -118,9 +133,11 @@ ops.get('/admin/self-limitations', requireAuth, requireAdmin, async (c) => {
   const where = status ? 'WHERE status=$1' : '';
   const params = status ? [status] : [];
   const result = await pool.query(
-    `SELECT id::text, user_id AS "userId", username, period_days AS "periodDays",
-            reason, status, created_at AS "createdAt", decided_at AS "decidedAt", decided_by AS "decidedBy"
-     FROM self_limitation_requests ${where} ORDER BY created_at DESC LIMIT 200`,
+    `SELECT r.id::text, r.user_id AS "userId", r.username, r.period_days AS "periodDays",
+            r.reason, r.status, r.created_at AS "createdAt", r.decided_at AS "decidedAt", r.decided_by AS "decidedBy",
+            CASE WHEN r.status='applied' THEN COALESCE(r.decided_at, r.created_at) + (r.period_days || ' days')::interval END AS until,
+            u.plan, u.telegram
+     FROM self_limitation_requests r LEFT JOIN users u ON u.id = r.user_id ${where.replace('status', 'r.status')} ORDER BY r.created_at DESC LIMIT 200`,
     params,
   );
   return c.json({ requests: result.rows });

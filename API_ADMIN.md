@@ -110,7 +110,9 @@
 ## Користувачі
 
 ### `GET /admin/users` (admin)
-Зведення зі ставками: `{ users: [{ id, username, role, telegram, priceMonth, plan, planLabel, trialEndDate, ageConfirmed, startDate, endDate, createdAt, betCount, wins, losses, pending, totalStaked, totalProfit, winRate, roi, initialBank, manualAdjustments, currentBank, lossStreak, lastBetDate, lastBetAt, extensions, lastPaymentDate, games: [...] }] }`.
+Зведення зі ставками: `{ users: [{ id, username, role, telegram, priceMonth, plan, planLabel, trialEndDate, ageConfirmed, startDate, endDate, createdAt, betCount, wins, losses, pending, totalStaked, totalProfit, winRate, roi, initialBank, manualAdjustments, currentBank, lossStreak, lastBetDate, lastBetAt, extensions, lastPaymentDate, games: [...], isOwner, birthDate, paidTotal, paidCount, lastPaymentAmount, cancelledAt, refundedAmount, selfLimitedUntil, aiToday }] }`.
+
+`cancelledAt` — заповнено, якщо остання оплата скасована або повернена (тоді `refundedAmount` — сума повернення). `selfLimitedUntil` — до коли діє самообмеження. `aiToday` — скільки AI-аналізів користувач зробив сьогодні (за Києвом).
 
 ### `GET /admin/users/:id/card` (admin)
 Картка користувача зі статистикою і нотаткою.
@@ -181,13 +183,13 @@
 ## Самообмеження
 
 ### `POST /self-limitation` (auth)
-Тіло `{ periodDays: number, reason?: string }` → `{ id }` (201).
+Тіло `{ periodDays: number, reason?: string }` → `{ id, until }` (201). Застосовується одразу: статус `applied`, створюється блок до `until`; зняти раніше не може ні адмін, ні овнер.
 
 ### `GET /admin/self-limitations` (admin)
-Query `status`. → `{ requests: [{ id, userId, username, periodDays, reason, status, createdAt, decidedAt, decidedBy }] }`.
+Query `status`. → `{ requests: [{ id, userId, username, periodDays, reason, status, createdAt, decidedAt, decidedBy, until, plan, telegram }] }` — `until` для застосованих.
 
 ### `PATCH /admin/self-limitations/:id` (admin)
-Тіло `{ status: 'applied'|'denied' }` → `{ success: true }`. `applied` створює tilt_block.
+Тіло `{ status: 'applied'|'denied' }` → `{ success: true }`. Лише для старих запитів зі статусом `new` (нові застосовуються одразу).
 
 ---
 

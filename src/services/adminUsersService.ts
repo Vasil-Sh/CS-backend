@@ -49,6 +49,22 @@ export interface AdminUserOverview {
   lastPaymentDate: string;
   /** Per-game aggregated stats (profit/ROI separately for CS2, Dota2, …). */
   games: GameBreakdown[];
+  /** Owner flag (admins only). */
+  isOwner: boolean;
+  /** Birth date YYYY-MM-DD ('' if not given). */
+  birthDate: string;
+  /** Sum and count of recorded (not cancelled/refunded) payments. */
+  paidTotal: number;
+  paidCount: number;
+  /** Amount of the most recent payment of any status (0 if none). */
+  lastPaymentAmount: number;
+  /** Most recent payment was cancelled or refunded: when, and how much was refunded. */
+  cancelledAt: string;
+  refundedAmount: number;
+  /** Active self-limitation: blocked until (ISO), '' if none. */
+  selfLimitedUntil: string;
+  /** AI analyses used today (Europe/Kyiv). */
+  aiToday: number;
 }
 
 export interface GameBreakdown {
@@ -98,6 +114,8 @@ export class AdminUsersService {
           u.plan,
           u.trial_end_date::text AS trial_end_date,
           u.age_confirmed,
+          u.is_owner,
+          u.birth_date::text AS birth_date,
           u.start_date::text AS start_date,
           u.end_date::text AS end_date,
           u.created_at,
@@ -163,6 +181,39 @@ export class AdminUsersService {
                 MAX(paid_on)::text AS last_payment_date
          FROM admin_payments WHERE user_id IS NOT NULL GROUP BY user_id`
       );
+
+      // Payment totals + the latest payment (to tell a cancelled/refunded subscription).
+      const paidResult = await client.query(
+        `SELECT user_id,
+                COALESCE(SUM(amount) FILTER (WHERE status='recorded'),0)::numeric AS paid_total,
+                COUNT(*) FILTER (WHERE status='recorded')::int AS paid_count
+           FROM admin_payments WHERE user_id IS NOT NULL GROUP BY user_id`
+      );
+      const lastPayResult = await client.query(
+        `SELECT DISTINCT ON (user_id) user_id, amount::numeric AS amount, status,
+                COALESCE(refunded_at, cancelled_at) AS ended_at, COALESCE(refunded_amount,0)::numeric AS refunded
+           FROM admin_payments WHERE user_id IS NOT NULL
+          ORDER BY user_id, paid_on DESC, id DESC`
+      );
+      const selfLimResult = await client.query(
+        `SELECT user_id, MAX(until) AS until FROM tilt_blocks
+          WHERE reason = 'Самообмеження користувача' AND until > now() GROUP BY user_id`
+      ).catch(() => ({ rows: [] as any[] }));
+      const aiTodayResult = await client.query(
+        `SELECT user_id, COUNT(*)::int AS n FROM ai_usage
+          WHERE user_id IS NOT NULL AND created_at >= (now() AT TIME ZONE 'Europe/Kyiv')::date GROUP BY user_id`
+      ).catch(() => ({ rows: [] as any[] }));
+      const paidMap = new Map<number, { total: number; count: number }>();
+      paidResult.rows.forEach((r: any) => paidMap.set(Number(r.user_id), { total: Number(r.paid_total), count: Number(r.paid_count) }));
+      const lastPayMap = new Map<number, { amount: number; status: string; endedAt: string; refunded: number }>();
+      lastPayResult.rows.forEach((r: any) => lastPayMap.set(Number(r.user_id), {
+        amount: Number(r.amount), status: r.status, refunded: Number(r.refunded),
+        endedAt: r.ended_at ? new Date(r.ended_at).toISOString() : '',
+      }));
+      const selfLimMap = new Map<number, string>();
+      selfLimResult.rows.forEach((r: any) => selfLimMap.set(Number(r.user_id), new Date(r.until).toISOString()));
+      const aiTodayMap = new Map<number, number>();
+      aiTodayResult.rows.forEach((r: any) => aiTodayMap.set(Number(r.user_id), Number(r.n)));
 
       const lossStreakMap = new Map<number, number>();
       streakResult.rows.forEach((r: any) =>
@@ -247,6 +298,15 @@ export class AdminUsersService {
           extensions: paymentsMap.get(r.id)?.extensions || 0,
           lastPaymentDate: paymentsMap.get(r.id)?.lastPaymentDate || '',
           games: gamesMap.get(r.id) || [],
+          isOwner: Boolean(r.is_owner),
+          birthDate: r.birth_date || '',
+          paidTotal: paidMap.get(r.id)?.total || 0,
+          paidCount: paidMap.get(r.id)?.count || 0,
+          lastPaymentAmount: lastPayMap.get(r.id)?.amount || 0,
+          cancelledAt: lastPayMap.get(r.id) && lastPayMap.get(r.id)!.status !== 'recorded' ? lastPayMap.get(r.id)!.endedAt : '',
+          refundedAmount: lastPayMap.get(r.id)?.status === 'refunded' ? lastPayMap.get(r.id)!.refunded : 0,
+          selfLimitedUntil: selfLimMap.get(r.id) || '',
+          aiToday: aiTodayMap.get(r.id) || 0,
         };
       });
       cache.set(OVERVIEW_CACHE_KEY, overview, OVERVIEW_TTL_MS);
