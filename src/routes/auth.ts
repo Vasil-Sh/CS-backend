@@ -33,7 +33,9 @@ auth.post('/login', async (c) => {
     const result = await authService.login(body.username, body.password);
     if (!result.success) {
       recordLoginFailure(ip, body.username);
-      return c.json({ success: false, error: result.error, attemptsLeft: loginAttemptsLeft(ip, body.username) }, result.status as any);
+      const attemptsLeft = loginAttemptsLeft(ip, body.username);
+      if (attemptsLeft === 0) void auditAdminLockout(body.username, ip);
+      return c.json({ success: false, error: result.error, attemptsLeft }, result.status as any);
     }
     clearLoginFailures(ip, body.username);
     if (result.token && result.refreshToken && result.user) {
@@ -234,5 +236,20 @@ auth.post('/users/:id/reset-password', requireAuth, requireAdmin, async (c) => {
   if (!result) return c.json({ error: 'User not found' }, 404);
   return c.json({ username: result.username, password: result.password });
 });
+
+/** Admin account locked after too many failed logins — visible to the owner in the audit log. */
+async function auditAdminLockout(username: string, ip: string): Promise<void> {
+  try {
+    const found = await pool.query(`SELECT id FROM users WHERE lower(username) = lower($1) AND role = 'admin' LIMIT 1`, [username.trim()]);
+    const admin = found.rows[0];
+    if (!admin) return; // regular app users are not audited here
+    await pool.query(
+      `INSERT INTO admin_audit_log(actor_id, actor_name, action, target, details, status) VALUES($1,$2,'LOGIN_LOCKED','/auth/login',$3,'failed')`,
+      [admin.id, username.trim(), JSON.stringify({ targetUsername: username.trim(), _targetUserId: String(admin.id), ip, lockedMinutes: 5 })],
+    );
+  } catch (err) {
+    console.warn('[Auth/Login] lockout audit failed:', (err as Error).message);
+  }
+}
 
 export default auth;
