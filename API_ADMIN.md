@@ -110,7 +110,7 @@
 ## Користувачі
 
 ### `GET /admin/users` (admin)
-Зведення зі ставками: `{ users: [{ id, username, role, telegram, priceMonth, plan, planLabel, trialEndDate, ageConfirmed, startDate, endDate, createdAt, betCount, wins, losses, pending, totalStaked, totalProfit, winRate, roi, initialBank, manualAdjustments, currentBank, lossStreak, lastBetDate, lastBetAt, extensions, lastPaymentDate, games: [...], isOwner, birthDate, paidTotal, paidCount, lastPaymentAmount, cancelledAt, refundedAmount, selfLimitedUntil, aiToday }] }`.
+Зведення зі ставками: `{ users: [{ id, username, role, telegram, priceMonth, plan, planLabel, trialEndDate, ageConfirmed, startDate, endDate, createdAt, betCount, wins, losses, pending, totalStaked, totalProfit, winRate, roi, initialBank, manualAdjustments, currentBank, lossStreak, lastBetDate, lastBetAt, extensions, lastPaymentDate, games: [...], isOwner, birthDate, paidTotal, paidCount, lastPaymentAmount, cancelledAt, refundedAmount, selfLimitedUntil, aiToday, proUntil, proBasePlan, subscriptionCancelledAt, subscriptionCancelMode }] }`.
 
 `cancelledAt` — заповнено, якщо остання оплата скасована або повернена (тоді `refundedAmount` — сума повернення). `selfLimitedUntil` — до коли діє самообмеження. `aiToday` — скільки AI-аналізів користувач зробив сьогодні (за Києвом).
 
@@ -144,6 +144,14 @@
 
 ### `POST /admin/payments/:id/refund` (admin)
 Тіло `{ reason, amount? }` → `{ success: true, refundedAmount }`.
+
+### `POST /admin/users/:id/grant-pro` (admin)
+Тіло `{ days: 1–365, reason }` → `{ success, proUntil, basePlan, endDate }`. Pro діє від сьогодні (або від кінця вже виданого Pro) на N днів, потім план автоматично повертається до попереднього (перевірка раз на 30 хв). Кінець оплаченої підписки зсувається на ті самі N днів. Без оплати, з записом в аудит. Адміністраторам — `409`.
+
+### `POST /admin/users/:id/subscription/cancel` (admin)
+Тіло `{ mode: "end"|"now", reason? }` → `{ success, mode, endDate }`. `end` — доступ до кінця оплаченого періоду, далі без продовження; `now` — доступ закривається сьогодні (останній день — вчора). Нова оплата з продовженням знімає скасування. Аудит.
+
+`POST /admin/payments/:id/refund` тепер також скасовує підписку одразу (доступ закривається сьогодні); сума повернення не може перевищувати оплату.
 
 ### `POST /admin/payments/:id/receipt/send` (admin)
 Надсилає чек користувачу в Telegram. `multipart/form-data`, поле `photo` — PNG до 2 МБ (картинку чека формує адмінка).

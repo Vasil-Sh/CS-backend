@@ -65,6 +65,12 @@ export interface AdminUserOverview {
   selfLimitedUntil: string;
   /** AI analyses used today (Europe/Kyiv). */
   aiToday: number;
+  /** Temporary Pro granted by an admin: until (YYYY-MM-DD) and the plan it returns to. */
+  proUntil: string;
+  proBasePlan: string;
+  /** Subscription cancelled by an admin: when and how (end of period / now). */
+  subscriptionCancelledAt: string;
+  subscriptionCancelMode: string;
 }
 
 export interface GameBreakdown {
@@ -116,6 +122,10 @@ export class AdminUsersService {
           u.age_confirmed,
           u.is_owner,
           u.birth_date::text AS birth_date,
+          u.pro_until::text AS pro_until,
+          u.pro_base_plan,
+          u.subscription_cancelled_at,
+          u.subscription_cancel_mode,
           u.start_date::text AS start_date,
           u.end_date::text AS end_date,
           u.created_at,
@@ -307,6 +317,10 @@ export class AdminUsersService {
           refundedAmount: lastPayMap.get(r.id)?.status === 'refunded' ? lastPayMap.get(r.id)!.refunded : 0,
           selfLimitedUntil: selfLimMap.get(r.id) || '',
           aiToday: aiTodayMap.get(r.id) || 0,
+          proUntil: r.pro_until || '',
+          proBasePlan: r.pro_base_plan || '',
+          subscriptionCancelledAt: r.subscription_cancelled_at ? new Date(r.subscription_cancelled_at).toISOString() : '',
+          subscriptionCancelMode: r.subscription_cancel_mode || '',
         };
       });
       cache.set(OVERVIEW_CACHE_KEY, overview, OVERVIEW_TTL_MS);

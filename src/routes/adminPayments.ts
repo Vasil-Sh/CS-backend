@@ -4,6 +4,7 @@ import {requireAuth,requireAdmin} from '../middleware/auth';
 import {parsePayment,extendedEnd} from '../services/paymentRules';
 import {telegramBotService} from '../services/telegramBot';
 import {recordAudit} from '../services/auditLog';
+import {adminUsersService} from '../services/adminUsersService';
 import {receiptCaption,isPng,telegramErrorMessage,RECEIPT_MAX_BYTES} from '../services/receipts';
 const routes=new Hono();
 const columns=`id::text,user_id AS "userId",username,amount::text,currency,paid_on::text AS "paidOn",period_start::text AS "periodStart",period_end::text AS "periodEnd",note,extend_subscription AS "extendSubscription",created_by_name AS "createdBy",created_at AS "createdAt",status,cancelled_by_name AS "cancelledBy",cancelled_at AS "cancelledAt",cancel_reason AS "cancelReason",payment_method AS "paymentMethod",refunded_amount::text AS "refundedAmount",refund_reason AS "refundReason",refunded_at AS "refundedAt",refunded_by AS "refundedBy",promo_code AS "promoCode"`;
@@ -35,9 +36,12 @@ routes.post('/admin/payments/:id/refund',requireAuth,requireAdmin,async c=>{
   if(!payment){await client.query('ROLLBACK');return c.json({error:'Оплату не знайдено'},404)}
   if(payment.status==='refunded'){await client.query('ROLLBACK');return c.json({success:true})}
   const actor=c.get('user');const refund=amount??Number(payment.amount);
+  if(refund>Number(payment.amount)){await client.query('ROLLBACK');return c.json({error:'Сума повернення більша за оплату'},400)}
   await client.query("UPDATE admin_payments SET status='refunded',refunded_amount=$2,refund_reason=$3,refunded_at=now(),refunded_by=$4 WHERE id::text=$1",[id,refund,body.reason.trim(),actor.username]);
   await client.query(`INSERT INTO admin_audit_log(actor_id,actor_name,action,target,details,status) VALUES($1,$2,'POST',$3,$4,'success')`,[actor.userId,actor.username,`/admin/payments/${id}/refund`,JSON.stringify({targetUsername:payment.username,_targetUserId:String(payment.user_id||''),paymentId:id,amount:payment.amount,refundedAmount:refund,refundReason:body.reason.trim()})]);
-  await client.query('COMMIT');return c.json({success:true,refundedAmount:refund});
+  // A refund cancels the subscription now: access closes today.
+  if(payment.user_id){await client.query(`UPDATE users SET subscription_cancelled_at=now(),subscription_cancel_mode='now',subscription_cancel_reason=$2,end_date=LEAST(end_date,((now() AT TIME ZONE 'Europe/Kyiv')::date - 1)),pro_until=NULL,plan=COALESCE(pro_base_plan,plan),pro_base_plan=NULL WHERE id=$1 AND role<>'admin'`,[payment.user_id,'Повернення: '+body.reason.trim()])}
+  await client.query('COMMIT');adminUsersService.invalidateOverview();return c.json({success:true,refundedAmount:refund});
  }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
 });
 // POST /admin/payments/:id/receipt/send — send a PNG receipt to the user's Telegram (multipart field "photo")
@@ -87,7 +91,7 @@ routes.post('/admin/users/:id/payments',requireAuth,requireAdmin,async c=>{
   const actor=c.get('user');
   const result=await client.query(`INSERT INTO admin_payments(request_id,user_id,username,amount,paid_on,period_start,period_end,note,extend_subscription,created_by,created_by_name,payment_method,promo_code) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id::text`,[input.requestId,id,user.rows[0].username,input.amount,input.paidOn,input.periodStart,input.periodEnd,input.note,input.extendSubscription,actor.userId,actor.username,input.paymentMethod,input.promoCode]);
   const before=user.rows[0].endDate;const after=input.extendSubscription?extendedEnd(before,input.periodEnd):before;
-  if(after!==before)await client.query('UPDATE users SET end_date=$2,updated_at=now() WHERE id::text=$1',[id,after]);
+  if(after!==before)await client.query('UPDATE users SET end_date=$2,subscription_cancelled_at=NULL,subscription_cancel_mode=NULL,subscription_cancel_reason=NULL,updated_at=now() WHERE id::text=$1',[id,after]);
   await client.query(`INSERT INTO admin_audit_log(actor_id,actor_name,action,target,details,status) VALUES($1,$2,'POST',$3,$4,'success')`,[actor.userId,actor.username,`/admin/users/${id}/payments`,JSON.stringify({targetUsername:user.rows[0].username,_targetUserId:id,paymentId:result.rows[0].id,amount:input.amount,currency:'UAH',paidOn:input.paidOn,periodStart:input.periodStart,periodEnd:input.periodEnd,extendSubscription:input.extendSubscription,...(after!==before?{_changes:{endDate:{before,after}}}:{})})]);
   await client.query('COMMIT');return c.json({id:result.rows[0].id},201);
  }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
