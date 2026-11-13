@@ -62,7 +62,7 @@ describe("banner and audit API", () => {
     const response = await app("admin").request("/admin/audit?page=2");
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ entries: [], hasMore: false });
-    expect(vi.mocked(pool.query).mock.calls[0][1]).toEqual([30, "all", "all", "", null, null, null, false]);
+    expect(vi.mocked(pool.query).mock.calls[0][1]).toEqual([25, "all", "all", "", null, null, null, false]);
   });
   it("passes audit filters to the database and rejects unknown filters", async () => {
     expect((await app('admin').request('/admin/audit?category=banners&status=failed')).status).toBe(200);

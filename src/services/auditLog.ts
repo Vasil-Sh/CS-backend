@@ -16,7 +16,8 @@ const ALLOWED_FIELDS = new Set([
   'name', 'licenseNumber', 'moderationText', 'showOddsInList', 'showMatchDetails',
   'moderationStatus', 'rejectReason', 'status', 'subject',
   'basicPrice', 'proPrice', 'trialEnabled', 'trialDays', 'trialPlan', 'aiDailyLimit', 'warningThreshold', 'disclaimerText',
-  'endDate', 'priceMonth', 'periodDays', 'amount', 'refundedAmount', 'extendSubscription', 'paymentMethod',
+  'aiUsdUah', 'churnInactiveDays', 'churnLossStreak', 'basicFeatures', 'proFeatures', 'receiptFields', 'defaultMonthlyPrice', 'subscriptionDays',
+  'endDate', 'priceMonth', 'periodDays', 'amount', 'refundedAmount', 'extendSubscription', 'paymentMethod', 'promoCode',
 ]);
 
 function sanitize(value: unknown): unknown {

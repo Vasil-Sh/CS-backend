@@ -26,6 +26,12 @@ export interface AppSettings {
   receiptFields: string[];
   /** Disclaimer text. */
   disclaimerText: string;
+  /** USD → UAH exchange rate for AI cost (default 41.5). */
+  aiUsdUah: number;
+  /** Churn: inactive for N days (default 14). */
+  churnInactiveDays: number;
+  /** Churn: consecutive losses threshold (default 5). */
+  churnLossStreak: number;
 }
 
 const DEFAULTS: AppSettings = {
@@ -43,6 +49,9 @@ const DEFAULTS: AppSettings = {
   warningThreshold: 3,
   receiptFields: [],
   disclaimerText: '',
+  aiUsdUah: 41.5,
+  churnInactiveDays: 14,
+  churnLossStreak: 5,
 };
 
 /** Normalize a raw DB row set into a typed settings object. */
@@ -84,6 +93,9 @@ function toSettings(rows: { key: string; value: string }[]): AppSettings {
     warningThreshold: num('warning_threshold', DEFAULTS.warningThreshold),
     receiptFields: jsonArr('receipt_fields', DEFAULTS.receiptFields),
     disclaimerText: map.get('disclaimer_text') ?? DEFAULTS.disclaimerText,
+    aiUsdUah: num('ai_usd_uah', DEFAULTS.aiUsdUah),
+    churnInactiveDays: num('churn_inactive_days', DEFAULTS.churnInactiveDays),
+    churnLossStreak: num('churn_loss_streak', DEFAULTS.churnLossStreak),
   };
 }
 
@@ -134,6 +146,21 @@ export class SettingsService {
       pushNum('warning_threshold', patch.warningThreshold, 0, 100);
       if (patch.receiptFields !== undefined) entries.push(['receipt_fields', JSON.stringify(patch.receiptFields)]);
       if (patch.disclaimerText !== undefined) entries.push(['disclaimer_text', String(patch.disclaimerText)]);
+      if (patch.aiUsdUah !== undefined) {
+        const n = Number(patch.aiUsdUah);
+        if (!Number.isFinite(n) || n < 0 || n > 100000) throw new Error('invalid ai usd/uah rate');
+        entries.push(['ai_usd_uah', String(n)]);
+      }
+      if (patch.churnInactiveDays !== undefined) {
+        const n = Number(patch.churnInactiveDays);
+        if (!Number.isInteger(n) || n < 1 || n > 365) throw new Error('churnInactiveDays має бути від 1 до 365');
+        entries.push(['churn_inactive_days', String(n)]);
+      }
+      if (patch.churnLossStreak !== undefined) {
+        const n = Number(patch.churnLossStreak);
+        if (!Number.isInteger(n) || n < 1 || n > 50) throw new Error('churnLossStreak має бути від 1 до 50');
+        entries.push(['churn_loss_streak', String(n)]);
+      }
       for (const [key, value] of entries) {
         await client.query(
           `INSERT INTO app_settings(key, value) VALUES($1, $2)
