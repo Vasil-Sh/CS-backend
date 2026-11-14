@@ -95,6 +95,9 @@ const PROMO_COLS = `id::text, name, handle, subscribers, description, placement,
   starts_on::text AS "startsOn", ends_on::text AS "endsOn", active, review_status AS "reviewStatus",
   reject_reason AS "rejectReason", price_note AS "priceNote", created_at AS "createdAt", updated_at AS "updatedAt"`;
 
+/** Ad copy may not promise bonuses, «free» play or profit (checked on approval). */
+const FORBIDDEN_AD_TEXT = /бонус|подарун|безплатн|безкоштовн|без ризик|заробіт|заробля|прибут|гарантован|договірн/iu;
+
 function promoInput(b: any, partial: boolean): { error?: string; cols: [string, unknown][] } {
   const cols: [string, unknown][] = [];
   if (!partial || b.name !== undefined) {
@@ -121,6 +124,7 @@ function promoInput(b: any, partial: boolean): { error?: string; cols: [string, 
   if (b.reviewStatus !== undefined) {
     if (!['pending', 'approved', 'rejected'].includes(b.reviewStatus)) return { error: 'Невідомий статус перевірки', cols };
     if (b.reviewStatus === 'rejected' && !String(b.rejectReason ?? '').trim()) return { error: 'Вкажіть причину відхилення', cols };
+    if (b.reviewStatus === 'approved' && FORBIDDEN_AD_TEXT.test(`${b.name ?? ''} ${b.description ?? ''}`)) return { error: 'Текст не пройшов перевірку: приберіть бонуси, «безплатно» й обіцянки заробітку', cols };
     cols.push(['review_status', b.reviewStatus]);
     cols.push(['reject_reason', b.reviewStatus === 'rejected' ? String(b.rejectReason).trim().slice(0, 500) : '']);
   }
