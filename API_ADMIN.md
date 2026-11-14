@@ -217,18 +217,27 @@ Query `status`. → `{ requests: [{ id, userId, username, periodDays, reason, st
 
 ---
 
-## Реклама (букмекери, покази/кліки)
+## Реклама (букмекери, Telegram-групи, покази/кліки)
 
-### `GET /admin/bookmakers` (admin)
-### `POST /admin/bookmakers` (admin)
-### `PUT /admin/bookmakers/:id` (admin)
-### `DELETE /admin/bookmakers/:id` (admin)
+### Букмекери — `GET|POST /admin/bookmakers`, `PUT|DELETE /admin/bookmakers/:id` (admin)
+Поля: `{ id, name, licenseNumber, licenseUntil (YYYY-MM-DD|null), moderationText, link (https://…), buttonText, clickPrice (₴ за клік|null), showOddsInList, showMatchDetails, active, createdAt, updatedAt }`. POST/PUT повертають `bookmaker`. Усі зміни — в журнал дій.
+У застосунку партнер показується лише якщо `active`, є номер ліцензії й посилання, а `licenseUntil` не минула.
+
+### Глобальні місця показу — `PUT /admin/settings`
+`{ adsOddsInList: boolean, adsMatchDetails: boolean }` — «Коефіцієнти в списку матчів» і «Деталі матчу». Вимкнене місце зникає для всіх.
+
+### Реклама Telegram-груп — `GET|POST /admin/telegram-promos`, `PUT|DELETE /admin/telegram-promos/:id` (admin)
+Поля: `{ id, name, handle (без @), subscribers|null, description (до 300), placement: 'telegram-top'|'match-details', game: ''|'CS2'|'Dota 2', startsOn, endsOn, active, reviewStatus: 'pending'|'approved'|'rejected', rejectReason, priceNote }`. Для `rejected` причина обовʼязкова. Показується лише `approved` + `active` у межах дат (Київ).
+
+### Публічне — `GET /ads/placements` (без авторизації)
+→ `{ label: "Реклама · 21+", bookmakers: { list: [{ id, name, link, buttonText, licenseNumber }], details: [...] }, telegram: [{ id, name, handle, url, subscribers, description, placement, game }] }`.
 
 ### `POST /ad-events` (без авторизації, з боку застосунку)
-Тіло `{ kind: 'impression'|'click', placement: string, entityId?: string }` → `{ ok: true }`.
+Тіло `{ kind: 'impression'|'click', placement, entityId?, userKey? }` → `{ ok: true }`. Домовленість про `placement`: `banner:<screen>:<slot>` (entityId — id банера), `bookmaker:list` / `bookmaker:details` (id букмекера), `telegram:top` / `telegram:match` (id розміщення). `userKey` — анонімний ідентифікатор користувача (для «унікальних»).
 
 ### `GET /admin/ad-stats` (admin)
-→ `{ stats: [{ placement, impressions, clicks }] }`.
+Query: `days=7|14|30|90` або `from`/`to` (YYYY-MM-DD, Київ, включно).
+→ `{ from, to, totals: { impressions, clicks, uniqueUsers }, previous: { from, impressions, clicks }, daily: [{ day, impressions, clicks }], rows: [{ placement, entityId, impressions, clicks }], stats: [...] }` (`stats` — старий формат: по місцях за 30 днів).
 
 ---
 

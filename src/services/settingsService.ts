@@ -32,6 +32,8 @@ export interface AppSettings {
   churnInactiveDays: number;
   /** Churn: consecutive losses threshold (default 5). */
   churnLossStreak: number;
+  adsOddsInList: boolean;
+  adsMatchDetails: boolean;
 }
 
 const DEFAULTS: AppSettings = {
@@ -52,6 +54,8 @@ const DEFAULTS: AppSettings = {
   aiUsdUah: 41.5,
   churnInactiveDays: 14,
   churnLossStreak: 5,
+  adsOddsInList: true,
+  adsMatchDetails: true,
 };
 
 /** Normalize a raw DB row set into a typed settings object. */
@@ -96,6 +100,8 @@ function toSettings(rows: { key: string; value: string }[]): AppSettings {
     aiUsdUah: num('ai_usd_uah', DEFAULTS.aiUsdUah),
     churnInactiveDays: num('churn_inactive_days', DEFAULTS.churnInactiveDays),
     churnLossStreak: num('churn_loss_streak', DEFAULTS.churnLossStreak),
+    adsOddsInList: bool('ads_odds_in_list', DEFAULTS.adsOddsInList),
+    adsMatchDetails: bool('ads_match_details', DEFAULTS.adsMatchDetails),
   };
 }
 
@@ -161,6 +167,8 @@ export class SettingsService {
         if (!Number.isInteger(n) || n < 1 || n > 50) throw new Error('churnLossStreak має бути від 1 до 50');
         entries.push(['churn_loss_streak', String(n)]);
       }
+      if (patch.adsOddsInList !== undefined) entries.push(['ads_odds_in_list', String(Boolean(patch.adsOddsInList))]);
+      if (patch.adsMatchDetails !== undefined) entries.push(['ads_match_details', String(Boolean(patch.adsMatchDetails))]);
       for (const [key, value] of entries) {
         await client.query(
           `INSERT INTO app_settings(key, value) VALUES($1, $2)

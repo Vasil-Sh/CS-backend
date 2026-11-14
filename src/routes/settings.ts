@@ -48,6 +48,8 @@ settings.put('/admin/settings', requireAuth, requireAdmin, async (c) => {
       aiUsdUah: num(body.aiUsdUah),
       churnInactiveDays: num(body.churnInactiveDays),
       churnLossStreak: num(body.churnLossStreak),
+      adsOddsInList: body.adsOddsInList !== undefined ? Boolean(body.adsOddsInList) : undefined,
+      adsMatchDetails: body.adsMatchDetails !== undefined ? Boolean(body.adsMatchDetails) : undefined,
     };
     const data = await settingsService.update(patch);
     const actor = c.get('user');
