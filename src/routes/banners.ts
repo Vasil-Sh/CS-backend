@@ -225,6 +225,7 @@ banners.post('/upload', requireAuth, requireAdmin, async (c) => {
   const filename = `${Date.now()}_${randomBytes(4).toString('hex')}.${ext}`;
 
   let buffer = Buffer.from(raw, 'base64');
+  if (buffer.length > 1.5 * 1024 * 1024) return c.json({ error: 'Зображення має бути до 1,5 МБ' }, 413);
   // Auto-trim white/transparent borders (SVG/GIF are passed through untouched).
   if (ext !== 'svg' && ext !== 'gif') {
     try {
