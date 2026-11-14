@@ -34,6 +34,8 @@ const toCampaign = (b: {
   description: string | null;
   imageUrl: string | null;
   href: string | null;
+  createdAt?: Date | string | null;
+  updatedAt?: Date | string | null;
 }) => ({
   id: String(b.id),
   active: b.active,
@@ -45,6 +47,8 @@ const toCampaign = (b: {
   description: b.description || '',
   imageUrl: b.imageUrl || '',
   href: b.href || '',
+  createdAt: b.createdAt ? new Date(b.createdAt).toISOString() : null,
+  updatedAt: b.updatedAt ? new Date(b.updatedAt).toISOString() : null,
 });
 
 /** GET /banners/active — active campaigns for the public schedule (no auth). */
@@ -102,7 +106,21 @@ banners.put('/slots/:slot', requireAuth, requireAdmin, async (c) => {
 banners.get('/', requireAuth, requireAdmin, async (c) => {
   try {
     const rows = await bannerService.list();
-    return c.json({ banners: rows.map(toCampaign) });
+    // Who last changed each banner, from the admin audit log (create = POST /banners with details._targetId).
+    const last = await pool.query(
+      `SELECT DISTINCT ON (bid) bid, actor_name AS "by", created_at AS "at" FROM (
+         SELECT COALESCE(substring(target from '^/banners/([0-9]+)$'), details->>'_targetId') AS bid, actor_name, created_at
+         FROM admin_audit_log
+         WHERE status='success' AND action IN ('POST','PUT') AND (target ~ '^/banners/[0-9]+$' OR (target='/banners' AND details ? '_targetId'))
+       ) t WHERE bid IS NOT NULL ORDER BY bid, created_at DESC`,
+    ).catch(() => ({ rows: [] as { bid: string; by: string; at: Date }[] }));
+    const byId = new Map(last.rows.map((r: { bid: string; by: string; at: Date }) => [String(r.bid), r]));
+    return c.json({
+      banners: rows.map((b) => {
+        const l = byId.get(String(b.id));
+        return { ...toCampaign(b), updatedBy: l?.by || null, changedAt: l?.at ? new Date(l.at).toISOString() : null };
+      }),
+    });
   } catch (err: unknown) {
     console.error('[Banners/List] Error:', (err as Error).message);
     return c.json({ error: 'Failed to fetch banners' }, 500);

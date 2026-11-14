@@ -77,6 +77,7 @@ export async function adminAudit(c: Context, next: Next) {
           const response = await c.res.clone().json().catch(()=>({})) as {userId?: number; id?: number | string};
           const createdId = response.userId ?? response.id;
           if(createdId != null) targetId=String(createdId);
+          if(createdId != null && path === '/banners') details._targetId=String(createdId);
         }
         const after = method === "DELETE" ? null : await snapshot(targetId);
         if(!path.endsWith('/reset-password')) details._changes=auditChanges(before,after);

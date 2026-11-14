@@ -201,6 +201,22 @@ Query `status`. → `{ requests: [{ id, userId, username, periodDays, reason, st
 
 ---
 
+## Банери
+
+### `GET /banners` (admin)
+→ `{ banners: [{ id, active, slot, screen, startsOn, endsOn, title, description, imageUrl, href, createdAt, updatedAt, updatedBy, changedAt }] }`. `updatedBy` / `changedAt` — хто й коли востаннє створив чи змінив банер (з журналу дій; `null`, якщо запису немає).
+
+### `POST /banners`, `PUT /banners/:id`, `DELETE /banners/:id` (admin)
+Тіло: `{ title, description, imageUrl, href, active, slot: 1|2, screen, startsOn, endsOn }`. `409` — період перетинається з іншим увімкненим банером у тому ж слоті.
+
+### `GET /banners/slots`, `PUT /banners/slots/:slot` (admin)
+Плейсхолдер «Тут може бути ваша реклама» для вільного слота: `{ placeholderEnabled }`.
+
+### `POST /banners/upload` (admin)
+`{ data: base64, mime }` → `{ url }`. PNG/JPG/WebP/GIF/SVG, до 1,5 МБ.
+
+---
+
 ## Реклама (букмекери, покази/кліки)
 
 ### `GET /admin/bookmakers` (admin)
