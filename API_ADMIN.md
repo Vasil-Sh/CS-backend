@@ -288,15 +288,17 @@ Query `status`. → `{ tickets: [...] }`.
 ## Журнал дій
 
 ### `GET /admin/audit` (admin)
-Query: `page`, `category` (`all|users|banners`), `status` (`all|success|failed|pending`), `q`, `from`, `to`, `userId`, `history` (`subscription`), `actor` (точний логін того, хто виконав дію — для «Мої дії в журналі»).
+Query: `page`, `limit` (`25|30|50`, за замовч. 25), `category` (`all|users|payments|banners|ads|settings|security`), `status` (`all|success|failed|pending`), `q` (автор, користувач, обʼєкт або текст змін — напр. `№128`, `MATCHIQ20`), `from`, `to`, `userId`, `history` (`subscription`), `actor` (точний логін автора), `summary=1`.
 
-→ `{ entries: [...], hasMore: boolean, total: number }` — `total` — скільки всього записів підходить під фільтри (по 25 на сторінку).
+→ `{ entries: [{ …, category }], hasMore, total, limit }`. З `summary=1` ще: `counts` (кількість за розділами з тими самими фільтрами, крім розділу), `summary: { today, week, failed7, security7, lastFailed, lastSecurity, topActor: { name, week } }`, `actors: [{ name, telegram, week, total }]` (за 90 днів).
+
+Розділ «Безпека» — `/auth/login` (`LOGIN_NEW_DEVICE`: вхід адміна з пристрою, якого ще не було; `LOGIN_LOCKED`), `/auth/logout-all`, `/auth/change-password`.
 
 ### `GET /admin/audit/export` (admin)
-CSV з тими самими фільтрами, що й `GET /admin/audit` (формули в клітинках нейтралізуються).
+CSV з тими самими фільтрами (включно з `actor`), стовпці: дата, автор, розділ, дія, обʼєкт, користувач, результат, зміни. Формули в клітинках нейтралізуються.
 
-### `DELETE /admin/audit/cleanup` (admin)
-Query `days` (1–3650, за замовч. 180) — видаляє записи старші за N днів → `{ removed: number }`. Саме очищення теж записується в журнал.
+### `GET /admin/audit/cleanup?days=N` · `DELETE /admin/audit/cleanup?days=N` (лише овнер)
+GET → `{ days, count }` — скільки записів старших за N днів (1–3650, за замовч. 180) буде видалено. DELETE → `{ removed }`. Саме очищення теж записується в журнал. Не овнер → `403`.
 
 ---
 

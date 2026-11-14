@@ -14,6 +14,18 @@ import { clientIp, recordLoginFailure, clearLoginFailures, loginBlockedMs, login
 import { sessionsService } from '../services/sessionsService';
 import jwt from 'jsonwebtoken';
 
+/** «Firefox · Linux» from a user agent (no version numbers). */
+function deviceLabel(ua: string): string {
+  const b = /Edg\//.test(ua) ? 'Edge' : /OPR\//.test(ua) ? 'Opera' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'Браузер';
+  const o = /iPhone|iPad/.test(ua) ? 'iOS' : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac OS X/.test(ua) ? 'macOS' : /Linux/.test(ua) ? 'Linux' : 'інша ОС';
+  return `${b} · ${o}`;
+}
+/** 93.170.12.40 → 93.170.•••.40 */
+function maskIp(ip: string): string {
+  const p = ip.split('.');
+  return p.length === 4 ? `${p[0]}.${p[1]}.•••.${p[3]}` : ip ? ip.replace(/:[^:]+:[^:]+$/, ':•••') : '';
+}
+
 const auth = new Hono();
 
 /** Invalidate the cached admin overviews + stats after any user mutation. */
@@ -50,7 +62,20 @@ auth.post('/login', async (c) => {
       if (until) return c.json({ success: false, error: 'Акаунт заблоковано самообмеженням', code: 'SELF_LIMITED', until: new Date(until).toISOString() }, 403);
     }
     if (result.token && result.refreshToken && result.user) {
-      void sessionsService.record(result.refreshToken, result.user.id, ip, c.req.header('user-agent') || '');
+      const ua = c.req.header('user-agent') || '';
+      // Admin sign-in from a device (user agent) we have not seen for this account → «Безпека» in the audit log.
+      if (result.isAdmin && process.env.DATABASE_URL) {
+        try {
+          const seen = await pool.query('SELECT 1 FROM sessions WHERE user_id=$1 AND user_agent=$2 LIMIT 1', [result.user.id, ua.slice(0, 500)]);
+          if (!seen.rows.length) {
+            await pool.query(
+              `INSERT INTO admin_audit_log(actor_id, actor_name, action, target, details, status) VALUES($1,$2,'LOGIN_NEW_DEVICE','/auth/login',$3,'success')`,
+              [result.user.id, result.user.username, JSON.stringify({ device: deviceLabel(ua), ip: maskIp(ip) })],
+            );
+          }
+        } catch (e) { console.warn('[Auth/Login] new-device audit skipped:', (e as Error).message); }
+      }
+      void sessionsService.record(result.refreshToken, result.user.id, ip, ua);
     }
     const isProd = process.env.NODE_ENV === 'production';
     c.header('Set-Cookie', `auth_token=${result.token}; HttpOnly; ${isProd ? 'Secure; ' : ''}SameSite=Lax; Path=/; Max-Age=${7 * 24 * 60 * 60}`, { append: true });
@@ -168,6 +193,10 @@ auth.post('/logout-all', requireAuth, async (c) => {
     if (ms > 0) await blocklistJti(r.jti, ms);
   }
   const revokedAt = await revokeAllSessions(actor.userId);
+  if (actor.role === 'admin') {
+    await pool.query(`INSERT INTO admin_audit_log(actor_id, actor_name, action, target, details, status) VALUES($1,$2,'POST','/auth/logout-all',$3,'success')`,
+      [actor.userId, actor.username, JSON.stringify({ revoked: revoked.rowCount ?? 0 })]).catch(() => {});
+  }
   const user = await authService.getMe(actor.userId);
   if (!user) return c.json({ success: true, revoked: revoked.rowCount ?? 0, revokedAt: new Date(revokedAt).toISOString() });
   const claims = { userId: user.id, username: user.username, role: user.role as 'admin' | 'user' };
@@ -192,6 +221,10 @@ auth.post('/change-password', requireAuth, async (c) => {
   const ok = await authService.verifyPassword(body.currentPassword, user.passwordHash);
   if (!ok) return c.json({ error: 'Поточний пароль неправильний' }, 401);
   await authService.setPassword(user.id, body.newPassword);
+  if (user.role === 'admin') {
+    await pool.query(`INSERT INTO admin_audit_log(actor_id, actor_name, action, target, details, status) VALUES($1,$2,'POST','/auth/change-password',$3,'success')`,
+      [user.id, user.username, JSON.stringify({ password: 'оновлено' })]).catch(() => {});
+  }
   return c.json({ success: true });
 });
 

@@ -61,88 +61,124 @@ adminUsers.put('/admin/users/:id/note', requireAuth, requireAdmin, async c => {
  } catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
 });
 
+// ── Журнал дій ──
+// Categories: what part of the admin a record belongs to (by its target).
+const AUDIT_CAT: Record<string, string> = {
+  payments: `(a.target LIKE '/admin/payments/%' OR a.target ~ '^/admin/users/[0-9]+/payments$')`,
+  users: `((a.target LIKE '/auth/register' OR a.target LIKE '/auth/users/%' OR a.target LIKE '/admin/users/%') AND a.target !~ '^/admin/users/[0-9]+/payments$')`,
+  banners: `(a.target LIKE '/banners%')`,
+  ads: `(a.target LIKE '/admin/bookmakers%' OR a.target LIKE '/admin/telegram-promos%' OR a.target LIKE '/admin/telegram-groups%')`,
+  settings: `(a.target = '/admin/settings' OR a.target LIKE '/admin/audit%')`,
+  security: `(a.target IN ('/auth/login','/auth/logout-all','/auth/change-password'))`,
+};
+const AUDIT_CATS = ['all', ...Object.keys(AUDIT_CAT)];
+const TARGET_USER = `COALESCE(a.details->>'targetUsername', a.details->>'username', u.username)`;
+
+type AuditFilter = { category: string; status: string; search: string; from: string | null; to: string | null; userId: string | null; history: boolean; actor: string };
+function auditFilter(c: any): AuditFilter | { error: string } {
+  const f: AuditFilter = {
+    category: c.req.query('category') || 'all', status: c.req.query('status') || 'all',
+    search: (c.req.query('q') || '').trim().replace(/^№\s*/, '').slice(0, 100),
+    from: c.req.query('from') || null, to: c.req.query('to') || null, userId: c.req.query('userId') || null,
+    history: c.req.query('history') === 'subscription', actor: (c.req.query('actor') || '').trim().replace(/^@/, '').slice(0, 100),
+  };
+  if (!validDate(f.from) || !validDate(f.to) || (f.from && f.to && f.from > f.to) || (f.userId && !/^\d+$/.test(f.userId))) return { error: 'Невірні дати або користувач' };
+  if (!AUDIT_CATS.includes(f.category) || !['all', 'success', 'failed', 'pending'].includes(f.status)) return { error: 'Invalid audit filter' };
+  return f;
+}
+/** WHERE clause + params; `skip` leaves one filter out (for per-category counts). */
+function auditWhere(f: AuditFilter, skip?: 'category') {
+  const p: unknown[] = []; const w: string[] = [];
+  const add = (v: unknown) => { p.push(v); return `$${p.length}`; };
+  if (skip !== 'category' && f.category !== 'all') w.push(AUDIT_CAT[f.category]);
+  if (f.status !== 'all') w.push(`a.status = ${add(f.status)}`);
+  if (f.search) { const q = add(f.search.toLowerCase()); w.push(`(strpos(lower(a.actor_name), ${q}) > 0 OR strpos(lower(COALESCE(${TARGET_USER}, '')), ${q}) > 0 OR strpos(lower(a.target), ${q}) > 0 OR strpos(lower(a.details::text), ${q}) > 0)`); }
+  if (f.from) w.push(`a.created_at >= (${add(f.from)}::date::timestamp AT TIME ZONE 'Europe/Kyiv')`);
+  if (f.to) w.push(`a.created_at < ((${add(f.to)}::date + 1)::timestamp AT TIME ZONE 'Europe/Kyiv')`);
+  if (f.userId) { const u = add(f.userId); w.push(`(substring(a.target from '^/auth/users/([0-9]+)') = ${u} OR a.details->>'_targetUserId' = ${u})`); }
+  if (f.actor) w.push(`lower(a.actor_name) = lower(${add(f.actor)})`);
+  if (f.history) w.push(`(a.status='success' AND (a.target LIKE '/auth/%' OR a.target LIKE '/admin/users/%/payments') AND ((CASE WHEN a.details ? '_changes' THEN (a.details->'_changes') ?| ARRAY['startDate','endDate','priceMonth'] ELSE a.details ?| ARRAY['startDate','endDate','priceMonth'] END) OR a.target='/auth/register'))`);
+  return { sql: w.length ? `WHERE ${w.join(' AND ')}` : '', params: p };
+}
+const AUDIT_FROM = `FROM admin_audit_log a LEFT JOIN users actor ON actor.id = a.actor_id LEFT JOIN users u ON u.id::text = substring(a.target from '^/auth/users/([0-9]+)')`;
+const catCase = `CASE ${Object.entries(AUDIT_CAT).map(([k, v]) => `WHEN ${v} THEN '${k}'`).join(' ')} ELSE 'other' END`;
+
 adminUsers.get('/admin/audit', requireAuth, requireAdmin, async (c) => {
- const page = Math.max(1, Math.min(100000, Number(c.req.query('page')) || 1));
- const offset = (Math.floor(page) - 1) * 25;
- const category = c.req.query('category') || 'all';
- const status = c.req.query('status') || 'all';
- const search = (c.req.query('q') || '').trim().slice(0,100);
- const from = c.req.query('from') || null, to = c.req.query('to') || null;
- const userId = c.req.query('userId') || null;
- const history = c.req.query('history') === 'subscription';
- const actor = (c.req.query('actor') || '').trim().slice(0,100);
- if(!validDate(from) || !validDate(to) || (from && to && from > to) || (userId && !/^\d+$/.test(userId))) return c.json({error:'Невірні дати або користувач'},400);
- if (!['all','users','banners'].includes(category) || !['all','success','failed','pending'].includes(status)) return c.json({error:'Invalid audit filter'},400);
- const result = await pool.query(`SELECT a.*, actor.telegram AS actor_telegram, COALESCE(a.details->>'targetUsername', a.details->>'username', u.username) AS target_username, COUNT(*) OVER() AS _total
- FROM admin_audit_log a
- LEFT JOIN users actor ON actor.id = a.actor_id
- LEFT JOIN users u ON u.id::text = substring(a.target from '^/auth/users/([0-9]+)')
- WHERE ($2 = 'all' OR ($2 = 'users' AND (a.target LIKE '/auth/%' OR a.target LIKE '/admin/users/%' OR a.target LIKE '/admin/payments/%')) OR ($2 = 'banners' AND a.target LIKE '/banners%'))
- AND ($3 = 'all' OR a.status = $3)
- AND ($4 = '' OR strpos(lower(a.actor_name), lower($4)) > 0 OR strpos(lower(COALESCE(a.details->>'targetUsername', a.details->>'username', u.username, '')), lower($4)) > 0)
- AND ($5::date IS NULL OR a.created_at >= ($5::date::timestamp AT TIME ZONE 'Europe/Kyiv'))
- AND ($6::date IS NULL OR a.created_at < (($6::date + 1)::timestamp AT TIME ZONE 'Europe/Kyiv'))
- AND ($7::text IS NULL OR substring(a.target from '^/auth/users/([0-9]+)') = $7 OR a.details->>'_targetUserId' = $7)
- AND ($9 = '' OR lower(a.actor_name) = lower($9))
- AND (NOT $8::boolean OR (a.status='success' AND (a.target LIKE '/auth/%' OR a.target LIKE '/admin/users/%/payments') AND ((CASE WHEN a.details ? '_changes' THEN (a.details->'_changes') ?| ARRAY['startDate','endDate','priceMonth'] ELSE a.details ?| ARRAY['startDate','endDate','priceMonth'] END) OR a.target='/auth/register')))
- ORDER BY a.created_at DESC, a.id DESC LIMIT 26 OFFSET $1`, [offset, category, status, search, from, to, userId, history, actor]);
- const total = result.rows.length ? Number(result.rows[0]._total) : 0;
- return c.json({ entries: result.rows.slice(0,25).map(({ _total, ...r }: any) => r), hasMore: result.rows.length > 25, total });
+  const f = auditFilter(c);
+  if ('error' in f) return c.json({ error: f.error }, 400);
+  const limit = [25, 30, 50].includes(Number(c.req.query('limit'))) ? Number(c.req.query('limit')) : 25;
+  const page = Math.max(1, Math.min(100000, Math.floor(Number(c.req.query('page')) || 1)));
+  const wh = auditWhere(f);
+  const off = wh.params.length + 1;
+  const result = await pool.query(
+    `SELECT a.*, actor.telegram AS actor_telegram, ${TARGET_USER} AS target_username, ${catCase} AS category, COUNT(*) OVER() AS _total
+     ${AUDIT_FROM} ${wh.sql} ORDER BY a.created_at DESC, a.id DESC LIMIT ${limit + 1} OFFSET $${off}`,
+    [...wh.params, (page - 1) * limit],
+  );
+  const total = result.rows.length ? Number(result.rows[0]._total) : 0;
+  const body: Record<string, unknown> = { entries: result.rows.slice(0, limit).map(({ _total, ...r }: any) => r), hasMore: result.rows.length > limit, total, limit };
+  if (c.req.query('summary') === '1') {
+    const cw = auditWhere(f, 'category');
+    const [counts, sum, actors] = await Promise.all([
+      pool.query(`SELECT ${catCase} AS category, COUNT(*)::int AS n ${AUDIT_FROM} ${cw.sql} GROUP BY 1`, cw.params),
+      pool.query(`SELECT
+          COUNT(*) FILTER (WHERE a.created_at >= (date_trunc('day', now() AT TIME ZONE 'Europe/Kyiv') AT TIME ZONE 'Europe/Kyiv'))::int AS today,
+          COUNT(*) FILTER (WHERE a.created_at > now() - interval '7 days')::int AS week,
+          COUNT(*) FILTER (WHERE a.created_at > now() - interval '7 days' AND a.status = 'failed')::int AS failed7,
+          COUNT(*) FILTER (WHERE a.created_at > now() - interval '7 days' AND ${AUDIT_CAT.security})::int AS security7
+        FROM admin_audit_log a`),
+      pool.query(`SELECT a.actor_name AS name, MAX(actor.telegram) AS telegram, COUNT(*) FILTER (WHERE a.created_at > now() - interval '7 days')::int AS week, COUNT(*)::int AS total
+        ${AUDIT_FROM} WHERE a.created_at > now() - interval '90 days' GROUP BY a.actor_name ORDER BY week DESC, total DESC LIMIT 30`),
+    ]);
+    const lastOf = async (cond: string) => (await pool.query(`SELECT a.id, a.action, a.target, a.details, a.actor_name, a.created_at, ${TARGET_USER} AS target_username ${AUDIT_FROM} WHERE a.created_at > now() - interval '7 days' AND ${cond} ORDER BY a.created_at DESC LIMIT 1`)).rows[0] || null;
+    const [lastFailed, lastSecurity] = await Promise.all([lastOf(`a.status = 'failed'`), lastOf(AUDIT_CAT.security)]);
+    body.counts = Object.fromEntries(counts.rows.map((r: any) => [r.category, r.n]));
+    body.summary = { ...sum.rows[0], lastFailed, lastSecurity, topActor: actors.rows[0] && actors.rows[0].week ? { name: actors.rows[0].name, week: actors.rows[0].week } : null };
+    body.actors = actors.rows;
+  }
+  return c.json(body);
 });
 
 /** GET /admin/audit/export — full CSV export honoring the same filters. */
 adminUsers.get('/admin/audit/export', requireAuth, requireAdmin, async (c) => {
- const category = c.req.query('category') || 'all';
- const status = c.req.query('status') || 'all';
- const search = (c.req.query('q') || '').trim().slice(0,100);
- const from = c.req.query('from') || null, to = c.req.query('to') || null;
- const userId = c.req.query('userId') || null;
- if(!validDate(from) || !validDate(to) || (from && to && from > to) || (userId && !/^\d+$/.test(userId))) return c.json({error:'Невірні дати або користувач'},400);
- if (!['all','users','banners'].includes(category) || !['all','success','failed','pending'].includes(status)) return c.json({error:'Invalid audit filter'},400);
- const result = await pool.query(`SELECT a.actor_name, actor.telegram AS actor_telegram, a.action, a.target, COALESCE(a.details->>'targetUsername', a.details->>'username', u.username) AS target_username, a.status, a.created_at
- FROM admin_audit_log a
- LEFT JOIN users actor ON actor.id = a.actor_id
- LEFT JOIN users u ON u.id::text = substring(a.target from '^/auth/users/([0-9]+)')
- WHERE ($1 = 'all' OR ($1 = 'users' AND (a.target LIKE '/auth/%' OR a.target LIKE '/admin/users/%' OR a.target LIKE '/admin/payments/%')) OR ($1 = 'banners' AND a.target LIKE '/banners%'))
- AND ($2 = 'all' OR a.status = $2)
- AND ($3 = '' OR strpos(lower(a.actor_name), lower($3)) > 0 OR strpos(lower(COALESCE(a.details->>'targetUsername', a.details->>'username', u.username, '')), lower($3)) > 0)
- AND ($4::date IS NULL OR a.created_at >= ($4::date::timestamp AT TIME ZONE 'Europe/Kyiv'))
- AND ($5::date IS NULL OR a.created_at < (($5::date + 1)::timestamp AT TIME ZONE 'Europe/Kyiv'))
- AND ($6::text IS NULL OR substring(a.target from '^/auth/users/([0-9]+)') = $6 OR a.details->>'_targetUserId' = $6)
- ORDER BY a.created_at DESC, a.id DESC LIMIT 50000`, [category, status, search, from, to, userId]);
-
- const escape = csvCell; // quotes + neutralizes =,+,-,@ formulas
- const header = ['Дата','Автор','Дія','Обʼєкт','Користувач','Результат'].map(escape).join(',');
- const rows = result.rows.map((r: any) => [
-   r.created_at ? new Date(r.created_at).toISOString() : '',
-   r.actor_name || '',
-   r.action || '',
-   r.target || '',
-   r.target_username || '',
-   r.status || '',
- ].map(escape).join(','));
- const csv = '\uFEFF' + [header, ...rows].join('\r\n');
- return new Response(csv, {
-   headers: {
-     'Content-Type': 'text/csv; charset=utf-8',
-     'Content-Disposition': 'attachment; filename="audit-log.csv"',
-   },
- });
+  const f = auditFilter(c);
+  if ('error' in f) return c.json({ error: f.error }, 400);
+  const wh = auditWhere(f);
+  const result = await pool.query(`SELECT a.actor_name, a.action, a.target, ${TARGET_USER} AS target_username, ${catCase} AS category, a.status, a.created_at, a.details
+    ${AUDIT_FROM} ${wh.sql} ORDER BY a.created_at DESC, a.id DESC LIMIT 50000`, wh.params);
+  const escape = csvCell; // quotes + neutralizes =,+,-,@ formulas
+  const header = ['Дата', 'Автор', 'Розділ', 'Дія', 'Обʼєкт', 'Користувач', 'Результат', 'Зміни'].map(escape).join(',');
+  const changes = (d: any) => { const ch = d?._changes; return ch && typeof ch === 'object' ? Object.entries(ch).map(([k, v]: any) => `${k}: ${v?.before ?? '—'} → ${v?.after ?? '—'}`).join('; ') : ''; };
+  const rows = result.rows.map((r: any) => [r.created_at ? new Date(r.created_at).toISOString() : '', r.actor_name || '', r.category, r.action || '', r.target || '', r.target_username || '', r.status || '', changes(r.details)].map(escape).join(','));
+  return new Response('﻿' + [header, ...rows].join('\r\n'), { headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="audit-log.csv"' } });
 });
 
-/** DELETE /admin/audit/cleanup — purge audit entries older than N days. */
+async function isOwner(userId: number) {
+  const r = await pool.query('SELECT is_owner FROM users WHERE id=$1', [userId]).catch(() => ({ rows: [] as any[] }));
+  return !!r.rows[0]?.is_owner;
+}
+
+/** GET /admin/audit/cleanup?days=N — how many records would be removed (owner only). */
+adminUsers.get('/admin/audit/cleanup', requireAuth, requireAdmin, async (c) => {
+  if (!(await isOwner(c.get('user').userId))) return c.json({ error: 'Очищати журнал може лише овнер' }, 403);
+  const days = Math.max(1, Math.min(3650, Number(c.req.query('days')) || 180));
+  const r = await pool.query(`SELECT COUNT(*)::int AS n FROM admin_audit_log WHERE created_at < now() - ($1::int * interval '1 day')`, [days]);
+  return c.json({ days, count: r.rows[0].n });
+});
+
+/** DELETE /admin/audit/cleanup — purge audit entries older than N days (owner only). */
 adminUsers.delete('/admin/audit/cleanup', requireAuth, requireAdmin, async (c) => {
- const days = Math.max(1, Math.min(3650, Number(c.req.query('days')) || 180));
- const cutoff = new Date(Date.now() - days * 86400_000).toISOString();
- const actor = c.get('user');
- const result = await pool.query('DELETE FROM admin_audit_log WHERE created_at < $1', [cutoff]);
- // Record the purge itself (best-effort — it's a cleanup of the very table being pruned).
- try {
-   await pool.query(
-     'INSERT INTO admin_audit_log (actor_id,actor_name,action,target,details,status) VALUES ($1,$2,$3,$4,$5,$6)',
-     [actor.userId, actor.username, 'DELETE', '/admin/audit/cleanup', JSON.stringify({ days, removed: result.rowCount ?? 0 }), 'success'],
-   );
- } catch { /* non-fatal */ }
- return c.json({ removed: result.rowCount ?? 0 });
+  const actor = c.get('user');
+  if (!(await isOwner(actor.userId))) return c.json({ error: 'Очищати журнал може лише овнер' }, 403);
+  const days = Math.max(1, Math.min(3650, Number(c.req.query('days')) || 180));
+  const result = await pool.query(`DELETE FROM admin_audit_log WHERE created_at < now() - ($1::int * interval '1 day')`, [days]);
+  // Record the purge itself (best-effort — it's a cleanup of the very table being pruned).
+  try {
+    await pool.query(
+      'INSERT INTO admin_audit_log (actor_id,actor_name,action,target,details,status) VALUES ($1,$2,$3,$4,$5,$6)',
+      [actor.userId, actor.username, 'DELETE', '/admin/audit/cleanup', JSON.stringify({ days, removed: result.rowCount ?? 0 }), 'success'],
+    );
+  } catch { /* non-fatal */ }
+  return c.json({ removed: result.rowCount ?? 0 });
 });
 export default adminUsers;
