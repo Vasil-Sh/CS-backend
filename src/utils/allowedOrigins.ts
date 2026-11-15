@@ -30,6 +30,9 @@ export function isAllowedOrigin(origin: string, env: NodeJS.ProcessEnv = process
   if (isDevEnv(env)) {
     // Any local port and Vercel preview deployments while developing.
     if (/^http:\/\/localhost(:\d+)?$/.test(o)) return true;
+    // LAN access from other devices (phone/tablet) during development.
+    if (/^http:\/\/192\.168\.\d+\.\d+(:\d+)?$/.test(o)) return true;
+    if (/^http:\/\/172\.(1[6-9]|2\d|3[01])\.\d+\.\d+(:\d+)?$/.test(o)) return true;
     if (/^https:\/\/[a-z0-9-]+\.vercel\.app$/.test(o)) return true;
   }
   return allowedOrigins(env).includes(o);
