@@ -29,7 +29,10 @@ function splitStatements(sql: string): string[] {
 }
 
 async function migrate() {
-  const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+  const pool = new pg.Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined,
+  });
 
   try {
     // Create migrations table if not exists
