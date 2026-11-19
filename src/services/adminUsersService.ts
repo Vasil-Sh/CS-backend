@@ -26,6 +26,11 @@ export interface AdminUserOverview {
   pending: number;
   totalStaked: number;
   totalProfit: number;
+  /** Dollar bets, in $ (stake/profit as entered; old records without it use amount ÷ rate). */
+  usdBets: number;
+  usdStaked: number;
+  usdProfit: number;
+  usdRoi: number;
   winRate: number;
   roi: number;
   initialBank: number;
@@ -101,6 +106,9 @@ export interface AdminUserBet {
   profit: number;
   game: string;
   currency: string;
+  originalAmount: number | null;
+  originalProfit: number | null;
+  exchangeRate: number | null;
   strategy: string;
   createdAt: string;
 }
@@ -136,8 +144,13 @@ export class AdminUsersService {
           COALESCE(SUM(CASE WHEN b.result = 'Win' THEN 1 ELSE 0 END)::int, 0) AS wins,
           COALESCE(SUM(CASE WHEN b.result = 'Loss' THEN 1 ELSE 0 END)::int, 0) AS losses,
           COALESCE(SUM(CASE WHEN b.result = 'Pending' THEN 1 ELSE 0 END)::int, 0) AS pending,
-          COALESCE(SUM(b.amount)::numeric, 0) AS total_staked,
-          COALESCE(SUM(b.profit)::numeric, 0) AS total_profit,
+          -- ₴ totals count hryvnia bets only; dollar bets get their own totals in $ (as in the app)
+          COALESCE(SUM(b.amount) FILTER (WHERE upper(coalesce(NULLIF(b.currency,''),'UAH')) <> 'USD'), 0)::numeric AS total_staked,
+          COALESCE(SUM(b.profit) FILTER (WHERE upper(coalesce(NULLIF(b.currency,''),'UAH')) <> 'USD'), 0)::numeric AS total_profit,
+          COALESCE(SUM(b.profit)::numeric, 0) AS total_profit_all,
+          COUNT(b.id) FILTER (WHERE upper(coalesce(b.currency,'')) = 'USD')::int AS usd_bets,
+          COALESCE(SUM(COALESCE(b.original_amount, b.amount / NULLIF(b.exchange_rate, 0))) FILTER (WHERE upper(coalesce(b.currency,'')) = 'USD'), 0)::numeric AS usd_staked,
+          COALESCE(SUM(COALESCE(b.original_profit, b.profit / NULLIF(b.exchange_rate, 0))) FILTER (WHERE upper(coalesce(b.currency,'')) = 'USD' AND b.result IN ('Win', 'Loss')), 0)::numeric AS usd_profit,
           COALESCE(br.initial_bank::numeric, 0) AS initial_bank,
           COALESCE(br.manual_adjustments::numeric, 0) AS manual_adjustments
         FROM users u
@@ -175,8 +188,8 @@ export class AdminUsersService {
                COUNT(*) FILTER (WHERE result = 'Win')::int AS wins,
                COUNT(*) FILTER (WHERE result = 'Loss')::int AS losses,
                COUNT(*) FILTER (WHERE result = 'Pending')::int AS pending,
-               COALESCE(SUM(amount)::numeric, 0) AS staked,
-               COALESCE(SUM(profit)::numeric, 0) AS profit
+               COALESCE(SUM(amount) FILTER (WHERE upper(coalesce(NULLIF(currency,''),'UAH')) <> 'USD'), 0)::numeric AS staked,
+               COALESCE(SUM(profit) FILTER (WHERE upper(coalesce(NULLIF(currency,''),'UAH')) <> 'USD'), 0)::numeric AS profit
         FROM bets
         GROUP BY user_id, COALESCE(NULLIF(game, ''), 'CS2')
         ORDER BY user_id, game
@@ -278,6 +291,8 @@ export class AdminUsersService {
         const decided = wins + losses;
         const totalStaked = Number(r.total_staked);
         const totalProfit = Number(r.total_profit);
+        const usdStaked = Math.round(Number(r.usd_staked) * 100) / 100;
+        const usdProfit = Math.round(Number(r.usd_profit) * 100) / 100;
         const initialBank = Number(r.initial_bank);
         const manual = Number(r.manual_adjustments);
 
@@ -301,7 +316,12 @@ export class AdminUsersService {
           roi: totalStaked > 0 ? Math.round((totalProfit / totalStaked) * 1000) / 10 : 0,
           initialBank,
           manualAdjustments: manual,
-          currentBank: initialBank + manual + totalProfit,
+          usdBets: Number(r.usd_bets) || 0,
+          usdStaked,
+          usdProfit,
+          usdRoi: usdStaked > 0 ? Math.round((usdProfit / usdStaked) * 1000) / 10 : 0,
+          // The bank is kept in ₴: dollar bets count at the rate they were saved with
+          currentBank: initialBank + manual + Number(r.total_profit_all),
           lossStreak: lossStreakMap.get(r.id) || 0,
           plan: planKey(r.plan),
           planLabel: planLabel(r.plan),
@@ -345,7 +365,8 @@ export class AdminUsersService {
       const result = await client.query(
         `SELECT
            id, match, team1, team2, bet_type, odds, amount, stake,
-           date::text AS date, result, profit, game, currency, strategy, created_at
+           date::text AS date, result, profit, game, currency, strategy, created_at,
+           original_amount, original_profit, exchange_rate
          FROM bets
          WHERE user_id = $1
          ORDER BY date DESC, created_at DESC`,
@@ -366,6 +387,9 @@ export class AdminUsersService {
         profit: Number(r.profit),
         game: r.game || '',
         currency: r.currency || '',
+        originalAmount: r.original_amount == null ? null : Number(r.original_amount),
+        originalProfit: r.original_profit == null ? null : Number(r.original_profit),
+        exchangeRate: r.exchange_rate == null ? null : Number(r.exchange_rate),
         strategy: r.strategy || '',
         createdAt: r.created_at ? new Date(r.created_at).toISOString() : '',
       }));
