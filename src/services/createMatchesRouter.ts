@@ -18,6 +18,7 @@ import { batchComputeTeamForms } from './teamFormService';
 import { lookupLocalLogo, lookupLocalLogoRank, lookupDota2LocalLogoRank, getLocalLogoDir, lookupTipsggLogo, lookupDota2LocalLogo, getDota2LogoDir } from '../services/logoStore';
 import { touchActivity } from './activityTracker';
 import { withHltvMarkets } from './hltv/hltvMarketCache';
+import { adminMatchesService } from './adminMatchesService';
 
 interface MatchRouterConfig {
   game: 'dota2' | 'cs2';
@@ -577,6 +578,9 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       // Today's finished matches are still returned — frontend handles auto-hide.
       const today = new Date().toISOString().split('T')[0];
       const filtered = data.filter(m => m.date >= today);
+
+      // ── Apply admin overlays: manual status/score edits + created matches ──
+      await adminMatchesService.overlayAdminMatches(game, filtered);
 
       // ── Rewrite logo URLs to internal proxy (CORS-safe, no broken URLs) ──
       // ── Cast team names to string — numeric names like "6666" become Int64 in JSON ──

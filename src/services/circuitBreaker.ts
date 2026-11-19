@@ -4,11 +4,23 @@
  */
 
 import { recordParserFailure } from './insights';
+import { adminMatchesService } from './adminMatchesService';
 
 interface CircuitState {
   failures: number;
   lastFailure: number;
   open: boolean;
+}
+
+// Collapse identical parser events within 60s so the log doesn't spam on
+// every incremental refresh (120s cadence) or repeated scraper failures.
+const lastEvent = new Map<string, { kind: string; at: number }>();
+function logEvent(name: string, kind: 'success' | 'failure' | 'rerun', message = ''): void {
+  const prev = lastEvent.get(name);
+  const now = Date.now();
+  if (prev && prev.kind === kind && now - prev.at < 60_000) return;
+  lastEvent.set(name, { kind, at: now });
+  adminMatchesService.logParserEvent(name, kind, message);
 }
 
 const FAILURE_THRESHOLD = 3;
@@ -39,6 +51,7 @@ export function recordSuccess(name: string): void {
   const s = getState(name);
   s.failures = 0;
   s.open = false;
+  logEvent(name, 'success', 'OK');
 }
 
 export function recordFailure(name: string): void {
@@ -47,6 +60,7 @@ export function recordFailure(name: string): void {
   s.lastFailure = Date.now();
   // Persist to parser_failures (best-effort, throttled inside).
   recordParserFailure(name, `Circuit breaker failure #${s.failures}`);
+  logEvent(name, 'failure', `Circuit breaker failure #${s.failures}`);
   if (s.failures >= FAILURE_THRESHOLD) {
     s.open = true;
     console.warn(`[circuit-breaker] ${name} OPEN (${s.failures} failures)`);
@@ -73,4 +87,5 @@ export function resetCircuit(name: string): void {
   const s = getState(name);
   s.open = false;
   s.failures = 0;
+  logEvent(name, 'rerun', 'Admin reset the breaker');
 }

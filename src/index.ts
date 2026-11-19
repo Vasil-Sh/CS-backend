@@ -45,6 +45,7 @@ import adminParsersRoutes from './routes/adminParsers';
 import adminAdsRoutes from './routes/adminAds';
 import adminTelegramGroupsRoutes from './routes/adminTelegramGroups';
 import adminSubscriptionsRoutes from './routes/adminSubscriptions';
+import adminMatchesRoutes from './routes/adminMatches';
 import { startProExpiry } from './services/subscriptionActions';
 import settingsRoutes from './routes/settings';
 import dota2MatchesRoutes from './routes/dota2Matches';
@@ -206,6 +207,7 @@ v1.route('', adminParsersRoutes);
 v1.route('', adminAdsRoutes);
 v1.route('', adminTelegramGroupsRoutes);
 v1.route('', adminSubscriptionsRoutes);
+v1.route('', adminMatchesRoutes);
 v1.route('', settingsRoutes);
 v1.route('/public-profile', publicProfileRoutes);
 
