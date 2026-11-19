@@ -31,6 +31,8 @@ export interface AdminUserOverview {
   usdStaked: number;
   usdProfit: number;
   usdRoi: number;
+  initialBankUsd: number;
+  currentBankUsd: number;
   winRate: number;
   roi: number;
   initialBank: number;
@@ -147,16 +149,17 @@ export class AdminUsersService {
           -- ₴ totals count hryvnia bets only; dollar bets get their own totals in $ (as in the app)
           COALESCE(SUM(b.amount) FILTER (WHERE upper(coalesce(NULLIF(b.currency,''),'UAH')) <> 'USD'), 0)::numeric AS total_staked,
           COALESCE(SUM(b.profit) FILTER (WHERE upper(coalesce(NULLIF(b.currency,''),'UAH')) <> 'USD'), 0)::numeric AS total_profit,
-          COALESCE(SUM(b.profit)::numeric, 0) AS total_profit_all,
           COUNT(b.id) FILTER (WHERE upper(coalesce(b.currency,'')) = 'USD')::int AS usd_bets,
           COALESCE(SUM(COALESCE(b.original_amount, b.amount / NULLIF(b.exchange_rate, 0))) FILTER (WHERE upper(coalesce(b.currency,'')) = 'USD'), 0)::numeric AS usd_staked,
           COALESCE(SUM(COALESCE(b.original_profit, b.profit / NULLIF(b.exchange_rate, 0))) FILTER (WHERE upper(coalesce(b.currency,'')) = 'USD' AND b.result IN ('Win', 'Loss')), 0)::numeric AS usd_profit,
           COALESCE(br.initial_bank::numeric, 0) AS initial_bank,
-          COALESCE(br.manual_adjustments::numeric, 0) AS manual_adjustments
+          COALESCE(br.manual_adjustments::numeric, 0) AS manual_adjustments,
+          COALESCE(br.initial_bank_usd::numeric, 0) AS initial_bank_usd,
+          COALESCE(br.exchange_rate::numeric, 0) AS bank_rate
         FROM users u
         LEFT JOIN bets b ON b.user_id = u.id
         LEFT JOIN bankroll br ON br.user_id = u.id
-        GROUP BY u.id, br.initial_bank, br.manual_adjustments
+        GROUP BY u.id, br.initial_bank, br.manual_adjustments, br.initial_bank_usd, br.exchange_rate
         ORDER BY u.created_at DESC
       `);
 
@@ -293,7 +296,10 @@ export class AdminUsersService {
         const totalProfit = Number(r.total_profit);
         const usdStaked = Math.round(Number(r.usd_staked) * 100) / 100;
         const usdProfit = Math.round(Number(r.usd_profit) * 100) / 100;
-        const initialBank = Number(r.initial_bank);
+        // The app stores initial_bank = ₴ part + $ part × rate; split it back like the app does
+        const bankUsd = Number(r.initial_bank_usd) || 0;
+        const bankRate = Number(r.bank_rate) || 0;
+        const initialBank = Number(r.initial_bank) - (bankUsd > 0 && bankRate > 0 ? bankUsd * bankRate : 0);
         const manual = Number(r.manual_adjustments);
 
         return {
@@ -320,8 +326,10 @@ export class AdminUsersService {
           usdStaked,
           usdProfit,
           usdRoi: usdStaked > 0 ? Math.round((usdProfit / usdStaked) * 1000) / 10 : 0,
-          // The bank is kept in ₴: dollar bets count at the rate they were saved with
-          currentBank: initialBank + manual + Number(r.total_profit_all),
+          // ₴ bank: ₴ start + ₴ bets + manual changes; $ bank: $ start + $ bets (as in the app)
+          currentBank: initialBank + manual + totalProfit,
+          initialBankUsd: bankUsd,
+          currentBankUsd: Math.round((bankUsd + usdProfit) * 100) / 100,
           lossStreak: lossStreakMap.get(r.id) || 0,
           plan: planKey(r.plan),
           planLabel: planLabel(r.plan),
