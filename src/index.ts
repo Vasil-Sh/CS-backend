@@ -19,6 +19,7 @@ import { securityHeaders } from './middleware/securityHeaders';
 import { numericNormalizer } from './middleware/numericNormalizer';
 import { db, pool } from './db/client';
 import { sql } from 'drizzle-orm';
+import { bootstrapOwner } from './services/bootstrapOwner';
 
 import authRoutes from './routes/auth';
 import betRoutes from './routes/bets';
@@ -233,6 +234,9 @@ app.notFound((c) => {
 const port = parseInt(process.env.PORT || '3001', 10);
 
 console.log(`🚀 MatchIQ API server starting on http://localhost:${port}`);
+
+// ── One-off owner bootstrap (only when BOOTSTRAP_OWNER_USERNAME is set) ──
+void bootstrapOwner();
 
 // ── Cache warmup: pre-fetch Dota2 matches in background ──
 // Uses tips.gg scraper.
