@@ -1,6 +1,7 @@
 import adminPayments from './adminPayments';
 import { validDate } from '../services/bannerRules';
 import { pool } from '../db/client';
+import { checkSchema } from '../services/schemaCheck';
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { adminUsersService } from '../services/adminUsersService';
@@ -157,6 +158,13 @@ async function isOwner(userId: number) {
   const r = await pool.query('SELECT is_owner FROM users WHERE id=$1', [userId]).catch(() => ({ rows: [] as any[] }));
   return !!r.rows[0]?.is_owner;
 }
+
+/** GET /admin/schema-check — what the live database lacks compared with the code schema (owner only, read-only). */
+adminUsers.get('/admin/schema-check', requireAuth, requireAdmin, async (c) => {
+  if (!(await isOwner(c.get('user').userId))) return c.json({ error: 'Лише для овнера' }, 403);
+  const gaps = await checkSchema();
+  return c.json({ ok: gaps.length === 0, missing: gaps });
+});
 
 /** GET /admin/audit/cleanup?days=N — how many records would be removed (owner only). */
 adminUsers.get('/admin/audit/cleanup', requireAuth, requireAdmin, async (c) => {

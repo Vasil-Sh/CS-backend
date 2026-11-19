@@ -90,6 +90,10 @@ export interface GameBreakdown {
   pending: number;
   staked: number;
   profit: number;
+  /** Dollar bets of this game, in $. */
+  usdBets: number;
+  usdStaked: number;
+  usdProfit: number;
   winRate: number;
   roi: number;
 }
@@ -192,7 +196,10 @@ export class AdminUsersService {
                COUNT(*) FILTER (WHERE result = 'Loss')::int AS losses,
                COUNT(*) FILTER (WHERE result = 'Pending')::int AS pending,
                COALESCE(SUM(amount) FILTER (WHERE upper(coalesce(NULLIF(currency,''),'UAH')) <> 'USD'), 0)::numeric AS staked,
-               COALESCE(SUM(profit) FILTER (WHERE upper(coalesce(NULLIF(currency,''),'UAH')) <> 'USD'), 0)::numeric AS profit
+               COALESCE(SUM(profit) FILTER (WHERE upper(coalesce(NULLIF(currency,''),'UAH')) <> 'USD'), 0)::numeric AS profit,
+               COUNT(*) FILTER (WHERE upper(coalesce(currency,'')) = 'USD')::int AS usd_bets,
+               COALESCE(SUM(COALESCE(original_amount, amount / NULLIF(exchange_rate, 0))) FILTER (WHERE upper(coalesce(currency,'')) = 'USD'), 0)::numeric AS usd_staked,
+               COALESCE(SUM(COALESCE(original_profit, profit / NULLIF(exchange_rate, 0))) FILTER (WHERE upper(coalesce(currency,'')) = 'USD' AND result IN ('Win', 'Loss')), 0)::numeric AS usd_profit
         FROM bets
         GROUP BY user_id, COALESCE(NULLIF(game, ''), 'CS2')
         ORDER BY user_id, game
@@ -282,6 +289,9 @@ export class AdminUsersService {
           pending: Number(r.pending),
           staked,
           profit,
+          usdBets: Number(r.usd_bets) || 0,
+          usdStaked: Math.round(Number(r.usd_staked) * 100) / 100,
+          usdProfit: Math.round(Number(r.usd_profit) * 100) / 100,
           winRate: decided > 0 ? Math.round((wins / decided) * 1000) / 10 : 0,
           roi: staked > 0 ? Math.round((profit / staked) * 1000) / 10 : 0,
         });
