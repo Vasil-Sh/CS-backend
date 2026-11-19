@@ -110,4 +110,18 @@ routes.post('/admin/payments/:id/cancel',requireAuth,requireAdmin,async c=>{
   await client.query('COMMIT');return c.json({success:true});
  }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
 });
+// DELETE /admin/payments/:id — remove a payment record completely (e.g. created by mistake).
+// Like «cancel», it does not change the user's subscription dates. The removed row is kept in the audit log.
+routes.delete('/admin/payments/:id',requireAuth,requireAdmin,async c=>{
+ const id=c.req.param('id')||'';if(!/^\d+$/.test(id))return c.json({error:'Invalid payment'},400);
+ const client=await pool.connect();try{await client.query('BEGIN');
+  const result=await client.query('SELECT id::text,username,user_id,amount::text,paid_on::text AS "paidOn",period_start::text AS "periodStart",period_end::text AS "periodEnd",status,payment_method AS "paymentMethod",promo_code AS "promoCode",created_by_name AS "createdBy" FROM admin_payments WHERE id::text=$1 FOR UPDATE',[id]);const payment=result.rows[0];
+  if(!payment){await client.query('ROLLBACK');return c.json({error:'Оплату не знайдено'},404)}
+  await client.query('DELETE FROM admin_payments WHERE id::text=$1',[id]);
+  const actor=c.get('user');
+  const {user_id,...snapshot}=payment;
+  await client.query(`INSERT INTO admin_audit_log(actor_id,actor_name,action,target,details,status) VALUES($1,$2,'DELETE',$3,$4,'success')`,[actor.userId,actor.username,`/admin/payments/${id}`,JSON.stringify({targetUsername:payment.username,_targetUserId:String(user_id||''),paymentId:id,...snapshot})]);
+  await client.query('COMMIT');return c.json({success:true});
+ }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
+});
 export default routes;

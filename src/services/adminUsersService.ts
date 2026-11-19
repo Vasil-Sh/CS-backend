@@ -14,6 +14,8 @@ export interface AdminUserOverview {
   username: string;
   role: string;
   telegram: string;
+  /** The user has started the MatchIQ bot, so receipts can be sent to their Telegram. */
+  telegramLinked: boolean;
   priceMonth: number;
   startDate: string;
   endDate: string;
@@ -116,6 +118,7 @@ export class AdminUsersService {
           u.username,
           u.role,
           u.telegram,
+          (u.telegram_chat_id IS NOT NULL) AS telegram_linked,
           u.price_month::numeric AS price_month,
           u.plan,
           u.trial_end_date::text AS trial_end_date,
@@ -283,6 +286,7 @@ export class AdminUsersService {
           username: r.username,
           role: r.role,
           telegram: r.telegram || '',
+          telegramLinked: !!r.telegram_linked,
           priceMonth: Number(r.price_month),
           startDate: r.start_date || '',
           endDate: r.end_date || '',
