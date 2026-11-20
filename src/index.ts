@@ -56,13 +56,12 @@ import { closeBrowser } from './services/tipsggScraper';
 import { fetchDota2Matches, fetchCs2Matches, fetchTodayMatches } from './services/tipsggScraper';
 import { enrichTournamentLogos } from './services/hltv/hltvEventsScraper';
 import { join } from 'node:path';
-import { readFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
-import { execSync } from 'node:child_process';
+import { readFileSync, existsSync } from 'node:fs';
 import { writeFileCacheInternal } from './services/createMatchesRouter';
 import { upsertMatchHistoryBatch } from './services/matchHistoryService';
 import { fetchCstestMatches } from './services/hltv/cstestClient';
 import { scrapeHltvRankingLogos } from './services/hltv/hltvRankingScraper';
-import { buildLocalLogoStore, loadTipsggLogos, buildDota2LocalStore } from './services/logoStore';
+import { buildLocalLogoStore, loadTipsggLogos, buildDota2LocalStore, extractLogoPacks } from './services/logoStore';
 import { runWithRequestContext } from './utils/requestContext';
 import { AppError } from './utils/AppError';
 import { allowedOrigins, isAllowedOrigin } from './utils/allowedOrigins';
@@ -445,37 +444,11 @@ setTimeout(() => {
   );
 }, 3_000);
 
-// ── Local logo extraction — extract cs2_icon.zip on first startup ──
+// ── Team logo packs: unpack cs2_logos.zip / dota2_logos.zip on start, then index them ──
 setTimeout(() => {
-  const zipPath = join(process.cwd(), 'cs2_icon.zip');
-  const extractDir = join(process.cwd(), '.cache', 'logos', 'local');
-
-  if (!existsSync(zipPath)) {
-    console.log('[logoStore] cs2_icon.zip not found — skipping (place it in backend/)');
-    buildLocalLogoStore(); // scan whatever is already there
-    return;
-  }
-
-  if (!existsSync(extractDir)) mkdirSync(extractDir, { recursive: true });
-
-  try {
-    // Only extract if directory has fewer than 10 files (first run)
-    const existing = readdirSync(extractDir);
-    if (existing.length > 10) {
-      console.log(`[logoStore] ${existing.length} local logos already extracted`);
-      buildLocalLogoStore();
-      return;
-    }
-
-    console.log('[logoStore] Extracting cs2_icon.zip...');
-    execSync(`powershell -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${extractDir}' -Force"`, { stdio: 'pipe' });
-    const count = readdirSync(extractDir).length;
-    console.log(`[logoStore] Extracted ${count} files`);
-    buildLocalLogoStore();
-  } catch (err) {
-    console.warn('[logoStore] Extraction failed:', (err as Error).message);
-    buildLocalLogoStore(); // try anyway (maybe files already there)
-  }
+  extractLogoPacks()
+    .catch((e) => console.warn('[logoStore] packs:', (e as Error).message))
+    .finally(() => { buildLocalLogoStore(); buildDota2LocalStore(); });
 }, 4_000);
 
 // ── Load tips.gg CDN logo map + scan local Dota2 logos ──

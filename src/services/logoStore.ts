@@ -9,8 +9,40 @@ import { existsSync, readdirSync, statSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 
-const LOCAL_LOGO_DIR = join(process.cwd(), '..', 'hltv_logos');
-const DOTA2_LOGO_DIR = join(process.cwd(), '.cache', 'logos', 'dota2_local');
+/** Where the logo packs (cs2_logos.zip, dota2_logos.zip in the backend root) are unpacked on start. */
+export const LOGO_CACHE_DIR = join(process.cwd(), '.cache', 'logos');
+const firstExisting = (dirs: string[]) => dirs.find((d) => existsSync(d)) || dirs[0];
+// CS2: the unpacked pack, or an older ../hltv_logos next to the backend (local dev)
+const CS2_DIRS = [join(LOGO_CACHE_DIR, 'hltv_logos'), join(process.cwd(), '..', 'hltv_logos')];
+const DOTA2_DIRS = [join(LOGO_CACHE_DIR, 'dota2'), join(LOGO_CACHE_DIR, 'dota2_local')];
+let LOCAL_LOGO_DIR = firstExisting(CS2_DIRS);
+let DOTA2_LOGO_DIR = firstExisting(DOTA2_DIRS);
+
+/**
+ * Unpack the team-logo packs shipped with the backend (pure Node — works on Linux/Railway,
+ * the old PowerShell Expand-Archive only ran on Windows). Skips a pack already unpacked.
+ */
+export async function extractLogoPacks(): Promise<void> {
+  const packs = [
+    { zip: 'cs2_logos.zip', dir: 'hltv_logos' },
+    { zip: 'dota2_logos.zip', dir: 'dota2' },
+  ];
+  const { default: AdmZip } = await import('adm-zip');
+  for (const p of packs) {
+    const zipPath = join(process.cwd(), p.zip);
+    const target = join(LOGO_CACHE_DIR, p.dir);
+    if (!existsSync(zipPath)) { console.log(`[logoStore] ${p.zip} not found — skipping`); continue; }
+    try {
+      if (existsSync(target) && readdirSync(target).length > 10) { console.log(`[logoStore] ${p.dir}: ${readdirSync(target).length} logos ready`); continue; }
+      new AdmZip(zipPath).extractAllTo(LOGO_CACHE_DIR, true);
+      console.log(`[logoStore] ${p.zip} unpacked: ${readdirSync(target).length} logos`);
+    } catch (err) {
+      console.warn(`[logoStore] ${p.zip} unpack failed:`, (err as Error).message);
+    }
+  }
+  LOCAL_LOGO_DIR = firstExisting(CS2_DIRS);
+  DOTA2_LOGO_DIR = firstExisting(DOTA2_DIRS);
+}
 
 /**
  * Normalize team name for matching:
@@ -245,9 +277,10 @@ export function lookupLocalLogo(teamName: string): string | null {
   const store = buildLocalLogoStore();
   if (store.byName.size === 0) return null;
 
-  // 1. Normalized exact match
-  const norm = normalizeTeamName(teamName);
-  if (!norm) return null;
+  // 1. Normalized exact match (common short names first: «Navi» is Natus Vincere, not Na`Vi Junior)
+  const raw = normalizeTeamName(teamName);
+  if (!raw) return null;
+  const norm = SHORT_NAMES[raw] || raw;
   if (store.byName.has(norm)) return store.byName.get(norm)!;
 
   // 2. Exact filename match (just in case)
@@ -260,15 +293,30 @@ export function lookupLocalLogo(teamName: string): string | null {
   //    Guard: skip keys shorter than 2 chars — non-ASCII team names (e.g. "Þór")
   //    normalize down to a single letter and would otherwise match every name
   //    containing that letter (Royal Foxes, CTRL, …).
+  //    Several can match ("navi" ⊂ "navijunior", …): take the best-ranked file (lowest numeric prefix).
+  let best: string | null = null;
+  let bestRank = Infinity;
   for (const [key, filename] of store.byName) {
     if (key.length < 2) continue;
     if (norm.includes(key) || key.includes(norm)) {
-      return filename;
+      const rank = parseInt(filename, 10);
+      const r = Number.isFinite(rank) ? rank : 99999;
+      if (r < bestRank) { best = filename; bestRank = r; }
     }
   }
 
-  return null;
+  return best;
 }
+
+/** Short / common spellings → the name the logo pack uses (normalized). */
+const SHORT_NAMES: Record<string, string> = {
+  navi: 'natusvincere',
+  natusvincere: 'natusvincere',
+  vp: 'virtuspro',
+  nip: 'ninjasinpyjamas',
+  col: 'complexity',
+  eg: 'evilgeniuses',
+};
 
 /**
  * Look up a team's HLTV world ranking position from the local logo store.
