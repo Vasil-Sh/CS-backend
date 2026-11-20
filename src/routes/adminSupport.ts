@@ -53,10 +53,11 @@ support.get('/admin/support-tickets', requireAuth, requireAdmin, async (c) => {
           FROM support_messages m WHERE m.ticket_id = t.id ORDER BY m.created_at DESC LIMIT 1) AS "lastMessage",
        (SELECT COUNT(*)::int FROM support_messages m WHERE m.ticket_id = t.id) AS replies
      FROM support_tickets t LEFT JOIN users u ON u.id = t.user_id
-     WHERE ${filterSql(filter)}
-       AND ($2 = '' OR t.kind = $2)
-       AND ($3 = '' OR strpos(lower(t.subject), lower($3)) > 0 OR strpos(lower(t.message), lower($3)) > 0
-            OR strpos(lower(COALESCE(NULLIF(t.username,''), u.username, '')), lower(ltrim($3, '@'))) > 0)
+     WHERE ($1::text IS NULL OR TRUE) -- $1 (the admin) is used only by «mine»; Postgres needs every parameter typed
+       AND ${filterSql(filter)}
+       AND ($2::text = '' OR t.kind = $2::text)
+       AND ($3::text = '' OR strpos(lower(t.subject), lower($3::text)) > 0 OR strpos(lower(t.message), lower($3::text)) > 0
+            OR strpos(lower(COALESCE(NULLIF(t.username,''), u.username, '')), lower(ltrim($3::text, '@'))) > 0)
      ORDER BY (t.status = 'open') DESC, t.updated_at DESC, t.id DESC
      LIMIT 200`,
     [me, kind, q],
