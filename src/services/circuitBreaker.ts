@@ -5,6 +5,7 @@
 
 import { recordParserFailure } from './insights';
 import { adminMatchesService } from './adminMatchesService';
+import { pool } from '../db/client';
 
 interface CircuitState {
   failures: number;
@@ -35,7 +36,42 @@ function getState(name: string): CircuitState {
   return circuits.get(name)!;
 }
 
+// ── Parsers stopped by an admin (persisted in parser_pauses, loaded on start) ──
+const paused = new Map<string, { by: string; at: number }>();
+
+export async function loadParserPauses(): Promise<void> {
+  try {
+    const { rows } = await pool.query('SELECT name, paused_by, paused_at FROM parser_pauses');
+    paused.clear();
+    rows.forEach((r: any) => paused.set(r.name, { by: r.paused_by || '', at: new Date(r.paused_at).getTime() }));
+    if (rows.length) console.log(`[circuit-breaker] stopped by admin: ${rows.map((r: any) => r.name).join(', ')}`);
+  } catch (e) {
+    console.warn('[circuit-breaker] could not load parser pauses:', (e as Error).message);
+  }
+}
+
+export function pauseInfo(name: string): { by: string; at: number } | null {
+  return paused.get(name) || null;
+}
+
+export async function pauseParser(name: string, by: string): Promise<void> {
+  await pool.query(
+    `INSERT INTO parser_pauses(name, paused_by) VALUES($1,$2)
+     ON CONFLICT (name) DO UPDATE SET paused_by = EXCLUDED.paused_by, paused_at = now()`,
+    [name, by],
+  );
+  paused.set(name, { by, at: Date.now() });
+  adminMatchesService.logParserEvent(name, 'rerun', `Зупинено вручну · @${by}`);
+}
+
+export async function resumeParser(name: string, by: string): Promise<void> {
+  await pool.query('DELETE FROM parser_pauses WHERE name = $1', [name]);
+  const was = paused.delete(name);
+  if (was) adminMatchesService.logParserEvent(name, 'rerun', `Запущено вручну · @${by}`);
+}
+
 export function isOpen(name: string): boolean {
+  if (paused.has(name)) return true; // stopped by hand: no fetch, the feed keeps its cache
   const s = getState(name);
   if (!s.open) return false;
   if (Date.now() - s.lastFailure > RESET_TIMEOUT) {
@@ -55,6 +91,7 @@ export function recordSuccess(name: string): void {
 }
 
 export function recordFailure(name: string): void {
+  if (paused.has(name)) return; // a stopped parser is not failing
   const s = getState(name);
   s.failures++;
   s.lastFailure = Date.now();

@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { pool } from '../db/client';
-import { listCircuits, resetCircuit } from '../services/circuitBreaker';
+import { listCircuits, pauseInfo, pauseParser, resetCircuit, resumeParser } from '../services/circuitBreaker';
 
 const parsers = new Hono();
 
@@ -26,8 +26,12 @@ parsers.get('/admin/parsers', requireAuth, requireAdmin, async (c) => {
   const merged = known.map((name) => {
     const circuit = circuits.find((x) => x.name === name);
     const fail = failureMap.get(name);
+    const stop = pauseInfo(name);
     return {
       name,
+      paused: !!stop,
+      pausedBy: stop?.by ?? '',
+      pausedAt: stop ? new Date(stop.at).toISOString() : '',
       open: circuit?.open ?? false,
       failures: circuit?.failures ?? 0,
       failures24h: fail?.count ?? 0,
@@ -42,6 +46,35 @@ parsers.post('/admin/parsers/:name/rerun', requireAuth, requireAdmin, async (c) 
   const name = c.req.param('name') || '';
   if (!/^[a-z0-9_]+$/i.test(name)) return c.json({ error: 'Invalid parser name' }, 400);
   resetCircuit(name);
+  return c.json({ success: true });
+});
+
+const KNOWN = new Set(['tipsgg_fetch_cs2_matches', 'tipsgg_fetch_dota2_matches', 'hltv_scraper']);
+function audit(actor: { userId: number; username: string }, action: string, target: string, details: Record<string, unknown>): void {
+  void pool
+    .query(`INSERT INTO admin_audit_log(actor_id, actor_name, action, target, details, status) VALUES($1,$2,$3,$4,$5,'success')`,
+      [actor.userId, actor.username, action, target, JSON.stringify(details)])
+    .catch((err) => console.warn('[adminParsers] audit failed:', (err as Error).message));
+}
+
+/** POST /api/admin/parsers/:name/stop — stop the parser until it is started again (survives restarts). */
+parsers.post('/admin/parsers/:name/stop', requireAuth, requireAdmin, async (c) => {
+  const name = c.req.param('name') || '';
+  if (!KNOWN.has(name)) return c.json({ error: 'Невідомий парсер' }, 400);
+  const actor = c.get('user');
+  await pauseParser(name, actor.username);
+  audit(actor, 'POST', `/admin/parsers/${name}/stop`, { name });
+  return c.json({ success: true });
+});
+
+/** POST /api/admin/parsers/:name/start — start a stopped parser; the next fetch runs as usual. */
+parsers.post('/admin/parsers/:name/start', requireAuth, requireAdmin, async (c) => {
+  const name = c.req.param('name') || '';
+  if (!KNOWN.has(name)) return c.json({ error: 'Невідомий парсер' }, 400);
+  const actor = c.get('user');
+  await resumeParser(name, actor.username);
+  resetCircuit(name);
+  audit(actor, 'POST', `/admin/parsers/${name}/start`, { name });
   return c.json({ success: true });
 });
 
