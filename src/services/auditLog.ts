@@ -17,6 +17,8 @@ const ALLOWED_FIELDS = new Set([
   'moderationStatus', 'rejectReason', 'status', 'subject',
   'basicPrice', 'proPrice', 'trialEnabled', 'trialDays', 'trialPlan', 'aiDailyLimit', 'warningThreshold', 'disclaimerText',
   'aiUsdUah', 'churnInactiveDays', 'churnLossStreak', 'basicFeatures', 'proFeatures', 'receiptFields', 'defaultMonthlyPrice', 'subscriptionDays',
+  'trialStepDays', 'aiStopWords', 'aiWordingRule', 'footerDisclaimer', 'addictionHelp', 'beforeAiText', 'expiringDays',
+  'receiptSupport', 'receiptThanks', 'receiptPrefix', 'tplExpiring', 'tplInactive', 'tplPaid', 'tplLapsed',
   'endDate', 'priceMonth', 'periodDays', 'amount', 'refundedAmount', 'extendSubscription', 'paymentMethod', 'promoCode',
 ]);
 

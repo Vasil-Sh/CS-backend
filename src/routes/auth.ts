@@ -154,7 +154,8 @@ function refreshJti(token?: string): string {
 // ── GET /api/auth/sessions — active sessions for the current user ──
 auth.get('/sessions', requireAuth, async (c) => {
   const userId = c.get('user').userId;
-  const current = refreshJti(c.req.header('Authorization')?.replace('Bearer ', '') || '');
+  // The admin sends its refresh token in X-Refresh-Token so «Цей пристрій» can be marked.
+  const current = refreshJti(c.req.header('X-Refresh-Token') || c.req.header('Authorization')?.replace('Bearer ', '') || '');
   const sessions = await sessionsService.list(userId, current);
   return c.json({ sessions });
 });
