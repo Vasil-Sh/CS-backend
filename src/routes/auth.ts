@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { settingsService } from '../services/settingsService';
 import { pool } from '../db/client';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { loginSchema, registerSchema, updateUserSchema } from '../middleware/validation';
@@ -140,6 +141,11 @@ auth.post('/logout', async (c) => {
   }
 });
 
+/** «@Name», «t.me/Name», «https://t.me/Name» → «name» ('' if empty). */
+export function normalizeTelegram(raw?: string | null): string {
+  return String(raw ?? '').trim().replace(/^(https?:\/\/)?(t\.me|telegram\.me)\//i, '').replace(/^@/, '').replace(/\/$/, '').toLowerCase();
+}
+
 /** Decode the jti from a refresh token ('' if invalid). */
 function refreshJti(token?: string): string {
   if (!token) return '';
@@ -233,6 +239,19 @@ auth.post('/change-password', requireAuth, async (c) => {
 auth.post('/register', requireAuth, requireAdmin, async (c) => {
   let body;
   try { body = registerSchema.parse(await c.req.json()); } catch { return c.json({ error: 'Invalid input' }, 400); }
+  // «Один пробний період на людину» (Налаштування): a Telegram that is already on another account gets no trial.
+  if ((body.plan || 'trial') === 'trial' && (body.role || 'user') === 'user') {
+    const s = await settingsService.get();
+    if (!s.trialEnabled) return c.json({ error: 'Пробний період вимкнено в Налаштуваннях — оберіть Базову або Pro', code: 'TRIAL_OFF' }, 409);
+    const tg = normalizeTelegram(body.telegram);
+    if (tg) {
+      const { rows } = await pool.query<{ username: string }>(
+        `SELECT username FROM users WHERE lower(regexp_replace(regexp_replace(coalesce(telegram,''), '^(https?://)?(t[.]me|telegram[.]me)/', '', 'i'), '^@', '')) = $1::text LIMIT 1`,
+        [tg],
+      );
+      if (rows[0]) return c.json({ error: `Пробний період уже був: цей Telegram є в акаунті @${rows[0].username}. Оберіть Базову або Pro.`, code: 'TRIAL_USED', username: rows[0].username }, 409);
+    }
+  }
   const result = await authService.register(body, c.get('user'));
   if (!result) return c.json({ error: 'Username already exists' }, 409);
   invalidateAdminCaches();

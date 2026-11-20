@@ -98,3 +98,10 @@ describe('DeepSeekService', () => {
     });
   });
 });
+
+import { stopWordHits, maskStopWords } from './deepseek';
+describe('stop words (Налаштування → AI-аналіз)', () => {
+  const r = { prediction: 'NAVI', reasoning: 'Ставте на NAVI, гарантовано виграш.', suggestedBet: 'форма сильніша' };
+  it('finds them case-insensitively', () => { expect(stopWordHits(r, ['ставте', 'гарантовано', '100%'])).toEqual(['ставте', 'гарантовано']); });
+  it('masks what is left after a rewrite', () => { expect(maskStopWords(r, ['ставте', 'гарантовано']).reasoning).toBe('… на NAVI, … виграш.'); });
+});

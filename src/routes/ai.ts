@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { requireAuth } from '../middleware/auth';
 import { aiRecommendSchema, aiAdviceSchema } from '../middleware/validation';
 import { deepSeekService } from '../services/deepseek';
+import { settingsService } from '../services/settingsService';
 
 const ai = new Hono();
 
@@ -19,7 +20,10 @@ ai.post('/recommend', requireAuth, async (c) => {
   }
 
   try {
-    const recommendation = await deepSeekService.getMatchRecommendation(body);
+    const s = await settingsService.get().catch(() => null);
+    const recommendation = await deepSeekService.getMatchRecommendation(body, {
+      userId: c.get('user')?.userId, rule: s?.aiWordingRule, stopWords: s?.aiStopWords,
+    });
     return c.json(recommendation);
   } catch (err: any) {
     console.error('[DeepSeek]', err.message);

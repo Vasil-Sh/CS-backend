@@ -6,6 +6,8 @@ import {telegramBotService} from '../services/telegramBot';
 import {recordAudit} from '../services/auditLog';
 import {adminUsersService} from '../services/adminUsersService';
 import {receiptCaption,isPng,telegramErrorMessage,RECEIPT_MAX_BYTES} from '../services/receipts';
+import {settingsService,fillTemplate,planAccusative} from '../services/settingsService';
+const uaDay=(d?:string|null)=>d?d.slice(0,10).split('-').reverse().join('.'):'';
 const routes=new Hono();
 const columns=`id::text,user_id AS "userId",username,amount::text,currency,paid_on::text AS "paidOn",period_start::text AS "periodStart",period_end::text AS "periodEnd",note,extend_subscription AS "extendSubscription",created_by_name AS "createdBy",created_at AS "createdAt",status,cancelled_by_name AS "cancelledBy",cancelled_at AS "cancelledAt",cancel_reason AS "cancelReason",payment_method AS "paymentMethod",refunded_amount::text AS "refundedAmount",refund_reason AS "refundReason",refunded_at AS "refundedAt",refunded_by AS "refundedBy",promo_code AS "promoCode"`;
 
@@ -55,13 +57,16 @@ routes.post('/admin/payments/:id/receipt/send',requireAuth,requireAdmin,async c=
  if(file.size===0||file.size>RECEIPT_MAX_BYTES)return c.json({error:'Чек має бути PNG до 2 МБ'},400);
  const buffer=Buffer.from(await file.arrayBuffer());
  if(!isPng(buffer))return c.json({error:'Чек має бути PNG до 2 МБ'},400);
- const result=await pool.query(`SELECT p.id::text,p.amount::text,p.paid_on::text AS "paidOn",p.period_start::text AS "periodStart",p.period_end::text AS "periodEnd",p.status,p.user_id AS "userId",p.username,u.telegram_chat_id AS "chatId" FROM admin_payments p LEFT JOIN users u ON u.id=p.user_id WHERE p.id::text=$1`,[id]);
+ const result=await pool.query(`SELECT p.id::text,p.amount::text,p.paid_on::text AS "paidOn",p.period_start::text AS "periodStart",p.period_end::text AS "periodEnd",p.status,p.user_id AS "userId",p.username,u.telegram_chat_id AS "chatId",u.plan,u.end_date::text AS "endDate" FROM admin_payments p LEFT JOIN users u ON u.id=p.user_id WHERE p.id::text=$1`,[id]);
  const payment=result.rows[0];
  if(!payment)return c.json({error:'Оплату не знайдено'},404);
  if(payment.status!=='recorded')return c.json({error:'Скасовану або повернену оплату не надсилаємо'},409);
  if(!payment.chatId)return c.json({error:'Користувач ще не запустив бота — попросіть натиснути /start'},409);
  if(!telegramBotService.isConfigured())return c.json({error:'Telegram-бот не налаштований на сервері'},503);
- try{await telegramBotService.sendPhoto(payment.chatId,buffer,receiptCaption(payment))}
+ // «Оплату отримано» from Налаштування → Шаблони goes on top of the receipt facts.
+ const thanks=await settingsService.get().then(s=>fillTemplate(s.tplPaid,{login:payment.username,plan:planAccusative(payment.plan),amount:`${Number(payment.amount).toLocaleString('uk-UA')} ₴`,endDate:uaDay(payment.endDate||payment.periodEnd)})).catch(()=>'');
+ const caption=(thanks?`${thanks}\n\n`:'')+receiptCaption(payment);
+ try{await telegramBotService.sendPhoto(payment.chatId,buffer,caption.slice(0,1024))}
  catch(error){const t=telegramErrorMessage((error as Error).message);return c.json({error:t.message},t.status)}
  const actor=c.get('user');const sentAt=new Date().toISOString();
  await recordAudit(actor,'POST',`/admin/payments/${id}/receipt/send`,{fields:{targetUsername:payment.username,_targetUserId:String(payment.userId||''),paymentId:id,amount:payment.amount,sentAt}});

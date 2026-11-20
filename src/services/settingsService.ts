@@ -104,7 +104,7 @@ const DEFAULTS: AppSettings = {
   receiptPrefix: 'MIQ',
   tplExpiring: 'Привіт, {логін}! Ваша підписка MatchIQ закінчується {дата_закінчення}. Продовження на {тариф} — {сума}. Напишіть, якщо зручно оплатити — надішлю реквізити.',
   tplInactive: 'Привіт, {логін}! Давно не бачили ваших ставок — уже {днів_без_ставок} днів. Щось не працює? Напишіть — розберемося.',
-  tplPaid: 'Дякуємо, {логін}! Оплату {сума} отримали, {тариф} діє до {дата_закінчення}. Чек — нижче.',
+  tplPaid: 'Дякуємо, {логін}! Оплату {сума} отримали, {тариф} діє до {дата_закінчення}.',
   tplLapsed: 'Привіт, {логін}! Підписка закінчилась {дата_закінчення}. Повернути {тариф} за {сума}? Напишіть — надішлю реквізити.',
 };
 
@@ -170,6 +170,20 @@ function toSettings(rows: { key: string; value: string }[]): AppSettings {
     tplPaid: map.get('tpl_paid') ?? DEFAULTS.tplPaid,
     tplLapsed: map.get('tpl_lapsed') ?? DEFAULTS.tplLapsed,
   };
+}
+
+/** Values for a message template; missing ones stay as the variable. */
+export interface TemplateValues { login?: string; endDate?: string; plan?: string; amount?: string; idleDays?: number }
+
+/** «Pro» / «Базову» (as in «Продовження на Базову»). */
+export const planAccusative = (plan?: string | null) => (plan === 'pro' ? 'Pro' : 'Базову');
+
+export function fillTemplate(text: string, v: TemplateValues): string {
+  const map: Record<string, string | undefined> = {
+    '{логін}': v.login, '{дата_закінчення}': v.endDate, '{тариф}': v.plan, '{сума}': v.amount,
+    '{днів_без_ставок}': v.idleDays === undefined ? undefined : String(v.idleDays),
+  };
+  return text.replace(/\{[^{}\s]*\}/g, (m) => map[m] ?? m);
 }
 
 /** Check a message template: only known variables, sane length. Returns an error text or ''. */

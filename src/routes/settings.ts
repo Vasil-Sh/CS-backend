@@ -81,6 +81,21 @@ settings.put('/admin/settings', requireAuth, requireAdmin, async (c) => {
 });
 
 /**
+ * GET /api/settings/public — texts the app shows to everyone (no sign-in needed):
+ * footer disclaimer, addiction help, the line before AI analysis, the ad label.
+ */
+settings.get('/settings/public', async (c) => {
+  try {
+    const s = await settingsService.get();
+    c.header('Cache-Control', 'public, max-age=300');
+    return c.json({ footerDisclaimer: s.footerDisclaimer, addictionHelp: s.addictionHelp, beforeAiText: s.beforeAiText, adLabel: 'Реклама · 21+', trialEnabled: s.trialEnabled, trialDays: s.trialDays });
+  } catch (err) {
+    console.error('[Settings/Public] Error:', (err as Error).message);
+    return c.json({ error: 'Failed to load texts' }, 500);
+  }
+});
+
+/**
  * GET /api/admin/settings/overview — live numbers shown next to the settings:
  * people on each plan, trial now and conversion, AI usage today / this month,
  * how many users the warning rules catch right now, and the next receipt number.
