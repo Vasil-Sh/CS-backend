@@ -57,47 +57,7 @@ adminInsights.get('/admin/insights', requireAuth, requireAdmin, async (c) => {
   }
 });
 
-/** GET /api/admin/support-tickets — list support tickets */
-adminInsights.get('/admin/support-tickets', requireAuth, requireAdmin, async (c) => {
-  try {
-    const status = c.req.query('status') || 'open';
-    if (!['open', 'resolved', 'closed'].includes(status)) {
-      return c.json({ error: 'Invalid status' }, 400);
-    }
-    const result = await pool.query(
-      `SELECT id::text AS id, user_id AS "userId", username, subject, message,
-              status, created_at AS "createdAt", resolved_at AS "resolvedAt", resolved_by AS "resolvedBy"
-       FROM support_tickets
-       WHERE status = $1
-       ORDER BY created_at DESC LIMIT 100`,
-      [status],
-    );
-    return c.json({ tickets: result.rows });
-  } catch (err: any) {
-    console.error('[Admin/Tickets] Error:', err.message);
-    return c.json({ error: 'Failed to fetch tickets: ' + err.message }, 500);
-  }
-});
-
-/** PATCH /api/admin/support-tickets/:id — resolve/close a ticket */
-adminInsights.patch('/admin/support-tickets/:id', requireAuth, requireAdmin, async (c) => {
-  const id = c.req.param('id') || '';
-  if (!/^\d+$/.test(id)) return c.json({ error: 'Invalid ticket' }, 400);
-  const body = await c.req.json().catch(() => null);
-  const status = body?.status;
-  if (!['resolved', 'closed'].includes(status)) {
-    return c.json({ error: 'Status must be resolved or closed' }, 400);
-  }
-  const actor = c.get('user');
-  const result = await pool.query(
-    `UPDATE support_tickets
-     SET status = $2, resolved_at = now(), resolved_by = $3
-     WHERE id::text = $1 RETURNING id::text AS id`,
-    [id, status, actor.username],
-  );
-  if (!result.rows.length) return c.json({ error: 'Ticket not found' }, 404);
-  return c.json({ success: true });
-});
+// Ticket list, conversation, reply and status changes live in routes/adminSupport.ts.
 
 /** POST /api/support — authenticated users create a support ticket */
 adminInsights.post('/support', requireAuth, async (c) => {
@@ -110,11 +70,22 @@ adminInsights.post('/support', requireAuth, async (c) => {
   }
   try {
     const user = c.get('user');
+    const kind = ['problem', 'idea', 'question'].includes(body.kind) ? body.kind : 'problem';
+    // context the app attaches: device, app version, screen — short strings only
+    const meta: Record<string, string> = {};
+    if (body.meta && typeof body.meta === 'object' && !Array.isArray(body.meta)) {
+      for (const key of ['device', 'appVersion', 'screen']) {
+        const v = (body.meta as Record<string, unknown>)[key];
+        if (typeof v === 'string' && v.trim()) meta[key] = v.trim().slice(0, 100);
+      }
+    }
     const id = await createSupportTicket({
       userId: user.userId,
       username: user.username,
       subject: body.subject.trim(),
       message: body.message.trim(),
+      kind,
+      meta,
     });
     return c.json({ id }, 201);
   } catch (err: any) {

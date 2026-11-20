@@ -70,14 +70,16 @@ export interface SupportTicketInput {
   username?: string;
   subject: string;
   message: string;
+  kind?: 'problem' | 'idea' | 'question';
+  meta?: Record<string, string>;
 }
 
 export async function createSupportTicket(input: SupportTicketInput): Promise<number> {
   if (!dbReady()) throw new Error('Database not configured');
   const result = await pool.query(
-    `INSERT INTO support_tickets(user_id, username, subject, message)
-     VALUES($1,$2,$3,$4) RETURNING id::text AS id`,
-    [input.userId ?? null, input.username || '', input.subject, input.message],
+    `INSERT INTO support_tickets(user_id, username, subject, message, kind, meta)
+     VALUES($1,$2,$3,$4,$5,$6) RETURNING id::text AS id`,
+    [input.userId ?? null, input.username || '', input.subject, input.message, input.kind || 'problem', JSON.stringify(input.meta || {})],
   );
   return Number(result.rows[0].id);
 }
