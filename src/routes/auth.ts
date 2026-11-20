@@ -220,7 +220,8 @@ auth.post('/change-password', requireAuth, async (c) => {
   const user = await authService.getMe(c.get('user').userId);
   if (!user) return c.json({ error: 'User not found' }, 404);
   const ok = await authService.verifyPassword(body.currentPassword, user.passwordHash);
-  if (!ok) return c.json({ error: 'Поточний пароль неправильний' }, 401);
+  // 400, not 401: a 401 makes the admin think the session expired and signs the user out.
+  if (!ok) return c.json({ error: 'Поточний пароль неправильний', code: 'WRONG_PASSWORD' }, 400);
   await authService.setPassword(user.id, body.newPassword);
   if (user.role === 'admin') {
     await pool.query(`INSERT INTO admin_audit_log(actor_id, actor_name, action, target, details, status) VALUES($1,$2,'POST','/auth/change-password',$3,'success')`,
