@@ -3,6 +3,7 @@ import { requireAuth, requireAdmin } from '../middleware/auth';
 import { pool } from '../db/client';
 import { recordAudit } from '../services/auditLog';
 import { telegramBotService } from '../services/telegramBot';
+import { settingsService } from '../services/settingsService';
 
 /**
  * Support: tickets from the in-app form «Проблема чи побажання», a conversation per ticket,
@@ -97,6 +98,42 @@ support.get('/admin/support-tickets', requireAuth, requireAdmin, async (c) => {
   });
 });
 
+const ukDate = (d: string | Date) => new Intl.DateTimeFormat('uk-UA', { timeZone: 'Europe/Kyiv', day: 'numeric', month: 'short' }).format(new Date(d));
+
+/** What usually explains a ticket: AI used today vs the daily limit, the last payment vs the subscription end. */
+export function supportHints(c: { aiToday: number | null; aiLimit: number; lastPayment: { paidOn: string; periodEnd: string } | null; endDate: string | null; plan: string | null }): string[] {
+  const out: string[] = [];
+  if (c.aiToday != null && c.aiLimit > 0 && c.aiToday >= c.aiLimit) {
+    out.push(`Ліміт AI на сьогодні вичерпано (${c.aiToday} з ${c.aiLimit}). Можливо, повідомлення про ліміт не показалось.`);
+  }
+  if (c.lastPayment && c.endDate && c.lastPayment.periodEnd > c.endDate) {
+    out.push(`Оплата від ${ukDate(c.lastPayment.paidOn)} записана в «Оплатах» (до ${ukDate(c.lastPayment.periodEnd)}), але підписка діє лише до ${ukDate(c.endDate)}.`);
+  }
+  return out;
+}
+
+async function ticketContext(userId: number | null) {
+  const settings = await settingsService.get().catch(() => null);
+  const aiLimit = settings?.aiDailyLimit ?? 0;
+  if (!userId) return { aiToday: null, aiLimit, lastPayment: null, endDate: null, hints: [] as string[] };
+  const [ai, pay, user] = await Promise.all([
+    pool.query(
+      `SELECT COUNT(*)::int AS n FROM ai_usage WHERE user_id = $1 AND created_at >= date_trunc('day', now() AT TIME ZONE 'Europe/Kyiv') AT TIME ZONE 'Europe/Kyiv'`,
+      [userId],
+    ).catch(() => ({ rows: [{ n: null }] })),
+    pool.query(
+      `SELECT paid_on::text AS "paidOn", period_end::text AS "periodEnd", amount::text AS amount FROM admin_payments
+       WHERE user_id = $1 AND status = 'recorded' ORDER BY paid_on DESC, id DESC LIMIT 1`,
+      [userId],
+    ).catch(() => ({ rows: [] })),
+    pool.query(`SELECT end_date::text AS "endDate", plan FROM users WHERE id = $1`, [userId]).catch(() => ({ rows: [] })),
+  ]);
+  const aiToday = ai.rows[0]?.n ?? null;
+  const lastPayment = pay.rows[0] || null;
+  const endDate = user.rows[0]?.endDate ?? null;
+  return { aiToday, aiLimit, lastPayment, endDate, hints: supportHints({ aiToday, aiLimit, lastPayment, endDate, plan: user.rows[0]?.plan ?? null }) };
+}
+
 /** GET /admin/support-tickets/:id — ticket, conversation and a little context about the user. */
 support.get('/admin/support-tickets/:id', requireAuth, requireAdmin, async (c) => {
   const id = c.req.param('id') || '';
@@ -109,15 +146,8 @@ support.get('/admin/support-tickets/:id', requireAuth, requireAdmin, async (c) =
      FROM support_messages WHERE ticket_id::text = $1 ORDER BY created_at, id`,
     [id],
   );
-  let aiToday: number | null = null;
-  if (ticket.userId) {
-    const ai = await pool.query(
-      `SELECT COUNT(*)::int AS n FROM ai_usage WHERE user_id = $1 AND created_at >= date_trunc('day', now() AT TIME ZONE 'Europe/Kyiv') AT TIME ZONE 'Europe/Kyiv'`,
-      [ticket.userId],
-    ).catch(() => ({ rows: [{ n: null }] }));
-    aiToday = ai.rows[0]?.n ?? null;
-  }
-  return c.json({ ticket, messages: msgs.rows, context: { aiToday } });
+  const context = await ticketContext(ticket.userId);
+  return c.json({ ticket, messages: msgs.rows, context });
 });
 
 async function loadTicket(id: string) {
