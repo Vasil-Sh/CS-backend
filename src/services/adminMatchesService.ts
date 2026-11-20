@@ -88,6 +88,11 @@ export function makeLinkKey(game: string, team1: string, team2: string, date: st
   return `${game}:${pair}@${String(date).slice(0, 10)}`;
 }
 
+export interface HiddenTeam { id: number; game: string; name: string; createdBy: string; createdAt: string }
+function rowToHiddenTeam(r: any): HiddenTeam {
+  return { id: Number(r.id), game: r.game, name: r.name, createdBy: r.created_by || '', createdAt: new Date(r.created_at).toISOString() };
+}
+
 function rowToTeamAlias(r: any): TeamAlias {
   return {
     id: Number(r.id),
@@ -190,6 +195,32 @@ export const adminMatchesService = {
   async deleteTeamAlias(id: number): Promise<boolean> {
     const { rowCount } = await pool.query('DELETE FROM team_aliases WHERE id = $1', [id]);
     return (rowCount ?? 0) > 0;
+  },
+
+  // ══════════════════════════ Hidden teams (removed from the directory) ══════════════════════════
+
+  async listHiddenTeams(): Promise<HiddenTeam[]> {
+    const { rows } = await pool.query('SELECT * FROM hidden_teams ORDER BY game, name');
+    return rows.map(rowToHiddenTeam);
+  },
+
+  async hideTeam(input: { game: string; name: string; createdBy: string }): Promise<HiddenTeam> {
+    const game = cleanGame(input.game);
+    if (!game) throw new Error('Невідома гра');
+    const name = String(input.name || '').trim().slice(0, 200);
+    if (!name) throw new Error('Назва команди обов’язкова');
+    const { rows } = await pool.query(
+      `INSERT INTO hidden_teams(game, name, created_by) VALUES($1,$2,$3)
+       ON CONFLICT (game, name) DO UPDATE SET created_by = EXCLUDED.created_by
+       RETURNING *`,
+      [game, name, String(input.createdBy || '').slice(0, 100)],
+    );
+    return rowToHiddenTeam(rows[0]);
+  },
+
+  async unhideTeam(id: number): Promise<HiddenTeam | null> {
+    const { rows } = await pool.query('DELETE FROM hidden_teams WHERE id = $1 RETURNING *', [id]);
+    return rows[0] ? rowToHiddenTeam(rows[0]) : null;
   },
 
   // ══════════════════════════ Match overrides ══════════════════════════

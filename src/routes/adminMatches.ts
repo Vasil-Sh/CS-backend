@@ -22,6 +22,34 @@ function audit(actor: { userId: number; username: string }, action: string, targ
     .catch((err) => console.warn('[adminMatches] audit failed:', (err as Error).message));
 }
 
+// ══════════════════════════ Hidden teams ══════════════════════════
+
+matches.get('/admin/hidden-teams', requireAuth, requireAdmin, async (c) => {
+  return c.json({ teams: await adminMatchesService.listHiddenTeams() });
+});
+
+matches.post('/admin/hidden-teams', requireAuth, requireAdmin, async (c) => {
+  const actor = c.get('user');
+  const b = await c.req.json().catch(() => ({} as any));
+  try {
+    const t = await adminMatchesService.hideTeam({ game: String(b.game || ''), name: String(b.name || ''), createdBy: actor.username });
+    audit(actor, 'POST', '/admin/hidden-teams', { game: t.game, name: t.name });
+    return c.json(t, 201);
+  } catch (e: any) {
+    return c.json({ error: e?.message || 'Не вдалося видалити команду' }, 400);
+  }
+});
+
+matches.delete('/admin/hidden-teams/:id', requireAuth, requireAdmin, async (c) => {
+  const actor = c.get('user');
+  const id = Number(c.req.param('id'));
+  if (!Number.isFinite(id)) return c.json({ error: 'Bad id' }, 400);
+  const t = await adminMatchesService.unhideTeam(id);
+  if (!t) return c.json({ error: 'Not found' }, 404);
+  audit(actor, 'DELETE', `/admin/hidden-teams/${id}`, { game: t.game, name: t.name });
+  return c.json({ ok: true });
+});
+
 // ══════════════════════════ Team aliases ══════════════════════════
 
 /** Every team in the CS2 / Dota 2 logo packs — the admin «Команди» directory. */
