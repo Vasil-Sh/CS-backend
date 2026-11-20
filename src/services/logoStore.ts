@@ -447,3 +447,46 @@ export function lookupTipsggLogo(teamName: string, game: string): string | null 
 export function getLocalLogoDir(): string {
   return LOCAL_LOGO_DIR;
 }
+
+// ═══ Team catalog (every team in the logo packs) ═══
+
+export interface CatalogTeam { game: 'cs2' | 'dota2'; name: string; rank: number | null; logo: string }
+let _catalog: CatalogTeam[] | null = null;
+
+/** Split "0037_T1.png" → { rank: 37, name: "T1" }; underscores become spaces. */
+export function parseLogoFile(file: string): { rank: number | null; name: string } | null {
+  if (!/\.(png|svg|webp|jpg)$/i.test(file)) return null;
+  const noExt = file.replace(/\.(png|svg|webp|jpg)$/i, '');
+  const m = noExt.match(/^(\d+)_(.+)$/);
+  const name = (m ? m[2] : noExt).replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!name) return null;
+  return { rank: m ? parseInt(m[1], 10) : null, name };
+}
+
+/**
+ * Every team from both logo packs, one entry per team (the best-ranked file wins when
+ * the pack has the same team twice). Cached once the packs are unpacked.
+ */
+export function logoCatalog(): CatalogTeam[] {
+  if (_catalog) return _catalog;
+  const out: CatalogTeam[] = [];
+  const scan = (dir: string, game: 'cs2' | 'dota2', route: string) => {
+    if (!existsSync(dir)) return 0;
+    const best = new Map<string, CatalogTeam>();
+    for (const file of readdirSync(dir)) {
+      const p = parseLogoFile(file);
+      if (!p) continue;
+      const key = normalizeTeamName(p.name) || p.name.toLowerCase();
+      const prev = best.get(key);
+      if (prev && (prev.rank ?? Infinity) <= (p.rank ?? Infinity)) continue;
+      best.set(key, { game, name: p.name, rank: p.rank, logo: `/api/v1/${game}-matches/logo/${route}/${encodeURIComponent(file)}` });
+    }
+    out.push(...best.values());
+    return best.size;
+  };
+  const cs = scan(LOCAL_LOGO_DIR, 'cs2', 'local');
+  const dota = scan(DOTA2_LOGO_DIR, 'dota2', 'dota2local');
+  out.sort((a, b) => (a.rank ?? Infinity) - (b.rank ?? Infinity) || a.name.localeCompare(b.name));
+  if (cs + dota > 0) _catalog = out; // packs may still be unpacking — retry next time
+  return out;
+}

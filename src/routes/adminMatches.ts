@@ -7,6 +7,7 @@ import {
   type LinkDecision,
   type MatchStatus,
 } from '../services/adminMatchesService';
+import { logoCatalog } from '../services/logoStore';
 
 const matches = new Hono();
 
@@ -22,6 +23,12 @@ function audit(actor: { userId: number; username: string }, action: string, targ
 }
 
 // ══════════════════════════ Team aliases ══════════════════════════
+
+/** Every team in the CS2 / Dota 2 logo packs — the admin «Команди» directory. */
+matches.get('/admin/teams/catalog', requireAuth, requireAdmin, (c) => {
+  c.header('Cache-Control', 'private, max-age=3600');
+  return c.json({ teams: logoCatalog() });
+});
 
 matches.get('/admin/team-aliases', requireAuth, requireAdmin, async (c) => {
   const aliases = await adminMatchesService.listTeamAliases(c.req.query('game') || undefined);
