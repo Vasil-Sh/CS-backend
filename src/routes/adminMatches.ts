@@ -100,6 +100,16 @@ matches.delete('/admin/manual-matches/:id', requireAuth, requireAdmin, async (c)
 
 // ══════════════════════════ Match overrides (ручні правки) ══════════════════════════
 
+matches.get('/admin/match-overrides', requireAuth, requireAdmin, async (c) => {
+  const overrides = await adminMatchesService.listOverrides(c.req.query('game') || undefined);
+  return c.json({ overrides });
+});
+
+matches.get('/admin/match-links', requireAuth, requireAdmin, async (c) => {
+  const links = await adminMatchesService.listLinks(c.req.query('game') || undefined);
+  return c.json({ links });
+});
+
 matches.patch('/admin/matches/:game/:matchId', requireAuth, requireAdmin, async (c) => {
   const actor = c.get('user');
   const game = c.req.param('game') || '';

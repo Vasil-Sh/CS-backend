@@ -370,17 +370,25 @@ export const adminMatchesService = {
         this.listManualMatches(game),
       ]);
 
+      // Matches in `matches` are the scraper cache's own objects: copy before
+      // applying an override, so deleting the override shows the scraper data
+      // again on the next read instead of waiting for a cache refresh.
       const overrideMap = new Map(overrides.map((o) => [o.matchId, o]));
-      for (const m of matches) {
-        const o = overrideMap.get(m.id);
+      for (let i = 0; i < matches.length; i++) {
+        const o = overrideMap.get(matches[i].id);
         if (!o) continue;
+        const m = { ...matches[i] };
         if (o.status) (m as { status: string }).status = o.status;
         if (o.score1 != null) m.score1 = o.score1;
         if (o.score2 != null) m.score2 = o.score2;
-        if (o.startDate) m.startDate = o.startDate;
+        if (o.startDate) { m.startDate = o.startDate; m.date = o.startDate.slice(0, 10); }
+        matches[i] = m;
       }
 
+      // Same window as the feed: today (UTC) and later.
+      const today = new Date().toISOString().slice(0, 10);
       for (const mm of manual) {
+        if (mm.startDate && mm.startDate.slice(0, 10) < today) continue;
         const feedStatus: TipsGgMatch['status'] =
           mm.status === 'live' ? 'live' : mm.status === 'finished' ? 'finished' : 'upcoming';
         matches.push({
