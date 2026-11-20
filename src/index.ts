@@ -1,3 +1,4 @@
+import { telegramAvatarRoutes } from './routes/telegramAvatar';
 import 'dotenv/config';
 import './utils/env'; // Fail-fast env validation
 
@@ -196,6 +197,7 @@ v1.route('/tilt-blocks', tiltBlocksRoutes);
 v1.route('/user', userPrefsRoutes);
 v1.route('/risky-teams', riskyTeamRoutes);
 v1.route('/banners', bannerRoutes);
+v1.route('/telegram-avatar', telegramAvatarRoutes);
 v1.route('/dota2-matches', dota2MatchesRoutes);
 v1.route('/cs2-matches', cs2MatchesRoutes);
 v1.route('/matches-history', matchesHistoryRoutes);
