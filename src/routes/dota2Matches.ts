@@ -3,7 +3,7 @@
  * All logic (cache, SWR, rate limit, logo proxy) is in createMatchesRouter.
  */
 import { createMatchesRouter } from '../services/createMatchesRouter';
-import { fetchDota2Matches } from '../services/tipsggScraper';
+import { fetchDota2Matches } from '../services/matchFeed';
 import { liveScoresStore } from '../services/liveScoresStore';
 import { join } from 'node:path';
 

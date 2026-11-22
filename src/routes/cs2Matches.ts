@@ -7,7 +7,8 @@
  *   2. tips.gg (fallback — Puppeteer scraper, 30-80s)
  */
 import { createMatchesRouter } from '../services/createMatchesRouter';
-import { fetchCs2Matches, type TipsGgMatch } from '../services/tipsggScraper';
+import { fetchCs2Matches } from '../services/matchFeed';
+import type { TipsGgMatch } from '../services/tipsggScraper';
 import { cstestLiveScoresStore } from '../services/hltv/cstestClient';
 import { fetchCstestMatches } from '../services/hltv/cstestClient';
 import { lookupHltvEventLogo, enrichTournamentLogos } from '../services/hltv/hltvEventsScraper';

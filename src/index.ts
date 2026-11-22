@@ -389,6 +389,8 @@ setTimeout(async () => {
         existingArr = raw.data || [];
       } catch { /* ignore corrupt cache */ }
     }
+    // Liquipedia now gives the schedule: drop the OddsPapi stand-ins cached before it (same matches, other ids)
+    if (tipsgg.some((m: any) => String(m.id).startsWith('lp-'))) existingArr = existingArr.filter((m: any) => !String(m.id).startsWith('op-'));
     const merged = new Map<string, any>();
     for (const m of existingArr) merged.set(m.id, m);
     for (const m of cstest) merged.set(m.id, m);
@@ -661,6 +663,8 @@ function startFullRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: string)
               existing = raw.data || [];
             }
           } catch { /* stale */ }
+          // Liquipedia now gives the schedule: drop the OddsPapi stand-ins cached before it (same matches, other ids)
+          if (fresh.some((m: any) => String(m.id).startsWith('lp-'))) existing = existing.filter((m: any) => !String(m.id).startsWith('op-'));
           const merged = new Map<string, any>(existing.map((m: any) => [m.id, m]));
           for (const m of fresh) {
             if (merged.has(m.id)) { merged.set(m.id, { ...merged.get(m.id), ...m }); continue; }
