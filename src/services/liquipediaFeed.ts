@@ -121,19 +121,40 @@ function writeCache(game: 'cs2' | 'dota2', data: TipsGgMatch[]): void {
   } catch { /* memory copy is enough */ }
 }
 
+/** Why a page gave 0 matches: size and the most frequent CSS classes, so a layout change can be fixed from the log. */
+function describeHtml(html: string): string {
+  const freq = new Map<string, number>();
+  for (const m of html.matchAll(/class="([^"]+)"/g)) for (const c of m[1].split(/\s+/)) if (c) freq.set(c, (freq.get(c) || 0) + 1);
+  const top = [...freq].sort((a, b) => b[1] - a[1]).slice(0, 25).map(([c, n]) => `${c}:${n}`).join(' ');
+  return `len=${html.length} match-info=${(html.match(/match-info"/g) || []).length} timer=${(html.match(/timer-object/g) || []).length} | ${top} | head=${html.slice(0, 200).replace(/\s+/g, ' ')}`;
+}
+
+/** Pages that carry the match ticker, tried in order (Liquipedia has renamed it before). */
+const TICKER_PAGES = ['Liquipedia:Matches', 'Liquipedia:Upcoming_and_ongoing_matches'];
+
 async function fetchTicker(game: 'cs2' | 'dota2'): Promise<TipsGgMatch[] | null> {
-  const url = `https://liquipedia.net/${WIKI[game]}/api.php?${new URLSearchParams({ action: 'parse', page: 'Liquipedia:Matches', format: 'json', prop: 'text', formatversion: '2' })}`;
+  // runs inside limited(): the next page waits the 31 s gap here (calling limited() again would wait on itself)
+  for (let i = 0; i < TICKER_PAGES.length; i++) {
+    if (i > 0) { await new Promise((r) => setTimeout(r, PARSE_GAP_MS)); lastCall = Date.now(); }
+    const list = await fetchPage(game, TICKER_PAGES[i]);
+    if (list?.length) return list;
+  }
+  return null;
+}
+
+async function fetchPage(game: 'cs2' | 'dota2', page: string): Promise<TipsGgMatch[] | null> {
+  const url = `https://liquipedia.net/${WIKI[game]}/api.php?${new URLSearchParams({ action: 'parse', page, format: 'json', prop: 'text' })}`;
   try {
     const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT, 'Accept-Encoding': 'gzip', Accept: 'application/json' }, signal: AbortSignal.timeout(30_000) });
-    if (!res.ok) { console.warn(`[liquipedia] ${game} → HTTP ${res.status}`); return null; }
+    if (!res.ok) { console.warn(`[liquipedia] ${game} ${page} → HTTP ${res.status}`); return null; }
     const json: any = await res.json();
-    if (json?.error) { console.warn(`[liquipedia] ${game} → ${json.error.code}: ${json.error.info}`); return null; }
+    if (json?.error) { console.warn(`[liquipedia] ${game} ${page} → ${json.error.code}: ${json.error.info}`); return null; }
     const html: string = typeof json?.parse?.text === 'string' ? json.parse.text : json?.parse?.text?.['*'] || '';
     const list = parseTicker(html, game);
-    if (!list.length) { console.warn(`[liquipedia] ${game} → 0 matches parsed (page layout changed?)`); return null; }
+    if (!list.length) { console.warn(`[liquipedia] ${game} ${page} → 0 matches parsed: ${describeHtml(html)}`); return null; }
     return list;
   } catch (e) {
-    console.warn(`[liquipedia] ${game} failed:`, (e as Error).message);
+    console.warn(`[liquipedia] ${game} ${page} failed:`, (e as Error).message);
     return null;
   }
 }
