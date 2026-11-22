@@ -79,15 +79,19 @@ describe('POST /admin/payments/:id/receipt/send', () => {
 
 describe('Telegram group moderation', () => {
   it('lists groups with status counts', async () => {
+    // the route loads every group once and counts / filters in memory (2nd query = bet stats)
     query
-      .mockResolvedValueOnce({ rows: [{ id: GROUP, name: 'CS2 Prognoz', moderationStatus: 'pending' }] })
-      .mockResolvedValueOnce({ rows: [{ status: 'pending', count: 1 }, { status: 'approved', count: 4 }] });
+      .mockResolvedValueOnce({ rows: [
+        { id: GROUP, name: 'CS2 Prognoz', link: 'https://t.me/cs2prognoz', moderationStatus: 'pending' },
+        { id: 'g2', name: 'Dota Daily', link: 'https://t.me/dotadaily', moderationStatus: 'approved' },
+      ] })
+      .mockResolvedValueOnce({ rows: [] });
     const res = await app().request('/admin/telegram-groups?status=pending&q=cs2');
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.groups).toHaveLength(1);
-    expect(body.counts).toEqual({ pending: 1, approved: 4, rejected: 0, all: 5 });
-    expect(query.mock.calls[0][1]).toEqual(['pending', 'cs2', 0]);
+    expect(body.groups[0].name).toBe('CS2 Prognoz');
+    expect(body.counts).toMatchObject({ pending: 1, approved: 1, rejected: 0, all: 2 });
   });
   it('validates the status filter', async () => {
     expect((await app().request('/admin/telegram-groups?status=bogus')).status).toBe(400);
