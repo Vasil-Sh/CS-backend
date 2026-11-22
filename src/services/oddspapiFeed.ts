@@ -2,9 +2,13 @@
 // OddsPapi — schedule + bookmaker odds for CS2 and Dota 2 (replaces tips.gg).
 //
 // Free plan = 250 requests / month, so every call is budgeted:
-//   • discovery  — /v4/fixtures per game, once a day        (~2/day)
-//   • odds       — /v4/odds-by-tournaments, every 6 hours   (~4/day)
-//   → ~180 requests / month, the rest is slack for restarts.
+//   • schedule — /v4/fixtures per game, once a day (names, times, status)   ~2/day
+//   • odds     — /v4/odds-by-tournaments, every 12 h: max 5 tournaments and
+//                exactly one bookmaker (Pinnacle) per call, so only the
+//                tournaments playing in the next 36 h, ≤ 10 of them            ≤4/day
+//   → ≤ ~180 requests / month, the rest is slack for restarts.
+// Endpoint cooldowns (fixtures 2 s, odds 1 s) are respected; a failed call
+// backs that endpoint off for 3 h so a broken request can't drain the quota.
 // Everything is cached in .cache/oddspapi.json so a restart does not refetch,
 // and a monthly counter there stops all calls at ODDSPAPI_MONTHLY_BUDGET.
 //
@@ -21,7 +25,12 @@ const BASE = 'https://api.oddspapi.io/v4';
 const SPORT: Record<'cs2' | 'dota2', number> = { cs2: 17, dota2: 16 };
 const H = 60 * 60 * 1000;
 const DISCOVERY_EVERY_MS = 24 * H;
-const ODDS_EVERY_MS = Number(process.env.ODDSPAPI_ODDS_EVERY_H || 6) * H;
+const ODDS_EVERY_MS = Number(process.env.ODDSPAPI_ODDS_EVERY_H || 12) * H;
+const ODDS_BOOKMAKER = (process.env.ODDSPAPI_BOOKMAKER || 'pinnacle').trim();
+const MAX_ODDS_TOURNAMENTS = 10; // 2 calls of 5
+const FAIL_BACKOFF_MS = 3 * H;
+/** Minimum gap between two calls to the same endpoint (OddsPapi cooldowns + margin). */
+const COOLDOWN: Record<string, number> = { '/fixtures': 2500, '/odds-by-tournaments': 1500 };
 const MONTHLY_BUDGET = Number(process.env.ODDSPAPI_MONTHLY_BUDGET || 230);
 const CACHE_FILE = join(process.cwd(), '.cache', 'oddspapi.json');
 /** Bookmakers to read the match price from, in order of preference. */
@@ -55,7 +64,9 @@ export interface RawFixture {
 interface CacheShape {
   month: string; // YYYY-MM the counter belongs to
   used: number; // requests spent this month
-  discoveredAt: number;
+  discoveredAt: number; // legacy, unused
+  discovered: Record<'cs2' | 'dota2', number>;
+  failedAt: Record<string, number>; // endpoint → last failure (backoff)
   oddsAt: number;
   marketsAt: number;
   winnerMarkets: string[];
@@ -65,7 +76,7 @@ interface CacheShape {
 
 const emptyCache = (): CacheShape => ({
   month: new Date().toISOString().slice(0, 7),
-  used: 0, discoveredAt: 0, oddsAt: 0, marketsAt: 0,
+  used: 0, discoveredAt: 0, discovered: { cs2: 0, dota2: 0 }, failedAt: {}, oddsAt: 0, marketsAt: 0,
   winnerMarkets: [], tournaments: { cs2: [], dota2: [] }, fixtures: {},
 });
 
@@ -98,41 +109,49 @@ export function budgetLeft(): number {
 let exhaustedUntil = 0;
 const nextMonthStart = () => { const d = new Date(); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1); };
 
+const lastCall: Record<string, number> = {};
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 /** One billable GET. Returns null on any failure (logged, counted in the parser breaker). */
-async function get<T>(path: string, params: Record<string, string | number | boolean>): Promise<T | null> {
+async function get<T>(path: string, params: Record<string, string | number | boolean>, retry = true): Promise<T | null> {
   const key = (process.env.ODDSPAPI_KEY || '').trim();
   if (!key || Date.now() < exhaustedUntil || isOpen(ODDSPAPI_PARSER)) return null;
-  if (budgetLeft() <= 0) { console.warn('[oddspapi] monthly budget spent — skipping', path); return null; }
-  const qs = new URLSearchParams({ ...Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)])), apiKey: key });
   const c = load();
+  if (Date.now() - (c.failedAt[path] || 0) < FAIL_BACKOFF_MS) return null;
+  if (budgetLeft() <= 0) { console.warn('[oddspapi] monthly budget spent — skipping', path); return null; }
+  const wait = (lastCall[path] || 0) + (COOLDOWN[path] ?? 1500) - Date.now();
+  if (wait > 0) await sleep(wait);
+  lastCall[path] = Date.now();
+  const qs = new URLSearchParams({ ...Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)])), apiKey: key });
   c.used++;
   save();
+  const fail = (why: string) => { console.warn(`[oddspapi] ${path} ${why}`); c.failedAt[path] = Date.now(); save(); recordFailure(ODDSPAPI_PARSER); return null; };
   try {
     const res = await fetch(`${BASE}${path}?${qs}`, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(20_000) });
     if (res.status === 429) {
       const body: any = await res.json().catch(() => ({}));
-      const code = body?.error?.code || body?.code || '';
-      if (/REQUEST_LIMIT_EXCEEDED/i.test(JSON.stringify(body))) {
+      const text = JSON.stringify(body);
+      if (/REQUEST_LIMIT_EXCEEDED/i.test(text)) {
         exhaustedUntil = nextMonthStart();
         console.warn('[oddspapi] monthly quota exhausted — paused until', new Date(exhaustedUntil).toISOString());
-      } else {
-        console.warn('[oddspapi] rate limited', path, code);
+        recordFailure(ODDSPAPI_PARSER);
+        return null;
       }
-      recordFailure(ODDSPAPI_PARSER);
-      return null;
+      // per-endpoint cooldown: wait what the API asks and try once more
+      const retryMs = Number(body?.error?.retryMs ?? body?.retryMs) || 2500;
+      if (retry) { await sleep(Math.min(retryMs, 10_000) + 300); return get<T>(path, params, false); }
+      return fail('rate limited twice');
     }
     if (!res.ok) {
-      console.warn(`[oddspapi] ${path} → HTTP ${res.status}`);
-      recordFailure(ODDSPAPI_PARSER);
-      return null;
+      const body = (await res.text().catch(() => '')).replace(key, '***').slice(0, 300);
+      return fail(`→ HTTP ${res.status} ${body}`);
     }
     const json = (await res.json()) as T;
+    delete c.failedAt[path];
     recordSuccess(ODDSPAPI_PARSER);
     return json;
   } catch (e) {
-    console.warn(`[oddspapi] ${path} failed:`, (e as Error).message);
-    recordFailure(ODDSPAPI_PARSER);
-    return null;
+    return fail(`failed: ${(e as Error).message}`);
   }
 }
 
@@ -165,31 +184,45 @@ export function pickWinnerMarkets(rows: any[]): string[] {
   return [...ids];
 }
 
-/** Daily: which tournaments of each game have fixtures with odds in the next 9 days. */
+/** Daily per game: schedule for the next 9 days (names, times, status, tournaments). */
 async function discover(c: CacheShape): Promise<void> {
-  if (Date.now() - c.discoveredAt < DISCOVERY_EVERY_MS && (c.tournaments.cs2.length || c.tournaments.dota2.length)) return;
-  const from = day(Date.now() - 12 * H), to = day(Date.now() + 9 * 24 * H);
-  let any = false;
+  const from = new Date(Date.now() - 12 * H).toISOString(), to = new Date(Date.now() + 9 * 24 * H).toISOString(); // < 10 days
   for (const game of ['cs2', 'dota2'] as const) {
-    const rows = asArray<RawFixture>(await get('/fixtures', { sportId: SPORT[game], from, to, hasOdds: true }));
-    if (!rows.length) continue;
-    any = true;
-    c.tournaments[game] = [...new Set(rows.map((f) => f.tournamentId).filter((x): x is number => typeof x === 'number'))];
-    for (const f of rows) if (f.fixtureId) c.fixtures[f.fixtureId] = { ...c.fixtures[f.fixtureId], ...f, sportId: f.sportId ?? SPORT[game] };
+    if (Date.now() - (c.discovered[game] || 0) < DISCOVERY_EVERY_MS) continue;
+    const rows = await get<unknown>('/fixtures', { sportId: SPORT[game], from, to });
+    if (rows === null) continue; // failed — retried after the backoff
+    const list = asArray<RawFixture>(rows);
+    for (const f of list) if (f.fixtureId) c.fixtures[f.fixtureId] = { ...c.fixtures[f.fixtureId], ...f, sportId: f.sportId ?? SPORT[game] };
+    c.tournaments[game] = [...new Set(list.map((f) => f.tournamentId).filter((x): x is number => typeof x === 'number'))];
+    c.discovered[game] = Date.now();
+    save();
   }
-  if (any) c.discoveredAt = Date.now();
-  save();
 }
 
-/** Every 6 h: odds (and fresh status / names) for all fixtures of the known tournaments — one request. */
+/** Tournaments worth odds now: fixtures starting within the next 36 h, busiest first. */
+export function oddsTournaments(fixtures: RawFixture[], now = Date.now(), max = MAX_ODDS_TOURNAMENTS): number[] {
+  const n = new Map<number, number>();
+  for (const f of fixtures) {
+    const t = Date.parse(f.startTime || '');
+    if (typeof f.tournamentId !== 'number' || !(t > now - 2 * H && t < now + 36 * H) || f.statusId === 2 || f.statusId === 3) continue;
+    n.set(f.tournamentId, (n.get(f.tournamentId) || 0) + 1);
+  }
+  return [...n].sort((a, b) => b[1] - a[1]).slice(0, max).map(([id]) => id);
+}
+
+/** Every 12 h: Pinnacle odds for the tournaments playing soon — 5 tournaments per call. */
 async function refreshOdds(c: CacheShape): Promise<void> {
   if (Date.now() - c.oddsAt < ODDS_EVERY_MS) return;
-  const ids = [...c.tournaments.cs2, ...c.tournaments.dota2];
+  const ids = oddsTournaments(Object.values(c.fixtures));
   if (!ids.length) return;
-  const rows = asArray<RawFixture>(await get('/odds-by-tournaments', { tournamentIds: ids.slice(0, 60).join(',') }));
-  if (!rows.length) return;
-  for (const f of rows) if (f.fixtureId) c.fixtures[f.fixtureId] = { ...c.fixtures[f.fixtureId], ...f };
-  c.oddsAt = Date.now();
+  let ok = false;
+  for (let i = 0; i < ids.length; i += 5) {
+    const rows = await get<unknown>('/odds-by-tournaments', { tournamentIds: ids.slice(i, i + 5).join(','), bookmaker: ODDS_BOOKMAKER });
+    if (rows === null) break;
+    ok = true;
+    for (const f of asArray<RawFixture>(rows)) if (f.fixtureId) c.fixtures[f.fixtureId] = { ...c.fixtures[f.fixtureId], ...f };
+  }
+  if (ok) c.oddsAt = Date.now();
   // forget fixtures older than 3 days
   const cutoff = Date.now() - 3 * 24 * H;
   for (const [id, f] of Object.entries(c.fixtures)) if (f.startTime && Date.parse(f.startTime) < cutoff) delete c.fixtures[id];
@@ -287,10 +320,10 @@ export async function fetchOddsPapiMatches(game: 'cs2' | 'dota2'): Promise<TipsG
 }
 
 /** For the admin «Парсери» screen. */
-export function oddspapiUsage(): { used: number; budget: number; oddsAt: number; discoveredAt: number } {
+export function oddspapiUsage(): { used: number; budget: number; oddsAt: number; discovered: Record<'cs2' | 'dota2', number> } {
   const c = load();
   budgetLeft();
-  return { used: c.used, budget: MONTHLY_BUDGET, oddsAt: c.oddsAt, discoveredAt: c.discoveredAt };
+  return { used: c.used, budget: MONTHLY_BUDGET, oddsAt: c.oddsAt, discovered: c.discovered };
 }
 
 /** Tests only. */

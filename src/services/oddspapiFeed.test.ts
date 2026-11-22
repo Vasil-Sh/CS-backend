@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pickWinnerMarkets, toMatch, winnerPrices, type RawFixture } from './oddspapiFeed';
+import { oddsTournaments, pickWinnerMarkets, toMatch, winnerPrices, type RawFixture } from './oddspapiFeed';
 import { applySeries, buildSeries } from './opendotaScores';
 
 const inHours = (h: number) => new Date(Date.now() + h * 3_600_000).toISOString();
@@ -48,6 +48,14 @@ describe('OddsPapi → match', () => {
     expect(toMatch(fixture({ statusId: 3 }), ['171'])).toBeNull();
     expect(toMatch(fixture({ startTime: inHours(-1) }), ['171'])!.status).toBe('live');
     expect(toMatch(fixture({ startTime: inHours(-7), statusId: 1 }), ['171'])!.status).toBe('finished');
+  });
+
+  it('asks odds only for tournaments playing in the next 36 h, busiest first, at most 10', () => {
+    const fx = (id: string, t: number, h: number, statusId = 0) => fixture({ fixtureId: id, tournamentId: t, startTime: inHours(h), statusId });
+    const list = [fx('a', 1, 3), fx('b', 2, 5), fx('c', 2, 8), fx('d', 3, 60), fx('e', 4, -5), fx('f', 5, 2, 3)];
+    expect(oddsTournaments(list)).toEqual([2, 1]);
+    const many = Array.from({ length: 14 }, (_, i) => fx(`m${i}`, 100 + i, 4));
+    expect(oddsTournaments(many)).toHaveLength(10);
   });
 
   it('finds full-match winner markets by name, not map or handicap ones', () => {
