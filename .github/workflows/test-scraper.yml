@@ -1,8 +1,7 @@
 name: Test Dota 2 Scraper
 
 on:
-  schedule:
-    - cron: '0 6 * * *'  # Daily at 6 AM UTC
+  # tips.gg blocks us at Cloudflare and the feed now uses OddsPapi — run by hand only.
   workflow_dispatch:
 
 jobs:
@@ -13,9 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9
+      - uses: pnpm/action-setup@v4  # version comes from packageManager in package.json
       
       - uses: actions/setup-node@v4
         with:
@@ -49,7 +46,7 @@ jobs:
           }
           
           console.log('PASS:', matches.length, 'matches,', today, 'live/upcoming,', withCoeffs, 'with coeffs');
-        "
+          "
         env:
           NODE_ENV: test
       
