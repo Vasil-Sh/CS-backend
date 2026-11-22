@@ -18,6 +18,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordFailure, recordSuccess, isOpen } from './circuitBreaker';
+import { pool } from '../db/client';
 import type { TipsGgMatch } from './tipsggScraper';
 
 export const ODDSPAPI_PARSER = 'oddspapi';
@@ -89,12 +90,47 @@ function load(): CacheShape {
   cache = cache || emptyCache();
   return cache;
 }
+// Railway gives every deploy a fresh disk, so the file alone was lost on each push and the
+// next start re-spent ~5 requests (markets + 2 schedules + odds). The same JSON is kept in
+// Postgres (app_settings, not one of the admin's settings keys) and read back on start.
+const DB_KEY = 'feed_oddspapi_cache';
+let dbTimer: NodeJS.Timeout | null = null;
 function save(): void {
   try {
     mkdirSync(join(process.cwd(), '.cache'), { recursive: true });
     writeFileSync(CACHE_FILE, JSON.stringify(cache));
   } catch (e) {
     console.warn('[oddspapi] cache write failed:', (e as Error).message);
+  }
+  if (dbTimer) return;
+  dbTimer = setTimeout(() => {
+    dbTimer = null;
+    pool.query(
+      `INSERT INTO app_settings(key, value) VALUES($1, $2)
+       ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+      [DB_KEY, JSON.stringify(cache)],
+    ).catch((e) => console.warn('[oddspapi] cache → db failed:', (e as Error).message));
+  }, 2_000);
+  dbTimer.unref?.();
+}
+
+let hydrated = false;
+/** On start: take the cache saved in Postgres when it is newer than the local file (or there is no file). */
+async function hydrate(): Promise<void> {
+  if (hydrated) return;
+  hydrated = true;
+  try {
+    const { rows } = await pool.query<{ value: string }>('SELECT value FROM app_settings WHERE key = $1', [DB_KEY]);
+    if (!rows[0]?.value) return;
+    const db = { ...emptyCache(), ...JSON.parse(rows[0].value) } as CacheShape;
+    const local = load();
+    const stamp = (c: CacheShape) => Math.max(c.oddsAt || 0, c.discovered?.cs2 || 0, c.discovered?.dota2 || 0, c.marketsAt || 0);
+    if (stamp(db) >= stamp(local) || db.used > local.used) {
+      cache = db;
+      console.log(`[oddspapi] cache restored from db (${db.used} requests used in ${db.month})`);
+    }
+  } catch (e) {
+    console.warn('[oddspapi] cache ← db failed:', (e as Error).message);
   }
 }
 
@@ -235,6 +271,7 @@ export async function refreshOddsPapi(): Promise<void> {
   if (!oddspapiEnabled()) return;
   if (inflight) return inflight;
   inflight = (async () => {
+    await hydrate();
     const c = load();
     await resolveWinnerMarkets(c);
     await discover(c);
