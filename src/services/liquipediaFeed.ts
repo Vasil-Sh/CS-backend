@@ -27,27 +27,44 @@ const cacheFile = (game: 'cs2' | 'dota2') => join(process.cwd(), '.cache', `liqu
 
 const slug = (s: string) => s.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
-/** Liquipedia's «Liquipedia:Matches» ticker HTML → matches in the shape the backend uses. */
+/** Liquipedia's «Liquipedia:Matches» ticker HTML → matches in the shape the backend uses.
+ *  Two layouts: the older «match-info» blocks and the 2026 «match-ticker-card» cards. */
 export function parseTicker(html: string, game: 'cs2' | 'dota2', now = Date.now()): TipsGgMatch[] {
   const $ = cheerio.load(html);
   const seen = new Map<string, TipsGgMatch>();
-  $('.match-info').each((_, el) => {
+  $('.match-info, .match-ticker-card').each((_, el) => {
     const b = $(el);
+    if (b.parents('.match-ticker-card').length) return; // a .match-info inside a card — the card is parsed itself
     const timer = b.find('.timer-object').first();
     const ts = Number(timer.attr('data-timestamp'));
     if (!ts) return;
-    const opps = b.find('.match-info-header-opponent');
+    const opps = b.find('.match-info-header-opponent, .match-ticker-card__opponent');
     if (opps.length < 2) return;
     const name = (i: number) => {
       const o = opps.eq(i);
       const title = (o.find('a[title]').first().attr('title') || '').replace(/\s*\(page does not exist\)\s*$/, '').trim();
-      return title || o.find('.name').first().text().trim();
+      return title || o.find('.team-name, .name').first().text().trim();
     };
     const t1 = name(0), t2 = name(1);
     if (!t1 || !t2 || /^tbd$/i.test(t1) || /^tbd$/i.test(t2)) return;
-    const scores = b.find('.match-info-header-scoreholder-score').map((_, s) => Number($(s).text().trim())).get();
+    // series score: old layout has two .match-info-header-scoreholder-score; the card layout keeps
+    // a score element per opponent (any class with «score» in it) — read whichever is there
+    let scores = b.find('.match-info-header-scoreholder-score').map((_, x) => Number($(x).text().trim())).get();
+    if (scores.length !== 2) {
+      scores = [0, 1].map((i) => {
+        const x = opps.eq(i).find('[class*="score"]').last();
+        const t = x.text().trim();
+        return x.length && /^\d+$/.test(t) ? Number(t) : NaN;
+      });
+    }
+    if (scores.some((n) => !Number.isFinite(n))) {
+      const sc = b.find('[class*="score"]').filter((_, x) => /^\d+\s*[:\-–]\s*\d+$/.test($(x).text().trim())).first().text().trim();
+      const mm = sc.match(/^(\d+)\s*[:\-–]\s*(\d+)$/);
+      if (mm) scores = [Number(mm[1]), Number(mm[2])];
+    }
     const hasScore = scores.length === 2 && scores.every((n) => Number.isFinite(n));
-    const bo = (b.find('.match-info-header-scoreholder-lower').first().text().match(/bo\s*(\d+)/i) || [])[1];
+    const bo = (b.find('.match-info-header-scoreholder-lower').first().text().match(/bo\s*(\d+)/i)
+      || b.text().match(/\(\s*bo\s*(\d+)\s*\)|\bbo(\d)\b/i) || []).slice(1).find(Boolean);
     const finished = timer.attr('data-finished') === 'finished';
     const start = new Date(ts * 1000);
     const status: TipsGgMatch['status'] = finished ? 'finished' : start.getTime() <= now ? 'live' : 'upcoming';
@@ -64,7 +81,7 @@ export function parseTicker(html: string, game: 'cs2' | 'dota2', now = Date.now(
       nameTeam2: t2,
       logoTeam1: null,
       logoTeam2: null,
-      tournament: b.find('.match-info-tournament-name').first().text().trim(),
+      tournament: b.find('.match-info-tournament-name, .match-ticker-card-tournament-name').first().text().trim(),
       stage: '',
       status,
       tipsCount: 0,
@@ -129,6 +146,18 @@ function describeHtml(html: string): string {
   return `len=${html.length} match-info=${(html.match(/match-info"/g) || []).length} timer=${(html.match(/timer-object/g) || []).length} | ${top} | head=${html.slice(0, 200).replace(/\s+/g, ' ')}`;
 }
 
+let sampled = false;
+/** Once per start: one finished card's markup (images stripped) and what we read from it — to check scores / BO. */
+function logSampleOnce(html: string, game: string, list: TipsGgMatch[]): void {
+  if (sampled || !list.length) return;
+  sampled = true;
+  const $ = cheerio.load(html);
+  const card = $('.match-ticker-card').filter((_, x) => $(x).find('[data-finished="finished"]').length > 0).first();
+  const fin = list.filter((m) => m.status === 'finished');
+  console.log(`[liquipedia] ${game}: ${list.length} matches (${fin.length} finished, ${fin.filter((m) => m.score1 != null).length} with score) · e.g. ${JSON.stringify(fin[0] ? [fin[0].nameTeam1, fin[0].score1, fin[0].score2, fin[0].nameTeam2, fin[0].type] : null)}`);
+  if (card.length) console.log(`[liquipedia] sample card: ${($.html(card) || '').replace(/<img[^>]*>/g, '<img>').replace(/\s+/g, ' ').slice(0, 1800)}`);
+}
+
 /** Pages that carry the match ticker, tried in order (Liquipedia has renamed it before). */
 const TICKER_PAGES = ['Liquipedia:Matches', 'Liquipedia:Upcoming_and_ongoing_matches'];
 
@@ -151,6 +180,7 @@ async function fetchPage(game: 'cs2' | 'dota2', page: string): Promise<TipsGgMat
     if (json?.error) { console.warn(`[liquipedia] ${game} ${page} → ${json.error.code}: ${json.error.info}`); return null; }
     const html: string = typeof json?.parse?.text === 'string' ? json.parse.text : json?.parse?.text?.['*'] || '';
     const list = parseTicker(html, game);
+    logSampleOnce(html, game, list);
     if (!list.length) { console.warn(`[liquipedia] ${game} ${page} → 0 matches parsed: ${describeHtml(html)}`); return null; }
     return list;
   } catch (e) {

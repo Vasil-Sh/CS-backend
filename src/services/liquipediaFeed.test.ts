@@ -55,4 +55,17 @@ describe('Liquipedia ticker', () => {
     expect(addOdds([g2], [odds])).toBe(1);
     expect(g2).toMatchObject({ coeff1: 1.55, coeff2: 2.4, performer: 'G2 Esports' });
   });
+
+  it('reads the 2026 «match-ticker-card» layout too', () => {
+    const opp = (name: string, score: string, win = false) =>
+      `<div class="match-ticker-card__opponent${win ? ' winner' : ''}"><div class="block-team"><span class="team-template-image-icon"><a href="/dota2/${name}" title="${name}"><img/></a></span><span class="name team-name"><a title="${name}">${name}</a></span></div><span class="match-ticker-card__opponent-score">${score}</span></div>`;
+    const card = (ts: number, fin: boolean, a: string, b: string, sa: string, sb: string) =>
+      `<div class="match-ticker-card"><div class="match-ticker-card__header"><span class="match-info-countdown"><span class="timer-object" data-timestamp="${ts}"${fin ? ' data-finished="finished"' : ''}>x</span></span><span>Bo3</span></div>` +
+      `<div class="match-ticker-card__opponents">${opp(a, sa, fin)}${opp(b, sb)}</div>` +
+      `<div class="match-ticker-card-tournament"><span class="match-ticker-card-tournament-name"><a><span>DreamLeague S28</span></a></span></div></div>`;
+    const l = parseTicker(card(s - 9000, true, 'Team Liquid', 'Tundra Esports', '2', '1') + card(s + 3600, false, 'OG', 'Gaimin Gladiators', '', ''), 'dota2', now);
+    expect(l).toHaveLength(2);
+    expect(l[0]).toMatchObject({ nameTeam1: 'Team Liquid', score1: 2, score2: 1, status: 'finished', type: 'BO3', tournament: 'DreamLeague S28' });
+    expect(l[1]).toMatchObject({ nameTeam1: 'OG', score1: null, status: 'upcoming' });
+  });
 });
