@@ -51,10 +51,12 @@ export function parseTicker(html: string, game: 'cs2' | 'dota2', now = Date.now(
     // a score element per opponent (any class with «score» in it) — read whichever is there
     let scores = b.find('.match-info-header-scoreholder-score').map((_, x) => Number($(x).text().trim())).get();
     if (scores.length !== 2) {
+      // card layout: <div class="match-ticker-card__opponent"><div class="block-team">…</div><div>2</div></div>
       scores = [0, 1].map((i) => {
-        const x = opps.eq(i).find('[class*="score"]').last();
-        const t = x.text().trim();
-        return x.length && /^\d+$/.test(t) ? Number(t) : NaN;
+        const o = opps.eq(i);
+        const x = o.children().not('.block-team').last();
+        const t = (x.length ? x : o.find('[class*="score"]').last()).text().trim();
+        return /^\d+$/.test(t) ? Number(t) : NaN;
       });
     }
     if (scores.some((n) => !Number.isFinite(n))) {
