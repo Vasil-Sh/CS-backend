@@ -56,7 +56,7 @@ import cs2MatchesRoutes from './routes/cs2Matches';
 import publicProfileRoutes from './routes/publicProfile';
 import matchesHistoryRoutes from './routes/matchesHistory';
 import { closeBrowser } from './services/tipsggScraper';
-import { fetchDota2Matches, fetchCs2Matches, fetchTodayMatches } from './services/tipsggScraper';
+import { fetchDota2Matches, fetchCs2Matches, fetchTodayMatches, feedPaused } from './services/matchFeed';
 import { enrichTournamentLogos } from './services/hltv/hltvEventsScraper';
 import { join } from 'node:path';
 import { readFileSync, existsSync } from 'node:fs';
@@ -470,7 +470,6 @@ setTimeout(() => {
 import { normalizeTeam, isSameMatch } from './utils/matchUtils.js';
 import { validateScores, needsScoreBackfill } from './utils/scoreValidation.js';
 import { isIdle, IDLE_POLL_MS } from './services/activityTracker.js';
-import { isBanned } from './services/tipsggScraper.js';
 
 function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: string): void {
   // For CS2, cstest is primary — never add new matches from tips.gg (prevents duplicates).
@@ -480,7 +479,7 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
 
   const tick = async () => {
     // Skip tips.gg fetch if idle or banned — don't waste requests
-    if (isIdle() || isBanned()) {
+    if (isIdle() || feedPaused()) {
       // Still schedule next tick, but at slower rate
       setTimeout(tick, IDLE_POLL_MS).unref();
       return;
@@ -644,7 +643,7 @@ const FULL_REFRESH_MS = 4 * 60 * 60 * 1000; // 4 hours
 
 function startFullRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: string): void {
   const tick = async () => {
-    if (isBanned()) {
+    if (feedPaused()) {
       // Skip if banned — try again in 4h
       setTimeout(tick, FULL_REFRESH_MS).unref();
       return;
@@ -663,7 +662,22 @@ function startFullRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: string)
             }
           } catch { /* stale */ }
           const merged = new Map<string, any>(existing.map((m: any) => [m.id, m]));
-          for (const m of fresh) merged.set(m.id, m);
+          for (const m of fresh) {
+            if (merged.has(m.id)) { merged.set(m.id, { ...merged.get(m.id), ...m }); continue; }
+            // Another source (cstest / HLTV) may already have this match under its own id:
+            // then only add what it lacks — odds and tournament name.
+            const same = [...merged.values()].find((x: any) => x.date === m.date && isSameMatch(x, m));
+            if (same) {
+              if (m.coeff1 != null && m.coeff2 != null) {
+                const swapped = normalizeTeam(same.nameTeam1) !== normalizeTeam(m.nameTeam1);
+                same.coeff1 = swapped ? m.coeff2 : m.coeff1;
+                same.coeff2 = swapped ? m.coeff1 : m.coeff2;
+              }
+              if (!same.tournament && m.tournament) same.tournament = m.tournament;
+              continue;
+            }
+            merged.set(m.id, m);
+          }
           // Enrich tournament logos from HLTV (tips.gg 404s for minor events)
           const enriched = await enrichTournamentLogos([...merged.values()]);
           if (enriched > 0) console.log(`[full-refresh] ${tag}: ${enriched} HLTV logos`);

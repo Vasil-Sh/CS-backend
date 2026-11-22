@@ -2,6 +2,12 @@ import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { pool } from '../db/client';
 import { listCircuits, pauseInfo, pauseParser, resetCircuit, resumeParser } from '../services/circuitBreaker';
+import { oddspapiEnabled } from '../services/oddspapiFeed';
+
+/** Parsers shown on the admin screen: OddsPapi + OpenDota replace tips.gg once ODDSPAPI_KEY is set. */
+const knownParsers = () => (oddspapiEnabled()
+  ? ['oddspapi', 'opendota', 'hltv_scraper']
+  : ['tipsgg_fetch_cs2_matches', 'tipsgg_fetch_dota2_matches', 'hltv_scraper']);
 
 const parsers = new Hono();
 
@@ -22,7 +28,7 @@ parsers.get('/admin/parsers', requireAuth, requireAdmin, async (c) => {
   );
 
   // Merge known parser sources even if they never failed.
-  const known = ['tipsgg_fetch_cs2_matches', 'tipsgg_fetch_dota2_matches', 'hltv_scraper'];
+  const known = knownParsers();
   const merged = known.map((name) => {
     const circuit = circuits.find((x) => x.name === name);
     const fail = failureMap.get(name);
@@ -49,7 +55,7 @@ parsers.post('/admin/parsers/:name/rerun', requireAuth, requireAdmin, async (c) 
   return c.json({ success: true });
 });
 
-const KNOWN = new Set(['tipsgg_fetch_cs2_matches', 'tipsgg_fetch_dota2_matches', 'hltv_scraper']);
+const KNOWN = new Set(['tipsgg_fetch_cs2_matches', 'tipsgg_fetch_dota2_matches', 'hltv_scraper', 'oddspapi', 'opendota']);
 function audit(actor: { userId: number; username: string }, action: string, target: string, details: Record<string, unknown>): void {
   void pool
     .query(`INSERT INTO admin_audit_log(actor_id, actor_name, action, target, details, status) VALUES($1,$2,$3,$4,$5,'success')`,
