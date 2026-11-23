@@ -82,6 +82,8 @@ interface CacheShape {
   winnerMarkets: string[];
   tournaments: Record<'cs2' | 'dota2', number[]>;
   fixtures: Record<string, RawFixture>; // by fixtureId, latest data
+  /** OddsPapi's own count from /v4/account (free call): every request on the key, ours or not. */
+  account?: { limit: number; count: number; at: number };
   /** First winner prices seen per fixture — the opening line, to show how it moved. */
   opening?: Record<string, { c1: number; c2: number; at: number }>;
 }
@@ -145,12 +147,43 @@ async function hydrate(): Promise<void> {
   }
 }
 
-/** Requests left this month by our own count (resets on the 1st, like OddsPapi's quota). */
+/** Requests left this month. OddsPapi's own figure (/v4/account) when we have a fresh one — it also counts
+ *  calls made outside this server (tests in the browser, older deploys) — else our own count. */
 export function budgetLeft(): number {
   const c = load();
   const month = new Date().toISOString().slice(0, 7);
-  if (c.month !== month) { c.month = month; c.used = 0; save(); }
-  return MONTHLY_BUDGET - c.used;
+  if (c.month !== month) { c.month = month; c.used = 0; if (c.account) c.account = { ...c.account, count: 0 }; save(); }
+  const acc = c.account && c.account.at > Date.parse(`${month}-01T00:00:00Z`) ? c.account : null;
+  // between two /account reads, add what we spent since the last one
+  return acc ? acc.limit - acc.count - Math.max(0, c.used - (accUsedAt ?? c.used)) : MONTHLY_BUDGET - c.used;
+}
+let accUsedAt: number | null = null; // our `used` when /account was last read
+
+/** Find a numeric field anywhere in the /account answer (object, array of subscriptions or nested). */
+function findNum(v: unknown, key: string): number | null {
+  if (!v || typeof v !== 'object') return null;
+  if (!Array.isArray(v) && typeof (v as any)[key] === 'number') return (v as any)[key];
+  for (const x of Array.isArray(v) ? v : Object.values(v)) { const n = findNum(x, key); if (n != null) return n; }
+  return null;
+}
+
+/** OddsPapi's own request count — /v4/account is free and answers even when the quota is spent. At most every 10 min. */
+async function syncAccount(force = false): Promise<void> {
+  const key = (process.env.ODDSPAPI_KEY || '').trim();
+  const c = load();
+  if (!key || (!force && c.account && Date.now() - c.account.at < 10 * 60_000)) return;
+  try {
+    const res = await fetch(`${BASE}/account?${new URLSearchParams({ apiKey: key })}`, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15_000) });
+    if (!res.ok) { console.warn(`[oddspapi] /account → HTTP ${res.status}`); return; }
+    const json = await res.json();
+    const limit = findNum(json, 'request_limit'), count = findNum(json, 'request_count');
+    if (limit == null || count == null) { console.warn('[oddspapi] /account: no request_limit / request_count in', JSON.stringify(json).slice(0, 300)); return; }
+    c.account = { limit, count, at: Date.now() };
+    accUsedAt = c.used;
+    save();
+  } catch (e) {
+    console.warn('[oddspapi] /account failed:', (e as Error).message);
+  }
 }
 
 let exhaustedUntil = 0;
@@ -322,15 +355,18 @@ export async function refreshOddsPapi(): Promise<void> {
   if (inflight) return inflight;
   inflight = (async () => {
     await hydrate();
+    await syncAccount();
     const c = load();
     if ((c.ver || 0) < CACHE_VER) {
       // fixed request shape / winner markets → fetch schedule and odds once more instead of waiting a day
       c.ver = CACHE_VER; c.discovered = { cs2: 0, dota2: 0 }; c.oddsAt = 0; c.marketsAt = 0; c.failedAt = {};
       save();
     }
+    const before = c.used;
     await resolveWinnerMarkets(c);
     await discover(c);
     await refreshOdds(c);
+    if (c.used > before) await syncAccount(true); // spent some — read the real count back
   })().finally(() => { inflight = null; });
   return inflight;
 }
@@ -417,7 +453,7 @@ const diagOf = (c: CacheShape): NonNullable<CacheShape['diag']> =>
   c.diag || { fixtures: { cs2: 0, dota2: 0 }, fixturesAt: 0, oddsTournaments: 0, oddsRows: 0, oddsAt: 0 };
 
 /** For the admin «Парсери» card: what OddsPapi has right now, from the cache (no API call). */
-export function oddspapiDiag(): { used: number; budget: number; scheduled: number; priced: number; fixturesAt: number; oddsAt: number; nextOddsAt: number; oddsTournaments: number } {
+export function oddspapiDiag(): { used: number; budget: number; accountAt: number; scheduled: number; priced: number; fixturesAt: number; oddsAt: number; nextOddsAt: number; oddsTournaments: number } {
   const c = load();
   budgetLeft();
   const now = Date.now(), winner = withFallback(c.winnerMarkets);
@@ -426,7 +462,9 @@ export function oddspapiDiag(): { used: number; budget: number; scheduled: numbe
   const d = diagOf(c);
   const ids = oddsTournaments(Object.values(c.fixtures));
   const nextOddsAt = ids.length && c.oddsAt ? c.oddsAt + oddsEveryMs(budgetLeft(), ids.length) : 0;
-  return { used: c.used, budget: MONTHLY_BUDGET, scheduled: soon.length, priced, fixturesAt: d.fixturesAt || Math.max(c.discovered.cs2 || 0, c.discovered.dota2 || 0), oddsAt: c.oddsAt, nextOddsAt, oddsTournaments: d.oddsTournaments };
+  const left = budgetLeft();
+  const budget = c.account?.limit ?? MONTHLY_BUDGET;
+  return { used: Math.max(0, budget - left), budget, accountAt: c.account?.at || 0, scheduled: soon.length, priced, fixturesAt: d.fixturesAt || Math.max(c.discovered.cs2 || 0, c.discovered.dota2 || 0), oddsAt: c.oddsAt, nextOddsAt, oddsTournaments: d.oddsTournaments };
 }
 
 /** For the admin «Парсери» screen. */
