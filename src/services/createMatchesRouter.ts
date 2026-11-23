@@ -559,6 +559,13 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
         }
       }
 
+      // A finished match with 0:0 has no known result (Liquipedia often enters tier-2/3 scores late; a match
+      // finished by the time limit keeps the score from its start) — «—:—» instead of a fake 0:0.
+      // The real score fills in later (needsScoreBackfill), and bet hints skip it meanwhile.
+      for (const m of data) {
+        if (m.status === 'finished' && !m.score1 && !m.score2) { m.score1 = null; m.score2 = null; }
+      }
+
       // Filter out matches from past days (date < today).
       // Today's finished matches are still returned — frontend handles auto-hide.
       const today = new Date().toISOString().split('T')[0];
