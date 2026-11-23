@@ -168,6 +168,17 @@ export class AdminStatsService {
            JOIN users u ON u.id = p.user_id
            WHERE p.status='recorded' AND p.user_id IS NOT NULL AND u.role='user'
              AND p.period_end >= date_trunc('month', (now() AT TIME ZONE 'Europe/Kyiv')::date) - INTERVAL '5 months'
+             -- only periods that are really over (a period ending later this month is not churn yet)
+             AND p.period_end < (now() AT TIME ZONE 'Europe/Kyiv')::date
+           UNION ALL
+           -- users who never paid (trial only): their access ended and nobody renewed —
+           -- the same people the all-time «churned» counts, so the month bars match the totals
+           SELECT u.id, u.end_date, false
+           FROM users u
+           WHERE u.role='user' AND u.end_date IS NOT NULL
+             AND u.end_date < (now() AT TIME ZONE 'Europe/Kyiv')::date
+             AND u.end_date >= date_trunc('month', (now() AT TIME ZONE 'Europe/Kyiv')::date) - INTERVAL '5 months'
+             AND NOT EXISTS (SELECT 1 FROM admin_payments p WHERE p.user_id=u.id AND p.status='recorded')
          )
          SELECT to_char(period_end, 'YYYY-MM') AS month,
                 COUNT(*) FILTER (WHERE NOT renewed)::int AS ended,
