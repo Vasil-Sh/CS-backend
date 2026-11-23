@@ -8,7 +8,8 @@ import { pool } from '../db/client';
 import type { TipsGgMatch } from './tipsggScraper';
 
 export type Game = 'cs2' | 'dota2';
-export type MatchStatus = 'upcoming' | 'live' | 'finished' | 'postponed' | 'cancelled';
+/** 'hidden' — «Видалити матч» for a feed match: it is dropped from the schedule (undo = delete the override). */
+export type MatchStatus = 'upcoming' | 'live' | 'finished' | 'postponed' | 'cancelled' | 'hidden';
 export type LinkDecision = 'pending' | 'merged' | 'different';
 export type ParserEventKind = 'success' | 'failure' | 'rerun';
 
@@ -68,7 +69,7 @@ export interface ParserEvent {
 }
 
 const GAME_RE = /^(cs2|dota2)$/;
-const STATUS_RE = /^(upcoming|live|finished|postponed|cancelled)$/;
+const STATUS_RE = /^(upcoming|live|finished|postponed|cancelled|hidden)$/;
 const DECISION_RE = /^(pending|merged|different)$/;
 
 function cleanGame(game: unknown): Game | null {
@@ -89,6 +90,10 @@ export function makeLinkKey(game: string, team1: string, team2: string, date: st
 }
 
 export interface HiddenTeam { id: number; game: string; name: string; createdBy: string; createdAt: string }
+export interface DistinctTeam { id: number; game: string; name: string; variant: string; createdBy: string; createdAt: string }
+function rowToDistinct(r: any): DistinctTeam {
+  return { id: Number(r.id), game: r.game, name: r.name, variant: r.variant, createdBy: r.created_by || '', createdAt: new Date(r.created_at).toISOString() };
+}
 function rowToHiddenTeam(r: any): HiddenTeam {
   return { id: Number(r.id), game: r.game, name: r.name, createdBy: r.created_by || '', createdAt: new Date(r.created_at).toISOString() };
 }
@@ -216,6 +221,32 @@ export const adminMatchesService = {
       [game, name, String(input.createdBy || '').slice(0, 100)],
     );
     return rowToHiddenTeam(rows[0]);
+  },
+
+  // «Різні команди»: a feed spelling that is not this team — no longer flagged as a duplicate
+  async listDistinct(): Promise<DistinctTeam[]> {
+    const { rows } = await pool.query('SELECT * FROM team_distinct ORDER BY game, name, variant');
+    return rows.map(rowToDistinct);
+  },
+
+  async addDistinct(input: { game: string; name: string; variant: string; createdBy: string }): Promise<DistinctTeam> {
+    const game = cleanGame(input.game);
+    if (!game) throw new Error('Невідома гра');
+    const name = String(input.name || '').trim().slice(0, 200);
+    const variant = String(input.variant || '').trim().slice(0, 200);
+    if (!name || !variant) throw new Error('Назва й написання обов’язкові');
+    const { rows } = await pool.query(
+      `INSERT INTO team_distinct(game, name, variant, created_by) VALUES($1,$2,$3,$4)
+       ON CONFLICT (game, name, variant) DO UPDATE SET created_by = EXCLUDED.created_by
+       RETURNING *`,
+      [game, name, variant, String(input.createdBy || '').slice(0, 100)],
+    );
+    return rowToDistinct(rows[0]);
+  },
+
+  async deleteDistinct(id: number): Promise<boolean> {
+    const { rowCount } = await pool.query('DELETE FROM team_distinct WHERE id = $1', [id]);
+    return (rowCount ?? 0) > 0;
   },
 
   async unhideTeam(id: number): Promise<HiddenTeam | null> {
@@ -415,6 +446,8 @@ export const adminMatchesService = {
         if (o.startDate) { m.startDate = o.startDate; m.date = o.startDate.slice(0, 10); }
         matches[i] = m;
       }
+      // «Видалити матч»: hidden by an admin — out of the schedule (in place: callers keep their array)
+      for (let i = matches.length - 1; i >= 0; i--) if (overrideMap.get(matches[i].id)?.status === 'hidden') matches.splice(i, 1);
 
       // Same window as the feed: today (UTC) and later.
       const today = new Date().toISOString().slice(0, 10);

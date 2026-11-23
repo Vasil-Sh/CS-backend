@@ -92,6 +92,34 @@ matches.delete('/admin/team-aliases/:id', requireAuth, requireAdmin, async (c) =
   return c.json({ success: true });
 });
 
+// «Команди → Дублікати → Різні команди»
+matches.get('/admin/team-distinct', requireAuth, requireAdmin, async (c) => {
+  return c.json({ pairs: await adminMatchesService.listDistinct() });
+});
+
+matches.post('/admin/team-distinct', requireAuth, requireAdmin, async (c) => {
+  const actor = c.get('user');
+  const b = await c.req.json().catch(() => null);
+  if (!b || typeof b !== 'object') return c.json({ error: 'Invalid body' }, 400);
+  try {
+    const pair = await adminMatchesService.addDistinct({ game: String(b.game || ''), name: String(b.name || ''), variant: String(b.variant || ''), createdBy: actor.username });
+    audit(actor, 'POST', '/admin/team-distinct', { game: pair.game, name: pair.name, variant: pair.variant });
+    return c.json(pair, 201);
+  } catch (e: any) {
+    return c.json({ error: e?.message || 'Не вдалося зберегти' }, 400);
+  }
+});
+
+matches.delete('/admin/team-distinct/:id', requireAuth, requireAdmin, async (c) => {
+  const actor = c.get('user');
+  const id = parseInt(c.req.param('id') || '', 10);
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: 'Invalid id' }, 400);
+  const ok = await adminMatchesService.deleteDistinct(id);
+  if (!ok) return c.json({ error: 'Не знайдено' }, 404);
+  audit(actor, 'DELETE', `/admin/team-distinct/${id}`, {});
+  return c.json({ success: true });
+});
+
 // ══════════════════════════ Manual matches ══════════════════════════
 
 matches.get('/admin/manual-matches', requireAuth, requireAdmin, async (c) => {
