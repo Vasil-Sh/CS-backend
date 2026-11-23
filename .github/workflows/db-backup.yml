@@ -39,8 +39,8 @@ jobs:
         run: |
           set -euo pipefail
           name="matchiq-$(date -u +%Y-%m-%d).sql.gz.gpg"
-          # pg_dump 17 reads any older server; custom-free plain SQL so it restores with psql
-          docker run --rm -e DB postgres:17 sh -c 'pg_dump --no-owner --no-privileges "$DB"' \
+          # pg_dump must be at least the server version (Railway: Postgres 18); plain SQL so it restores with psql
+          docker run --rm -e DB postgres:18 sh -c 'pg_dump --no-owner --no-privileges "$DB"' \
             | gzip -9 \
             | gpg --batch --yes --pinentry-mode loopback --passphrase "$PASS" --symmetric --cipher-algo AES256 -o "$name"
           size=$(stat -c %s "$name")
