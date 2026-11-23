@@ -16,18 +16,29 @@ import { normalizeTeam } from '../utils/matchUtils';
 /** Kept for callers: the Liquipedia feed is the only one now. */
 export const usingNewFeed = () => true;
 
+/** Same team under two sources' spellings: equal once «Team», «Esports», «Gaming», «Club», dots and case
+ *  are dropped («Lynn Vision Gaming» / «Lynn Vision», «Team Spirit» / «Spirit»). No prefix guessing —
+ *  «MOUZ» and «MOUZ NXT» are different teams. */
+export function sameTeam(x: string, y: string): boolean {
+  const n = (v: string) => normalizeTeam(v.replace(/\b(e-?sports?|club|clan)\b/gi, ' '));
+  const a = n(x), b = n(y);
+  return !!a && a === b;
+}
+
 /** Put OddsPapi odds (and tournament name if missing) onto Liquipedia matches: same teams, start within 6 h. */
 export function addOdds(base: TipsGgMatch[], odds: TipsGgMatch[]): number {
   let n = 0;
   for (const m of base) {
-    const a = normalizeTeam(m.nameTeam1), b = normalizeTeam(m.nameTeam2), t = Date.parse(m.startDate);
+    const t = Date.parse(m.startDate);
+    let swapped = false;
     const o = odds.find((x) => {
-      const x1 = normalizeTeam(x.nameTeam1), x2 = normalizeTeam(x.nameTeam2);
-      return ((x1 === a && x2 === b) || (x1 === b && x2 === a)) && Math.abs(Date.parse(x.startDate) - t) < 6 * 3_600_000;
+      if (Math.abs(Date.parse(x.startDate) - t) >= 6 * 3_600_000) return false;
+      if (sameTeam(m.nameTeam1, x.nameTeam1) && sameTeam(m.nameTeam2, x.nameTeam2)) { swapped = false; return true; }
+      if (sameTeam(m.nameTeam1, x.nameTeam2) && sameTeam(m.nameTeam2, x.nameTeam1)) { swapped = true; return true; }
+      return false;
     });
     if (!o) continue;
     if (o.coeff1 != null && o.coeff2 != null) {
-      const swapped = normalizeTeam(o.nameTeam1) !== a;
       m.coeff1 = swapped ? o.coeff2 : o.coeff1;
       m.coeff2 = swapped ? o.coeff1 : o.coeff2;
       m.performer = m.coeff1! < m.coeff2! ? m.nameTeam1 : m.nameTeam2;
@@ -47,12 +58,17 @@ async function withDotaScores(list: TipsGgMatch[]): Promise<TipsGgMatch[]> {
   return list;
 }
 
+/** How many of our matches got OddsPapi prices in the last feed build — for the admin «Парсери» card. */
+const matched: Record<'cs2' | 'dota2', number> = { cs2: 0, dota2: 0 };
+export const oddsMatched = () => ({ ...matched });
+
 /** Liquipedia schedule + OddsPapi odds (OddsPapi spends a request only when its 12-h / daily schedule is due). */
 async function newFeed(game: 'cs2' | 'dota2', spendOddsPapi: boolean): Promise<TipsGgMatch[]> {
   const odds = !oddspapiEnabled() ? [] : spendOddsPapi ? await fetchOddsPapiMatches(game) : cachedMatches(game);
   const lp = await fetchLiquipediaMatches(game);
   const list = lp.length ? lp : odds; // Liquipedia down → OddsPapi's own schedule
-  if (lp.length && odds.length) addOdds(list, odds);
+  if (lp.length && odds.length) matched[game] = addOdds(list, odds);
+  else if (lp.length) matched[game] = 0;
   return game === 'dota2' ? withDotaScores(list) : list;
 }
 

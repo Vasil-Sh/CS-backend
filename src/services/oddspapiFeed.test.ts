@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { oddsTournaments, pickWinnerMarkets, toMatch, winnerPrices, type RawFixture } from './oddspapiFeed';
 import { applySeries, buildSeries } from './opendotaScores';
+import { addOdds, sameTeam } from './matchFeed';
 
 const inHours = (h: number) => new Date(Date.now() + h * 3_600_000).toISOString();
 const fixture = (o: Partial<RawFixture> = {}): RawFixture => ({
@@ -67,6 +68,25 @@ describe('OddsPapi → match', () => {
       { marketId: 160, marketName: 'Winner', sportId: 16 },
     ];
     expect(pickWinnerMarkets(rows)).toEqual(['171', '160']);
+  });
+});
+
+describe('OddsPapi odds → our matches', () => {
+  it('knows the same team under both sources\' spellings, not different teams', () => {
+    expect(sameTeam('Lynn Vision Gaming', 'Lynn Vision')).toBe(true);
+    expect(sameTeam('Team Spirit', 'Spirit')).toBe(true);
+    expect(sameTeam('9z Team', '9z Esports')).toBe(true);
+    expect(sameTeam('HEROIC', 'Heroic')).toBe(true);
+    expect(sameTeam('Natus Vincere', 'Natus Vincere Esport')).toBe(true);
+    expect(sameTeam('NAVI', 'FaZe')).toBe(false);
+    expect(sameTeam('MOUZ', 'MOUZ NXT')).toBe(false);
+  });
+
+  it('prices a Dota 2 match from the winner market 161 even when /markets resolved only CS2', () => {
+    const op = toMatch(fixture({ sportId: 16, participant1Name: 'Team Spirit', participant2Name: 'Tundra', bookmakerOdds: { pinnacle: { markets: { '161': { outcomes: { '161': { players: { '0': { price: 1.6 } } }, '162': { players: { '0': { price: 2.3 } } } } } } } } }), ['171', '161'])!;
+    const ours = { ...op, id: 'lp-1', coeff1: null, coeff2: null, performer: null, nameTeam1: 'Tundra Esports', nameTeam2: 'Spirit' };
+    expect(addOdds([ours], [op])).toBe(1);
+    expect(ours).toMatchObject({ coeff1: 2.3, coeff2: 1.6, performer: 'Spirit' });
   });
 });
 
