@@ -16,6 +16,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordFailure, recordSuccess, isOpen } from './circuitBreaker';
 import type { TipsGgMatch } from './tipsggScraper';
+import { pool } from '../db/client';
 
 export const LIQUIPEDIA_PARSER = 'liquipedia';
 const WIKI: Record<'cs2' | 'dota2', string> = { cs2: 'counterstrike', dota2: 'dota2' };
@@ -132,12 +133,44 @@ function readCache(game: 'cs2' | 'dota2'): Cached | null {
   } catch { /* corrupt — refetch */ }
   return null;
 }
-function writeCache(game: 'cs2' | 'dota2', data: TipsGgMatch[]): void {
+function writeCache(game: 'cs2' | 'dota2', fresh: TipsGgMatch[]): TipsGgMatch[] {
+  // The ticker drops a match soon after it ends: keep today's finished ones we already had, so «матчів сьогодні» does not shrink
+  const today = new Date().toISOString().slice(0, 10);
+  const ids = new Set(fresh.map((m) => m.id));
+  const kept = (mem[game]?.data || []).filter((m) => m.date === today && m.status === 'finished' && !ids.has(m.id));
+  const data = kept.length ? [...fresh, ...kept].sort((a, b) => Date.parse(a.startDate) - Date.parse(b.startDate)) : fresh;
   mem[game] = { at: Date.now(), data };
   try {
     mkdirSync(join(process.cwd(), '.cache'), { recursive: true });
     writeFileSync(cacheFile(game), JSON.stringify(mem[game]));
   } catch { /* memory copy is enough */ }
+  // Railway's disk is wiped on every deploy: keep a copy in Postgres too, so a failed first fetch after a deploy
+  // still shows the last schedule (not just OddsPapi's few matches)
+  pool.query(
+    `INSERT INTO app_settings(key, value) VALUES($1, $2) ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+    [DB_KEY(game), JSON.stringify(mem[game])],
+  ).catch((e) => console.warn(`[liquipedia] ${game} cache → db failed:`, (e as Error).message));
+  return data;
+}
+
+const DB_KEY = (game: 'cs2' | 'dota2') => `feed_liquipedia_${game}`;
+const hydrated: Partial<Record<'cs2' | 'dota2', boolean>> = {};
+/** On the first call after start: the copy in Postgres when it is newer than the local file (or there is none). */
+async function hydrate(game: 'cs2' | 'dota2'): Promise<void> {
+  if (hydrated[game]) return;
+  hydrated[game] = true;
+  try {
+    const { rows } = await pool.query<{ value: string }>('SELECT value FROM app_settings WHERE key = $1', [DB_KEY(game)]);
+    if (!rows[0]?.value) return;
+    const db = JSON.parse(rows[0].value) as Cached;
+    const local = readCache(game);
+    if (Array.isArray(db?.data) && (!local || db.at > local.at)) {
+      mem[game] = db;
+      console.log(`[liquipedia] ${game}: ${db.data.length} matches restored from db (${Math.round((Date.now() - db.at) / 60000)} min old)`);
+    }
+  } catch (e) {
+    console.warn(`[liquipedia] ${game} cache ← db failed:`, (e as Error).message);
+  }
 }
 
 /** Why a page gave 0 matches: size and the most frequent CSS classes, so a layout change can be fixed from the log. */
@@ -193,12 +226,13 @@ async function fetchPage(game: 'cs2' | 'dota2', page: string): Promise<TipsGgMat
 
 /** Matches for one game: from cache when fresher than 5 min, otherwise one (rate-limited) API call. */
 export async function fetchLiquipediaMatches(game: 'cs2' | 'dota2'): Promise<TipsGgMatch[]> {
+  await hydrate(game);
   const cached = readCache(game);
   const fresh = cached && Date.now() - cached.at < REFRESH_MS;
   if (fresh || isOpen(LIQUIPEDIA_PARSER) || Date.now() - (failedAt[game] || 0) < FAIL_BACKOFF_MS) return withTimeStatus(cached?.data || []);
   if (!inflight[game]) {
     inflight[game] = limited(() => fetchTicker(game)).then((list) => {
-      if (list) { writeCache(game, list); recordSuccess(LIQUIPEDIA_PARSER); delete failedAt[game]; return list; }
+      if (list) { const data = writeCache(game, list); recordSuccess(LIQUIPEDIA_PARSER); delete failedAt[game]; return data; }
       failedAt[game] = Date.now();
       recordFailure(LIQUIPEDIA_PARSER);
       return cached?.data || [];
