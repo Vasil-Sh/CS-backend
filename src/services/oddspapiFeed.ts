@@ -82,6 +82,8 @@ interface CacheShape {
   winnerMarkets: string[];
   tournaments: Record<'cs2' | 'dota2', number[]>;
   fixtures: Record<string, RawFixture>; // by fixtureId, latest data
+  /** First winner prices seen per fixture — the opening line, to show how it moved. */
+  opening?: Record<string, { c1: number; c2: number; at: number }>;
 }
 
 const emptyCache = (): CacheShape => ({
@@ -293,6 +295,14 @@ async function refreshOdds(c: CacheShape): Promise<void> {
     got += list.length;
     for (const f of list) if (f.fixtureId) c.fixtures[f.fixtureId] = { ...c.fixtures[f.fixtureId], ...f };
   }
+  // opening line: the first prices each fixture got (kept until the fixture is forgotten)
+  const winner = withFallback(c.winnerMarkets);
+  c.opening ||= {};
+  for (const [id, f] of Object.entries(c.fixtures)) {
+    if (c.opening[id]) continue;
+    const p = winnerPrices(f, winner);
+    if (p.coeff1 != null && p.coeff2 != null) c.opening[id] = { c1: p.coeff1, c2: p.coeff2, at: Date.now() };
+  }
   if (ok) {
     c.oddsAt = Date.now();
     c.diag = { ...diagOf(c), oddsTournaments: ids.length, oddsRows: got, oddsAt: Date.now() };
@@ -301,7 +311,7 @@ async function refreshOdds(c: CacheShape): Promise<void> {
   }
   // forget fixtures older than 3 days
   const cutoff = Date.now() - 3 * 24 * H;
-  for (const [id, f] of Object.entries(c.fixtures)) if (f.startTime && Date.parse(f.startTime) < cutoff) delete c.fixtures[id];
+  for (const [id, f] of Object.entries(c.fixtures)) if (f.startTime && Date.parse(f.startTime) < cutoff) { delete c.fixtures[id]; delete c.opening?.[id]; }
   save();
 }
 
@@ -346,7 +356,7 @@ export function winnerPrices(f: RawFixture, winnerMarkets: string[]): { coeff1: 
 }
 
 /** OddsPapi fixture → the match shape the rest of the backend already uses (tips.gg's). */
-export function toMatch(f: RawFixture, winnerMarkets: string[]): TipsGgMatch | null {
+export function toMatch(f: RawFixture, winnerMarkets: string[], opening?: { c1: number; c2: number }): TipsGgMatch | null {
   if (!f.fixtureId || !f.startTime || !f.participant1Name || !f.participant2Name) return null;
   if (f.statusId === 3) return null; // cancelled
   const start = new Date(f.startTime);
@@ -381,6 +391,8 @@ export function toMatch(f: RawFixture, winnerMarkets: string[]): TipsGgMatch | n
     positionTeam1: null,
     positionTeam2: null,
     tournamentLogo: null,
+    openCoeff1: opening?.c1 ?? null,
+    openCoeff2: opening?.c2 ?? null,
   };
 }
 
@@ -390,7 +402,7 @@ export function cachedMatches(game: 'cs2' | 'dota2'): TipsGgMatch[] {
   const winner = withFallback(c.winnerMarkets);
   return Object.values(c.fixtures)
     .filter((f) => (f.sportId ?? 0) === SPORT[game] || (!f.sportId && c.tournaments[game].includes(f.tournamentId ?? -1)))
-    .map((f) => toMatch(f, winner))
+    .map((f) => toMatch(f, winner, c.opening?.[f.fixtureId]))
     .filter((m): m is TipsGgMatch => !!m)
     .sort((a, b) => a.startDate.localeCompare(b.startDate));
 }

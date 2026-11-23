@@ -15,6 +15,7 @@ import * as cheerio from 'cheerio';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordFailure, recordSuccess, isOpen } from './circuitBreaker';
+import { normalizeTeam } from '../utils/matchUtils';
 import type { TipsGgMatch } from './matchTypes';
 import { pool } from '../db/client';
 
@@ -31,6 +32,14 @@ const USER_AGENT = (process.env.LIQUIPEDIA_USER_AGENT || 'MatchIQ/1.0 (+https://
 const cacheFile = (game: 'cs2' | 'dota2') => join(process.cwd(), '.cache', `liquipedia_${game}.json`);
 
 const slug = (s: string) => s.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+
+/** Absolute URL of a Liquipedia image (src is «/commons/images/…» or protocol-relative). */
+export function lpUrl(src: string | undefined): string | null {
+  if (!src || /filler|placeholder|logo_?unknown|Logo_filler/i.test(src)) return null;
+  if (src.startsWith('//')) return `https:${src}`;
+  if (src.startsWith('/')) return `https://liquipedia.net${src}`;
+  return /^https?:\/\//.test(src) ? src : null;
+}
 
 /** Liquipedia's «Liquipedia:Matches» ticker HTML → matches in the shape the backend uses.
  *  Two layouts: the older «match-info» blocks and the 2026 «match-ticker-card» cards. */
@@ -51,6 +60,15 @@ export function parseTicker(html: string, game: 'cs2' | 'dota2', now = Date.now(
       return title || o.find('.team-name, .name').first().text().trim();
     };
     const t1 = name(0), t2 = name(1);
+    // team logo: the light-mode icon when the page carries both, else the first image
+    const logo = (i: number) => {
+      const o = opps.eq(i);
+      const im = o.find('.team-template-lightmode img').first().length ? o.find('.team-template-lightmode img').first() : o.find('img').first();
+      return lpUrl(im.attr('src') || im.attr('data-src'));
+    };
+    const tourBox = b.find('.match-info-tournament, .match-ticker-card-tournament').first();
+    const tourHref = tourBox.find('a[href]').first().attr('href') || '';
+    const tourPage = decodeURIComponent(tourHref.replace(/^.*?\/(counterstrike|dota2)\//, '').split('#')[0]);
     if (!t1 || !t2 || /^tbd$/i.test(t1) || /^tbd$/i.test(t2)) return;
     // series score: old layout has two .match-info-header-scoreholder-score; the card layout keeps
     // a score element per opponent (any class with «score» in it) — read whichever is there
@@ -86,8 +104,8 @@ export function parseTicker(html: string, game: 'cs2' | 'dota2', now = Date.now(
       score2: hasScore ? scores[1] : null,
       nameTeam1: t1,
       nameTeam2: t2,
-      logoTeam1: null,
-      logoTeam2: null,
+      logoTeam1: logo(0),
+      logoTeam2: logo(1),
       tournament: b.find('.match-info-tournament-name, .match-ticker-card-tournament-name').first().text().trim(),
       stage: '',
       status,
@@ -100,7 +118,8 @@ export function parseTicker(html: string, game: 'cs2' | 'dota2', now = Date.now(
       coeff2: null,
       positionTeam1: null,
       positionTeam2: null,
-      tournamentLogo: null,
+      tournamentLogo: lpUrl(tourBox.find('img').first().attr('src')),
+      ...(tourPage && !/^https?:/.test(tourPage) ? { tournamentPage: tourPage } : {}),
     };
     // the page lists a match in both «upcoming» and «recent» around its start — keep the most advanced copy
     const prev = seen.get(id);
@@ -137,13 +156,23 @@ function readCache(game: 'cs2' | 'dota2'): Cached | null {
   } catch { /* corrupt — refetch */ }
   return null;
 }
+const noScore = (m: TipsGgMatch) => m.status === 'finished' && (m.score1 == null || m.score2 == null);
+
 function writeCache(game: 'cs2' | 'dota2', fresh: TipsGgMatch[]): TipsGgMatch[] {
-  // The ticker drops a match soon after it ends: keep today's finished ones we already had, so «матчів сьогодні» does not shrink
+  // The ticker drops a match soon after it ends: keep today's finished ones we already had, so «матчів сьогодні» does not shrink —
+  // and finished ones still without a score (up to 36 h), so the score lookup below can fill them in
   const today = new Date().toISOString().slice(0, 10);
   const ids = new Set(fresh.map((m) => m.id));
-  const kept = (mem[game]?.data || []).filter((m) => m.date === today && m.status === 'finished' && !ids.has(m.id));
+  const old = new Map((mem[game]?.data || []).map((m) => [m.id, m]));
+  const kept = [...old.values()].filter((m) => !ids.has(m.id) && m.status === 'finished' && (m.date === today || (noScore(m) && Date.parse(m.startDate) > Date.now() - 36 * 3_600_000)));
+  // a score found on the tournament page stays while the ticker still shows the match without one
+  for (const m of fresh) { const o = old.get(m.id); if (noScore(m) && o && !noScore(o)) { m.score1 = o.score1; m.score2 = o.score2; } }
   const data = kept.length ? [...fresh, ...kept].sort((a, b) => Date.parse(a.startDate) - Date.parse(b.startDate)) : fresh;
-  mem[game] = { at: Date.now(), data };
+  return persist(game, data);
+}
+
+function persist(game: 'cs2' | 'dota2', data: TipsGgMatch[], at = Date.now()): TipsGgMatch[] {
+  mem[game] = { at, data };
   try {
     mkdirSync(join(process.cwd(), '.cache'), { recursive: true });
     writeFileSync(cacheFile(game), JSON.stringify(mem[game]));
@@ -244,12 +273,82 @@ export function runSummary(game: 'cs2' | 'dota2', list: TipsGgMatch[]): string {
   return `${game === 'cs2' ? 'CS2' : 'Dota 2'} · ${n} ${w}${live ? ` · ${live} live` : ''}${fin ? ` · ${fin} завершено` : ''}`;
 }
 
+// ── Final score for finished matches the ticker left at «—:—» ──
+const BACKFILL_EVERY_MS = 60 * 60_000;
+const BACKFILL_AFTER_MS = 3 * 3_600_000; // started 3 h ago → over for about an hour
+const BACKFILL_PAGES = 3; // per run: each page waits the 31 s gap
+const lastBackfill: Partial<Record<'cs2' | 'dota2', number>> = {};
+const tk = (v: string) => normalizeTeam(v.replace(/\b(e-?sports?|club|clan)\b/gi, ' '));
+
+/** Results on a tournament page: bracket matches and group match lists → team names and series score. */
+export function parseResults(html: string): { team1: string; team2: string; score1: number; score2: number }[] {
+  const $ = cheerio.load(html);
+  const out: { team1: string; team2: string; score1: number; score2: number }[] = [];
+  $('.brkts-match, .brkts-matchlist-match, .match-row, .bracket-game').each((_, el) => {
+    const opps = $(el).find('.brkts-opponent-entry, .brkts-matchlist-opponent, .bracket-team-top, .bracket-team-bottom');
+    if (opps.length < 2) return;
+    const side = (i: number) => {
+      const o = opps.eq(i);
+      const name = (o.attr('aria-label') || o.find('[data-highlightingclass]').first().attr('data-highlightingclass') || o.attr('data-highlightingclass')
+        || o.find('a[title]').first().attr('title') || o.find('.name, .team-template-text').first().text() || '').replace(/\s*\(page does not exist\)\s*$/, '').trim();
+      const scoreEl = o.find('.brkts-opponent-score-inner, .brkts-matchlist-score, .bracket-score').first();
+      const sc = (scoreEl.length ? scoreEl : o.siblings('.brkts-matchlist-score').eq(i)).text().trim();
+      return { name, score: /^\d+$/.test(sc) ? Number(sc) : NaN };
+    };
+    const a = side(0), b = side(1);
+    if (!a.name || !b.name || !Number.isFinite(a.score) || !Number.isFinite(b.score) || a.score + b.score === 0) return;
+    out.push({ team1: a.name, team2: b.name, score1: a.score, score2: b.score });
+  });
+  return out;
+}
+
+/** Once an hour: finished matches still without a score, looked up on their tournament page (≤ 3 pages a run). */
+async function backfillScores(game: 'cs2' | 'dota2'): Promise<void> {
+  if (Date.now() - (lastBackfill[game] || 0) < BACKFILL_EVERY_MS || isOpen(LIQUIPEDIA_PARSER)) return;
+  const data = mem[game]?.data || [];
+  const todo = data.filter((m) => noScore(m) && m.tournamentPage && Date.parse(m.startDate) < Date.now() - BACKFILL_AFTER_MS);
+  if (!todo.length) return;
+  lastBackfill[game] = Date.now();
+  const pages = [...new Set(todo.map((m) => m.tournamentPage!))].slice(0, BACKFILL_PAGES);
+  let filled = 0;
+  for (const page of pages) {
+    const url = `https://liquipedia.net/${WIKI[game]}/api.php?${new URLSearchParams({ action: 'parse', page, format: 'json', prop: 'text' })}`;
+    const html = await limited(async () => {
+      try {
+        const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT, 'Accept-Encoding': 'gzip', Accept: 'application/json' }, signal: AbortSignal.timeout(30_000) });
+        if (!res.ok) return '';
+        const json: any = await res.json();
+        return typeof json?.parse?.text === 'string' ? json.parse.text : json?.parse?.text?.['*'] || '';
+      } catch { return ''; }
+    });
+    const results = html ? parseResults(html) : [];
+    if (html && !results.length) console.warn(`[liquipedia] ${game} ${page}: no results parsed — ${describeHtml(html)}`);
+    for (const m of todo.filter((x) => x.tournamentPage === page)) {
+      const a = tk(m.nameTeam1), b = tk(m.nameTeam2);
+      const r = results.find((x) => (tk(x.team1) === a && tk(x.team2) === b) || (tk(x.team1) === b && tk(x.team2) === a));
+      if (!r) continue;
+      const same = tk(r.team1) === a;
+      m.score1 = same ? r.score1 : r.score2;
+      m.score2 = same ? r.score2 : r.score1;
+      filled++;
+    }
+  }
+  if (filled) {
+    persist(game, data, mem[game]?.at);
+    recordSuccess(LIQUIPEDIA_PARSER, `${game === 'cs2' ? 'CS2' : 'Dota 2'} · рахунок дібрано зі сторінок турнірів · ${filled} з ${todo.length}`);
+  }
+  console.log(`[liquipedia] ${game}: score backfill — ${filled} of ${todo.length} from ${pages.length} pages`);
+}
+
 /** Matches for one game: from cache when fresher than 5 min, otherwise one (rate-limited) API call. */
 export async function fetchLiquipediaMatches(game: 'cs2' | 'dota2'): Promise<TipsGgMatch[]> {
   await hydrate(game);
   const cached = readCache(game);
   const fresh = cached && (Date.now() - cached.at < REFRESH_MS || (cached.data.length > 0 && Date.now() - STARTED_AT < START_DELAY_MS));
-  if (fresh || isOpen(LIQUIPEDIA_PARSER) || Date.now() - (failedAt[game] || 0) < FAIL_BACKOFF_MS) return withTimeStatus(cached?.data || []);
+  if (fresh || isOpen(LIQUIPEDIA_PARSER) || Date.now() - (failedAt[game] || 0) < FAIL_BACKOFF_MS) {
+    void backfillScores(game).catch((e) => console.warn(`[liquipedia] ${game} backfill failed:`, (e as Error).message));
+    return withTimeStatus(cached?.data || []);
+  }
   if (!inflight[game]) {
     inflight[game] = limited(() => fetchTicker(game)).then(({ list, why }) => {
       if (list) { const data = writeCache(game, list); recordSuccess(LIQUIPEDIA_PARSER, runSummary(game, list)); delete failedAt[game]; return data; }
@@ -258,7 +357,9 @@ export async function fetchLiquipediaMatches(game: 'cs2' | 'dota2'): Promise<Tip
       return cached?.data || [];
     }).finally(() => { delete inflight[game]; });
   }
-  return withTimeStatus(await inflight[game]!);
+  const out = withTimeStatus(await inflight[game]!);
+  void backfillScores(game).catch((e) => console.warn(`[liquipedia] ${game} backfill failed:`, (e as Error).message));
+  return out;
 }
 
 /** Cached copy is up to 5 min old: an upcoming match whose time has come is live.

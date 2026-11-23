@@ -34,6 +34,18 @@ parsers.get('/admin/parsers', requireAuth, requireAdmin, async (c) => {
   ).catch(() => ({ rows: [] as any[] }));
   const okMap = new Map<string, string>(ok.rows.map((r: any) => [r.source, r.last_success ? new Date(r.last_success).toISOString() : '']));
 
+  // Last 7 Kyiv days: successful vs failed runs per day — «Стабільність за 7 днів»
+  const wk = await pool.query(
+    `SELECT source, to_char((created_at AT TIME ZONE 'Europe/Kyiv')::date, 'YYYY-MM-DD') AS day,
+            COUNT(*) FILTER (WHERE event = 'success')::int AS ok, COUNT(*) FILTER (WHERE event = 'failure')::int AS fail
+     FROM parser_events WHERE created_at > now() - INTERVAL '7 days' GROUP BY 1, 2`,
+  ).catch(() => ({ rows: [] as any[] }));
+  const days = Array.from({ length: 7 }, (_, i) => new Date(Date.now() - (6 - i) * 86_400_000).toLocaleDateString('en-CA', { timeZone: 'Europe/Kyiv' }));
+  const weekOf = (name: string) => days.map((day) => {
+    const r = wk.rows.find((x: any) => x.source === name && x.day === day);
+    return { day, ok: Number(r?.ok || 0), fail: Number(r?.fail || 0) };
+  });
+
   // Merge known parser sources even if they never failed.
   const known = knownParsers();
   const merged = known.map((name) => {
@@ -50,6 +62,7 @@ parsers.get('/admin/parsers', requireAuth, requireAdmin, async (c) => {
       failures24h: fail?.count ?? 0,
       lastFailure: fail?.lastFailure ?? (circuit?.lastFailure ? new Date(circuit.lastFailure).toISOString() : ''),
       lastSuccess: okMap.get(name) ?? '',
+      week: weekOf(name),
       // OddsPapi only adds prices: show what it holds and how much of it reached our matches
       ...(name === 'oddspapi' ? { odds: (() => { const d = oddspapiDiag(), m = oddsMatched(); return { ...d, matched: m.cs2 + m.dota2, unmatched: oddsMisses().slice(0, 40), fixturesAt: d.fixturesAt ? new Date(d.fixturesAt).toISOString() : '', oddsAt: d.oddsAt ? new Date(d.oddsAt).toISOString() : '', nextOddsAt: d.nextOddsAt ? new Date(d.nextOddsAt).toISOString() : '' }; })() } : {}),
     };

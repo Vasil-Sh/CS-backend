@@ -72,6 +72,10 @@ export function addOdds(base: TipsGgMatch[], odds: TipsGgMatch[], resolve: Resol
     if (o.coeff1 != null && o.coeff2 != null) {
       m.coeff1 = swapped ? o.coeff2 : o.coeff1;
       m.coeff2 = swapped ? o.coeff1 : o.coeff2;
+      if (o.openCoeff1 != null && o.openCoeff2 != null) {
+        m.openCoeff1 = swapped ? o.openCoeff2 : o.openCoeff1;
+        m.openCoeff2 = swapped ? o.openCoeff1 : o.openCoeff2;
+      }
       m.performer = m.coeff1! < m.coeff2! ? m.nameTeam1 : m.nameTeam2;
       n++;
     }

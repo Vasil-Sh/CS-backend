@@ -26,4 +26,9 @@ export interface TipsGgMatch {
   positionTeam1: number | null; // HLTV ranking position
   positionTeam2: number | null;
   tournamentLogo: string | null; // operator/tournament logo CDN URL
+  /** Liquipedia page of the tournament («PGL/2026/Singapore») — where a missing final score is looked up. */
+  tournamentPage?: string;
+  /** First prices OddsPapi gave for this match — with coeff1/coeff2 they show how the line moved. */
+  openCoeff1?: number | null;
+  openCoeff2?: number | null;
 }

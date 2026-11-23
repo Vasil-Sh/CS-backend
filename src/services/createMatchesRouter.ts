@@ -38,10 +38,13 @@ import type { TeamFormResult } from './teamFormService';
 const teamFormCache = new Map<string, { data: Map<string, TeamFormResult>; ts: number }>();
 
 /** Plain HTTP fetch of an image (no browser): null when the CDN refuses or returns something that is not an image. */
+const LP_UA = (process.env.LIQUIPEDIA_USER_AGENT || 'MatchIQ/1.0 (+https://github.com/Vasil-Sh/cs-backend)').trim();
 async function fetchImage(url: string): Promise<Buffer | null> {
   try {
+    // Liquipedia asks for an identifying User-Agent (its API terms); other CDNs get a browser one
+    const lp = /^https:\/\/liquipedia\.net\//.test(url);
     const resp = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', Accept: 'image/*,*/*;q=0.8', Referer: 'https://tips.gg/' },
+      headers: lp ? { 'User-Agent': LP_UA, Accept: 'image/*,*/*;q=0.8' } : { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', Accept: 'image/*,*/*;q=0.8', Referer: 'https://tips.gg/' },
       signal: AbortSignal.timeout(8_000),
     });
     if (!resp.ok) return null;
@@ -584,6 +587,7 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
         // an admin's logo wins over the feed's own
         m.logoTeam1 = customLogoUrl(m.nameTeam1, prefix) || (m.logoTeam1 ? proxyLogoUrl(m.logoTeam1, prefix) : generateLogoFallback(m.nameTeam1, prefix));
         m.logoTeam2 = customLogoUrl(m.nameTeam2, prefix) || (m.logoTeam2 ? proxyLogoUrl(m.logoTeam2, prefix) : generateLogoFallback(m.nameTeam2, prefix));
+        if (m.tournamentLogo) m.tournamentLogo = proxyLogoUrl(m.tournamentLogo, prefix);
         // Populate ranking positions from the correct local logo store when the
         // source didn't provide them (cstest/tips.gg often omit positions).
         // Filenames encode rank as a numeric prefix ("009_G2.png" → 9).
@@ -890,7 +894,8 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
     // Serve from cache (24h TTL)
     if (existsSync(binCacheFile)) {
       const stat = statSync(binCacheFile);
-      if (Date.now() - stat.mtimeMs < 86400_000) {
+      // Liquipedia file names change when a logo changes, so its images are kept a month (fewer hits on their servers)
+      if (Date.now() - stat.mtimeMs < (externalUrl.includes('liquipedia.net/') ? 30 * 86400_000 : 86400_000)) {
         const buf = readFileSync(binCacheFile);
         const ct = ext === 'svg' ? 'image/svg+xml' : `image/${ext === 'jpg' ? 'jpeg' : ext}`;
         return new Response(buf, {

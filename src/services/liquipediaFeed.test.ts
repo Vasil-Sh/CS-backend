@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseTicker } from './liquipediaFeed';
+import { lpUrl, parseResults, parseTicker } from './liquipediaFeed';
 import { addOdds } from './matchFeed';
 import { toMatch } from './oddspapiFeed';
 
@@ -38,6 +38,25 @@ describe('Liquipedia ticker', () => {
     const spirit = list.filter((m) => m.nameTeam1 === 'Team Spirit');
     expect(spirit).toHaveLength(1);
     expect(spirit[0]).toMatchObject({ status: 'finished', score1: 2, score2: 1 });
+  });
+
+  it('takes team logos, the tournament logo and the tournament page from the ticker', () => {
+    const g2 = list.find((m) => m.nameTeam1 === 'G2 Esports')!;
+    expect(g2.logoTeam1).toBe('https://liquipedia.net/x.png');
+    expect(g2.tournamentPage).toBe('IEM');
+    expect(lpUrl('//liquipedia.net/commons/images/a.png')).toBe('https://liquipedia.net/commons/images/a.png');
+    expect(lpUrl('/commons/images/Logo_filler_event.png')).toBeNull();
+  });
+
+  it('reads final scores from a tournament page (bracket and match list), skipping unplayed ones', () => {
+    const opp = (name: string, score: string) => `<div class="brkts-opponent-entry" aria-label="${name}"><div class="block-team"><span class="name"><a title="${name}">${name.split(' ')[0]}</a></span></div><div class="brkts-opponent-score-inner">${score}</div></div>`;
+    const html = `<div class="brkts-match">${opp('Team Spirit', '2')}${opp('MOUZ', '1')}</div>`
+      + `<div class="brkts-match">${opp('Vitality', '')}${opp('G2 Esports', '')}</div>`
+      + `<div class="brkts-matchlist-match"><div class="brkts-matchlist-opponent" aria-label="Virtus.pro"><div class="brkts-matchlist-score">0</div></div><div class="brkts-matchlist-opponent" aria-label="FURIA"><div class="brkts-matchlist-score">2</div></div></div>`;
+    expect(parseResults(html)).toEqual([
+      { team1: 'Team Spirit', team2: 'MOUZ', score1: 2, score2: 1 },
+      { team1: 'Virtus.pro', team2: 'FURIA', score1: 0, score2: 2 },
+    ]);
   });
 
   it('skips matches with an undecided team', () => {
