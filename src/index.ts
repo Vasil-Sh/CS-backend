@@ -495,6 +495,13 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
             if (tm.status !== 'upcoming') prev.status = tm.status;
             if (prev.status === 'finished') newlyFinished.push(prev);
             updates++;
+          } else if (tm.status === 'live' && !prev.score1 && !prev.score2) {
+            // «finished» with no score while the source says live: a wrong finish from the old
+            // «no score 30 min after start» rule — the match is back to live with the source's data
+            prev.status = 'live';
+            if (tm.score1 != null) prev.score1 = tm.score1;
+            if (tm.score2 != null) prev.score2 = tm.score2;
+            updates++;
           } else {
             // For finished matches: only update if the current score is suspicious
             // and today's page shows a better one (prevents good 2-1 → 1-0 regression).

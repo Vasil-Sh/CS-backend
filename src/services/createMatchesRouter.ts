@@ -251,11 +251,13 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
   const _historyPersisted = new Set<string>();
 
   function persistFinishedIfNeeded(data: TipsGgMatch[], cfg: MatchRouterConfig): void {
+    // keyed with the score: a result that arrives later (or a corrected one) is written again
+    const key = (m: TipsGgMatch) => `${m.id}|${m.score1 ?? ''}:${m.score2 ?? ''}`;
     const finished = data.filter(
-      (m) => m.status === 'finished' && !_historyPersisted.has(m.id),
+      (m) => m.status === 'finished' && !_historyPersisted.has(key(m)),
     );
     if (finished.length === 0) return;
-    for (const m of finished) _historyPersisted.add(m.id);
+    for (const m of finished) _historyPersisted.add(key(m));
 
     const entries = finished.map((m) => ({
       id: m.id,
@@ -536,12 +538,9 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
               m.status = 'finished';
             } else if (!hasStartDate && hoursSinceStart > maxHours * 1.5) {
               m.status = 'finished'; // no startDate = less precise, give 50% more time
-            } else if (hasStartDate && hoursSinceStart > 0.5) {
-              // Auto-cancelled: live match with no scores 30min past start
-              if (!hasScores) {
-                m.status = 'finished'; // effectively cancelled — won't play today
-              }
             }
+            // (No «no score 30 min after start → finished» any more: Liquipedia gives the series score only
+            //  after the first map, 40–60 min in — live matches were shown «Завершено» without a score.)
           }
         } else if (m.status === 'finished' && m.date >= todayStr) {
           // Reverse safety net: a "finished" match on today that started recently
