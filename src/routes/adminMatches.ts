@@ -4,7 +4,6 @@ import { requireAuth, requireAdmin } from '../middleware/auth';
 import { pool } from '../db/client';
 import {
   adminMatchesService,
-  makeLinkKey,
   type LinkDecision,
   type MatchStatus,
 } from '../services/adminMatchesService';

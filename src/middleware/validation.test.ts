@@ -1,13 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
   loginSchema,
-  registerSchema,
   createBetSchema,
   updateBetSchema,
   createGoalSchema,
-  updateGoalSchema,
   createStrategySchema,
-  updateStrategySchema,
   setBankrollSchema,
   adjustBankrollSchema,
 } from './validation';

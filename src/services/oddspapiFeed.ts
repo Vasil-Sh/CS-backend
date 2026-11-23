@@ -19,7 +19,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordFailure, recordSuccess, isOpen } from './circuitBreaker';
 import { pool } from '../db/client';
-import type { TipsGgMatch } from './tipsggScraper';
+import type { TipsGgMatch } from './matchTypes';
 
 export const ODDSPAPI_PARSER = 'oddspapi';
 const BASE = 'https://api.oddspapi.io/v4';
@@ -191,7 +191,6 @@ async function get<T>(path: string, params: Record<string, string | number | boo
   }
 }
 
-const day = (t: number) => new Date(t).toISOString().slice(0, 10);
 const asArray = <T>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : Array.isArray((v as any)?.data) ? (v as any).data : []);
 
 /** Market ids that mean «who wins the match» for esports — resolved by name once a month. */

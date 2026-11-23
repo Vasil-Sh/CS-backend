@@ -2,7 +2,7 @@
 // Admin Service — self-service data reset
 // ═══════════════════════════════════════════
 
-import { db, schema, pool } from '../db/client';
+import { pool } from '../db/client';
 
 export class AdminService {
   /** Delete ALL user data atomically in one transaction */

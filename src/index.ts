@@ -55,17 +55,14 @@ import dota2MatchesRoutes from './routes/dota2Matches';
 import cs2MatchesRoutes from './routes/cs2Matches';
 import publicProfileRoutes from './routes/publicProfile';
 import matchesHistoryRoutes from './routes/matchesHistory';
-import { closeBrowser } from './services/tipsggScraper';
 import { fetchDota2Matches, fetchCs2Matches, fetchTodayMatches, feedPaused } from './services/matchFeed';
-import { enrichTournamentLogos } from './services/hltv/hltvEventsScraper';
 import { join } from 'node:path';
 import { readFileSync, existsSync } from 'node:fs';
 import { writeFileCacheInternal } from './services/createMatchesRouter';
 import { upsertMatchHistoryBatch } from './services/matchHistoryService';
-import { fetchCstestMatches } from './services/hltv/cstestClient';
-import { scrapeHltvRankingLogos } from './services/hltv/hltvRankingScraper';
 import { buildLocalLogoStore, loadTipsggLogos, buildDota2LocalStore, extractLogoPacks } from './services/logoStore';
 import { hydrateTeamLogos } from './services/teamLogos';
+import { startMaintenance } from './services/maintenance';
 import { restoreDurableFiles, startDurableSync, syncDurableFiles } from './services/durableFiles';
 import { captureServerErrors, flushServerErrors, recordServerError } from './services/serverErrors';
 import { knownParsers } from './routes/adminParsers';
@@ -80,6 +77,7 @@ captureServerErrors();
 // ── Caches wiped by a deploy: put the saved copies back before anything reads them (≤10 s, then go on without) ──
 await Promise.race([restoreDurableFiles(), new Promise((r) => setTimeout(r, 10_000))]);
 startDurableSync();
+startMaintenance();
 
 const app = new Hono();
 
@@ -377,81 +375,27 @@ setTimeout(() => {
   dedupCache(join(process.cwd(), '.cache', 'cs2_matches.json'), 'cs2');
 }, 2_000);
 
-// ── Cache warmup: pre-fetch CS2 matches (cstest + tips.gg merged) in background ──
-// SKIP tips.gg if today's cache already exists. cstest is safe (not behind CF).
+// ── Cache warmup: CS2 schedule (Liquipedia + OddsPapi) merged into today's cache, never shrinking it ──
 setTimeout(async () => {
   const cacheFile = join(process.cwd(), '.cache', 'cs2_matches.json');
-  const today = new Date().toISOString().split('T')[0];
-
-  // Check if today's cache already exists (from previous run)
-  let skipTipsgg = false;
-  if (existsSync(cacheFile)) {
-    try {
-      const raw = JSON.parse(readFileSync(cacheFile, 'utf-8'));
-      if (raw.day === today && (raw.data?.length || 0) > 0) {
-        console.log(`[warmup] CS2 cache exists (${raw.data.length} matches, today) — skipping tips.gg scrape`);
-        skipTipsgg = true;
-      }
-    } catch { /* corrupt */ }
-  }
-
   try {
-    const [cstestMatches, tipsggMatches] = await Promise.allSettled([
-      fetchCstestMatches(),
-      skipTipsgg ? Promise.resolve([] as any[]) : fetchCs2Matches(),
-    ]);
-    const cstest = cstestMatches.status === 'fulfilled' ? cstestMatches.value : [];
-    const tipsgg = tipsggMatches.status === 'fulfilled' ? tipsggMatches.value : [];
-
-    // Merge: start from existing cache (never shrink on warmup), then cstest
-    // primary, then tips.gg enriches with tournament/coefficients.
+    const fresh = await fetchCs2Matches();
     let existingArr: any[] = [];
     if (existsSync(cacheFile)) {
-      try {
-        const raw = JSON.parse(readFileSync(cacheFile, 'utf-8'));
-        existingArr = raw.data || [];
-      } catch { /* ignore corrupt cache */ }
+      try { existingArr = JSON.parse(readFileSync(cacheFile, 'utf-8')).data || []; } catch { /* ignore corrupt cache */ }
     }
-    // Liquipedia now gives the schedule: drop the OddsPapi stand-ins cached before it (same matches, other ids)
-    if (tipsgg.some((m: any) => String(m.id).startsWith('lp-'))) existingArr = existingArr.filter((m: any) => !String(m.id).startsWith('op-'));
-    const merged = new Map<string, any>();
-    for (const m of existingArr) merged.set(m.id, m);
-    for (const m of cstest) merged.set(m.id, m);
-    for (const tm of tipsgg) {
-      const existing = merged.get(tm.id);
-      if (existing) {
-        if (!existing.tournament && tm.tournament) existing.tournament = tm.tournament;
-        if (!existing.stage && tm.stage) existing.stage = tm.stage;
-        if (existing.coeff1 == null && tm.coeff1 != null) existing.coeff1 = tm.coeff1;
-        if (existing.coeff2 == null && tm.coeff2 != null) existing.coeff2 = tm.coeff2;
-      } else {
-        // Fuzzy dedup: same date + normalized team names → same match
-        const allExisting = [...merged.values()];
-        const fuzzyDupe = allExisting.find((m: any) =>
-          m.date === tm.date &&
-          (normalizeTeam(m.nameTeam1) === normalizeTeam(tm.nameTeam1) &&
-           normalizeTeam(m.nameTeam2) === normalizeTeam(tm.nameTeam2)) ||
-          (normalizeTeam(m.nameTeam1) === normalizeTeam(tm.nameTeam2) &&
-           normalizeTeam(m.nameTeam2) === normalizeTeam(tm.nameTeam1))
-        );
-        if (fuzzyDupe) {
-          if (!fuzzyDupe.tournament && tm.tournament) fuzzyDupe.tournament = tm.tournament;
-          if (!fuzzyDupe.stage && tm.stage) fuzzyDupe.stage = tm.stage;
-          if (fuzzyDupe.coeff1 == null && tm.coeff1 != null) fuzzyDupe.coeff1 = tm.coeff1;
-          if (fuzzyDupe.coeff2 == null && tm.coeff2 != null) fuzzyDupe.coeff2 = tm.coeff2;
-          continue;
-        }
-        merged.set(tm.id, tm);
-      }
-    }
+    // Liquipedia gives the schedule: drop the OddsPapi stand-ins cached before it (same matches, other ids)
+    if (fresh.some((m: any) => String(m.id).startsWith('lp-'))) existingArr = existingArr.filter((m: any) => !String(m.id).startsWith('op-'));
+    const merged = new Map<string, any>(existingArr.map((m: any) => [m.id, m]));
+    for (const m of fresh) merged.set(m.id, merged.has(m.id) ? { ...merged.get(m.id), ...m } : m);
     const mergedArr = [...merged.values()];
     if (mergedArr.length === 0) {
-      console.warn('[warmup] CS2: no matches from any source — keeping existing cache untouched');
+      console.warn('[warmup] CS2: no matches — keeping existing cache untouched');
       return;
     }
-    writeFileCacheInternal(mergedArr, join(process.cwd(), '.cache', 'cs2_matches.json'));
+    writeFileCacheInternal(mergedArr, cacheFile);
     persistFinishedToHistory(mergedArr, 'cs2', 'warmup:cs2');
-    console.log(`[warmup] CS2 cache primed: ${merged.size} matches (cstest: ${cstest.length}, +tips.gg)`);
+    console.log(`[warmup] CS2 cache primed: ${merged.size} matches`);
   } catch (err) {
     console.warn('[warmup] CS2 fetch failed:', (err as Error).message);
   }
@@ -466,14 +410,7 @@ setTimeout(async () => {
 
 console.log('[live] Live score polling disabled — static match list mode');
 
-// ── HLTV ranking logo scraper — run once at startup ──
-// Fills the in-memory logo map for cstestClient to use as fallback
-// when a team has no logo from cstest CDN (fallback.webp → null → HLTV CDN)
-setTimeout(() => {
-  scrapeHltvRankingLogos().catch(e =>
-    console.warn('[hltvRanking] Startup scrape failed:', (e as Error).message)
-  );
-}, 3_000);
+
 
 // ── Admin-uploaded team logos (index in memory) ──
 hydrateTeamLogos();
@@ -500,9 +437,8 @@ import { validateScores, needsScoreBackfill } from './utils/scoreValidation.js';
 import { isIdle, IDLE_POLL_MS } from './services/activityTracker.js';
 
 function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: string): void {
-  // For CS2, cstest is primary — never add new matches from tips.gg (prevents duplicates).
-  // Only update scores & status for existing matches.
-  const isPrimarySource = game === 'cs2';
+  // One source for both games now (Liquipedia): new matches are added for CS2 too.
+  const isPrimarySource = false;
   const ACTIVE_INTERVAL = 120_000;
 
   const tick = async () => {
@@ -708,9 +644,6 @@ function startFullRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: string)
             }
             merged.set(m.id, m);
           }
-          // Enrich tournament logos from HLTV (tips.gg 404s for minor events)
-          const enriched = await enrichTournamentLogos([...merged.values()]);
-          if (enriched > 0) console.log(`[full-refresh] ${tag}: ${enriched} HLTV logos`);
           writeFileCacheInternal([...merged.values()], cacheFile);
           persistFinishedToHistory([...merged.values()], game, `full-refresh:${tag}`);
           console.log(`[full-refresh] ${tag}: ${fresh.length} fresh merged into ${merged.size} total`);
@@ -750,8 +683,6 @@ const shutdown = async (signal: string) => {
   } catch (err) {
     console.error('❌ Error closing DB pool:', err);
   }
-  closeBrowser();
-  console.log('✅ Puppeteer browser closed');
   process.exit(0);
 };
 

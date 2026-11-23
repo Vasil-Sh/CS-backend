@@ -5,9 +5,8 @@
  * Dota2: .cache/logos/dota2_local/  (1259 files, {rank}_{Team}.ext format)
  */
 
-import { existsSync, readdirSync, statSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
 
 /** Where the logo packs (cs2_logos.zip, dota2_logos.zip in the backend root) are unpacked on start. */
 export const LOGO_CACHE_DIR = join(process.cwd(), '.cache', 'logos');

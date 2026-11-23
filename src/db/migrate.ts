@@ -10,7 +10,7 @@ async function main() {
     connectionString: process.env.DATABASE_URL,
   });
 
-  const db = drizzle(pool, { schema });
+  drizzle(pool, { schema });
 
   // Create tables
   // In production, use drizzle-kit generate + migrate

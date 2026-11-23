@@ -2,39 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { Hono } from 'hono';
 import { ok, created, noContent, err, paginated, getPagination } from './response';
 
-function mockContext(jsonData?: any, query?: Record<string, string>) {
-  const app = new Hono();
-  let captured: any = null;
-  let capturedStatus = 0;
-
-  app.get('/test', (c) => {
-    // Mock query params
-    if (query) {
-      for (const [k, v] of Object.entries(query)) {
-        // We'll use getPagination directly
-      }
-    }
-    if (jsonData) return c.json(jsonData, 200);
-    return c.body(null, 204);
-  });
-
-  return { app };
-}
-
 describe('getPagination', () => {
-  function makeC(query: Record<string, string>) {
-    const app = new Hono();
-    let result: any;
-    app.get('/test', (c) => {
-      // Override req.query for test
-      const origQuery = c.req.query.bind(c.req);
-      (c.req as any).query = (k: string) => query[k] || origQuery(k);
-      result = getPagination(c);
-      return c.json({});
-    });
-    return { getResult: () => result, app };
-  }
-
   it('returns default page=1, limit=50', async () => {
     const app = new Hono();
     let result: any;
@@ -95,12 +63,9 @@ describe('getPagination', () => {
 describe('paginated', () => {
   it('returns correct structure', async () => {
     const app = new Hono();
-    let status = 0;
-    let body: any;
 
     app.get('/test', (c) => {
       const resp = paginated(c, [{ id: 1 }, { id: 2 }], { page: 1, limit: 10, total: 25 });
-      status = (resp as any).status || 200;
       return resp;
     });
 

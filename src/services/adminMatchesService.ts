@@ -5,7 +5,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { pool } from '../db/client';
-import type { TipsGgMatch } from './tipsggScraper';
+import type { TipsGgMatch } from './matchTypes';
 
 export type Game = 'cs2' | 'dota2';
 /** 'hidden' — «Видалити матч» for a feed match: it is dropped from the schedule (undo = delete the override). */

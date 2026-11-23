@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { Hono } from 'hono';
 import { authMiddleware, requireAuth, requireAdmin } from './auth';
 
@@ -15,7 +15,6 @@ vi.mock('../utils/jwt', () => ({
   }),
 }));
 
-import { verifyToken } from '../utils/jwt';
 
 describe('authMiddleware', () => {
   it('sets user from Bearer token in Authorization header', async () => {

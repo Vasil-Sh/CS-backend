@@ -1,0 +1,57 @@
+name: DB backup
+
+# Nightly dump of the production Postgres, encrypted, kept 30 days as a workflow artifact.
+# The repository is public: the dump is encrypted (AES-256, gpg) before upload — without
+# BACKUP_PASSPHRASE the artifact is unreadable. Restore: see docs/backup.md.
+# Secrets (Settings → Secrets and variables → Actions):
+#   BACKUP_DATABASE_URL — Railway → Postgres → Connect → «Public Network» URL
+#   BACKUP_PASSPHRASE   — a long random passphrase, kept in your password manager
+
+on:
+  schedule:
+    - cron: '17 1 * * *' # 03:17 Kyiv (winter)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check secrets
+        id: cfg
+        env:
+          DB: ${{ secrets.BACKUP_DATABASE_URL }}
+          PASS: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          if [ -z "$DB" ] || [ -z "$PASS" ]; then
+            echo "::warning::BACKUP_DATABASE_URL / BACKUP_PASSPHRASE are not set — backup skipped (see docs/backup.md)"
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Dump and encrypt
+        if: steps.cfg.outputs.skip != '1'
+        env:
+          DB: ${{ secrets.BACKUP_DATABASE_URL }}
+          PASS: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          name="matchiq-$(date -u +%Y-%m-%d).sql.gz.gpg"
+          # pg_dump 17 reads any older server; custom-free plain SQL so it restores with psql
+          docker run --rm -e DB postgres:17 sh -c 'pg_dump --no-owner --no-privileges "$DB"' \
+            | gzip -9 \
+            | gpg --batch --yes --pinentry-mode loopback --passphrase "$PASS" --symmetric --cipher-algo AES256 -o "$name"
+          size=$(stat -c %s "$name")
+          if [ "$size" -lt 1024 ]; then echo "::error::Dump is suspiciously small ($size bytes)"; exit 1; fi
+          echo "FILE=$name" >> "$GITHUB_ENV"
+          echo "Backup $name — $((size / 1024)) KB"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.cfg.outputs.skip != '1'
+        with:
+          name: ${{ env.FILE }}
+          path: ${{ env.FILE }}
+          retention-days: 30
+          if-no-files-found: error

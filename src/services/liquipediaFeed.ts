@@ -15,7 +15,7 @@ import * as cheerio from 'cheerio';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordFailure, recordSuccess, isOpen } from './circuitBreaker';
-import type { TipsGgMatch } from './tipsggScraper';
+import type { TipsGgMatch } from './matchTypes';
 import { pool } from '../db/client';
 
 export const LIQUIPEDIA_PARSER = 'liquipedia';

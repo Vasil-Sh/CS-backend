@@ -7,8 +7,8 @@ import { isTracked, trackedFiles } from './durableFiles';
 describe('durable cache files', () => {
   it('tracks the listed files and one level of a listed folder, nothing outside', () => {
     expect(isTracked('cs2_matches.json')).toBe(true);
-    expect(isTracked('logos/tournaments/iem.png')).toBe(true);
-    expect(isTracked('logos/tournaments/x/y.png')).toBe(false);
+    expect(isTracked('logos/tournaments/iem.png', ['logos/tournaments/'])).toBe(true);
+    expect(isTracked('logos/tournaments/x/y.png', ['logos/tournaments/'])).toBe(false);
     expect(isTracked('../etc/passwd')).toBe(false);
     expect(isTracked('oddspapi.json')).toBe(false);
   });

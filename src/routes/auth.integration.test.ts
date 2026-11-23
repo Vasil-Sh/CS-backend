@@ -42,7 +42,7 @@ vi.mock('../utils/jwt', () => ({
 
 vi.mock('bcryptjs', () => ({
   default: {
-    compare: vi.fn((plain: string, hash: string) => plain === 'correct'),
+    compare: vi.fn((plain: string, _hash: string) => plain === 'correct'),
     hash: vi.fn(() => '$2a$10$mockedhash'),
   },
 }));

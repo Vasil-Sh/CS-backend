@@ -1,10 +1,4 @@
 import { describe, it, expect } from 'vitest';
-import { MemoryCache } from '../utils/cache';
-
-// Re-create the cache for testing (no auto-cleanup interval)
-function createCache() {
-  return new (MemoryCache as any)() as InstanceType<typeof MemoryCache>;
-}
 
 // Since cache is exported as singleton, we test via its API
 import { cache } from '../utils/cache';

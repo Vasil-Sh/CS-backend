@@ -6,18 +6,15 @@
  */
 
 import { Hono } from 'hono';
-import { fetchMatchDetail, getBrowser, fetchHtml, shouldSkipTipsgg, type TipsGgMatch } from '../services/tipsggScraper';
+import type { TipsGgMatch } from './matchTypes';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, renameSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordFailure } from '../services/circuitBreaker';
 import type { ILiveScoresStore } from '../services/liveScoresStore';
 import { upsertMatchHistoryBatch } from '../services/matchHistoryService';
-import { getHltvLogoCache } from '../services/hltv/hltvRankingScraper';
-import { readTournamentLogo } from '../services/hltv/hltvEventsScraper';
 import { batchComputeTeamForms } from './teamFormService';
 import { lookupLocalLogo, lookupLocalLogoRank, lookupDota2LocalLogoRank, getLocalLogoDir, lookupTipsggLogo, lookupDota2LocalLogo, getDota2LogoDir } from '../services/logoStore';
 import { touchActivity } from './activityTracker';
-import { withHltvMarkets } from './hltv/hltvMarketCache';
 import { adminMatchesService } from './adminMatchesService';
 import { customLogoUrl, readCustomLogo, normalizeLogoName } from './teamLogos';
 
@@ -27,7 +24,6 @@ interface MatchRouterConfig {
   liveScoresStore: ILiveScoresStore;
   cacheFile: string;
   circuitBreakerName: string;
-  healthUrl?: string;
 }
 
 const CACHE_TTL_FRESH = 60 * 60 * 1000;  // 1 hour — normal TTL (incremental refresh keeps it current)
@@ -41,36 +37,33 @@ const logoDownloadsInFlight = new Map<string, { promise: Promise<Buffer>; ts: nu
 import type { TeamFormResult } from './teamFormService';
 const teamFormCache = new Map<string, { data: Map<string, TeamFormResult>; ts: number }>();
 
+/** Plain HTTP fetch of an image (no browser): null when the CDN refuses or returns something that is not an image. */
+async function fetchImage(url: string): Promise<Buffer | null> {
+  try {
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', Accept: 'image/*,*/*;q=0.8', Referer: 'https://tips.gg/' },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!resp.ok) return null;
+    const buf = Buffer.from(await resp.arrayBuffer());
+    return buf.length < 100 ? null : buf;
+  } catch { return null; }
+}
+
 async function fetchAndCacheLogo(cdnUrl: string, cacheFile: string): Promise<Buffer> {
   // Deduplicate concurrent requests for the same file
   const existing = logoDownloadsInFlight.get(cacheFile);
   if (existing) return existing.promise;
 
   const promise = (async () => {
-    const browser = await getBrowser();
-    const page = await browser.newPage();
     try {
-      const base64DataUrl = await page.evaluate(async (url: string): Promise<string | null> => {
-        try {
-          const res = await fetch(url, { headers: { 'Referer': 'https://tips.gg/' } });
-          if (!res.ok) return null;
-          const blob = await res.blob();
-          const arr = new Uint8Array(await blob.arrayBuffer());
-          let bin = '';
-          for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
-          return 'data:' + blob.type + ';base64,' + btoa(bin);
-        } catch { return null; }
-      }, cdnUrl);
-
-      if (!base64DataUrl) throw new Error('Puppeteer fetch returned null');
-      const base64Data = base64DataUrl.replace(/^data:[^;]+;base64,/, '');
-      const buf = Buffer.from(base64Data, 'base64');
+      const buf = await fetchImage(cdnUrl);
+      if (!buf) throw new Error('Logo fetch failed');
       const dir = cacheFile.substring(0, cacheFile.lastIndexOf('/'));
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
       writeFileSync(cacheFile, buf);
       return buf;
     } finally {
-      await page.close().catch(() => {});
       logoDownloadsInFlight.delete(cacheFile);
     }
   })();
@@ -83,7 +76,7 @@ async function fetchAndCacheLogo(cdnUrl: string, cacheFile: string): Promise<Buf
  * Rewrite external logo URLs to use our internal HTTP proxy.
  * Applied server-side so ALL clients get CORS-safe, properly encoded URLs.
  * tips.gg CDN → /logo/cached/ (local disk cache, fast)
- * cstest/HLTV → /logo/external/{b64} (Puppeteer proxy)
+ * any other CDN → /logo/external/{b64} (plain HTTP proxy, cached on disk)
  */
 function proxyLogoUrl(url: string | null, prefix: string): string | null {
   if (!url) return null;
@@ -124,18 +117,6 @@ export function generateLogoFallback(teamName: string, prefix: string): string |
   if (tipsggUrl) {
     const encoded = Buffer.from(tipsggUrl).toString('base64url');
     return `/api/v1/${prefix}-matches/logo/external/${encoded}`;
-  }
-
-  // 4. HLTV ranking CDN (img-cdn.hltv.org) — usually blocked
-  const hltvMap = getHltvLogoCache();
-  if (hltvMap) {
-    const norm = teamName.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const raw = teamName.toLowerCase().trim();
-    const url = hltvMap.get(norm) || hltvMap.get(raw);
-    if (url) {
-      const encoded = Buffer.from(url).toString('base64url');
-      return `/api/v1/${prefix}-matches/logo/external/${encoded}`;
-    }
   }
 
   // 5. tips.gg CDN slug-based fallback (guesswork)
@@ -260,7 +241,7 @@ const imgHeaders = {
  */
 export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
   const router = new Hono();
-  const { game, fetchFn, liveScoresStore: scoresStore, cacheFile, circuitBreakerName, healthUrl } = cfg;
+  const { game, fetchFn, liveScoresStore: scoresStore, cacheFile, circuitBreakerName } = cfg;
   const prefix = game === 'dota2' ? 'dota2' : 'cs2';
   const gameLabel = game === 'dota2' ? 'Dota 2' : 'CS2';
   const imgCachePrefix = game === 'dota2' ? 'logo_' : 'logo_cs2_';
@@ -671,7 +652,7 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       // Matches are highly dynamic (incremental refresh every 2min, live scores every 7s).
       // Server-side SWR cache handles load — never let the browser cache this JSON.
       c.header('Cache-Control', 'no-store');
-      return c.json(game === 'cs2' ? withHltvMarkets(filtered) : filtered);
+      return c.json(filtered);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';
       console.error(`[${prefix}Matches] Scrape failed:`, message);
@@ -827,30 +808,6 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
     return c.json({ error: 'Not found' }, 404);
   });
 
-  // ── GET /logo/tournament/:filename — serve locally-downloaded tournament logos ──
-  router.get('/logo/tournament/:filename', (c) => {
-    const filename = c.req.param('filename');
-    if (!filename) return c.json({ error: 'Not found' }, 404);
-
-    if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
-      return c.json({ error: 'Invalid filename' }, 400);
-    }
-
-    const buf = readTournamentLogo(filename);
-    if (buf) {
-      const ext = filename.split('.').pop()?.toLowerCase() || 'png';
-      const ct = ext === 'svg' ? 'image/svg+xml' : `image/${ext === 'jpg' ? 'jpeg' : ext}`;
-      return new Response(buf, {
-        headers: {
-          'Content-Type': ct,
-          'Cache-Control': 'public, max-age=86400, immutable',
-          'Access-Control-Allow-Origin': '*',
-        },
-      });
-    }
-    return c.json({ error: 'Not found' }, 404);
-  });
-
   // ── GET /logo/dota2local/:filename — serve locally stored Dota2 logos ──
   router.get('/logo/dota2local/:filename', (c) => {
     const filename = c.req.param('filename');
@@ -940,82 +897,16 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       }
     }
 
-    // Fetch: tips.gg CDN uses Puppeteer + tries filename variants (CDN naming is inconsistent)
+    // Fetch over plain HTTP (no browser): tips.gg CDN filenames vary, so try a few variants
     try {
-      const isTipsGgCdn = externalUrl.includes('files.tips.gg');
+      const baseUrl = externalUrl.replace(/\.(png|svg|webp)$/i, '');
+      const noGame = baseUrl.replace(/-(csgo|cs2|dota2)$/i, '');
+      const candidates = externalUrl.includes('files.tips.gg')
+        ? [...new Set([externalUrl, `${noGame}.png`, `${noGame}-csgo.png`, `${noGame}-cs2.png`, `${noGame}-dota2.png`, `${noGame.replace(/_/g, '-')}.png`])]
+        : [externalUrl];
       let buf: Buffer | null = null;
-
-      if (isTipsGgCdn) {
-        // If tips.gg is banned (Cloudflare block), don't hang in Puppeteer —
-        // fall through to stale cache / 404 so the frontend shows its fallback icon.
-        if (shouldSkipTipsgg()) throw new Error('TIPSGG_SKIP');
-
-        // Build variant URLs to try (tips.gg CDN filenames are unpredictable)
-        const baseUrl = externalUrl.replace(/\.(png|svg|webp)$/i, '');
-        const candidateUrls = [externalUrl];
-
-        // Strip game suffix: team-dota2.png → team.png, team-csgo.png → team.png
-        const noGame = baseUrl.replace(/-(csgo|cs2|dota2)$/i, '');
-        if (noGame !== baseUrl) {
-          candidateUrls.push(`${noGame}.png`);
-          candidateUrls.push(`${noGame}-csgo.png`);
-          candidateUrls.push(`${noGame}-cs2.png`);
-          candidateUrls.push(`${noGame}-dota2.png`);
-        }
-
-        // Swap underscores ↔ hyphens
-        const swapped = noGame.replace(/_/g, '-');
-        if (swapped !== noGame) {
-          candidateUrls.push(`${swapped}.png`);
-          candidateUrls.push(`${swapped}-dota2.png`);
-          candidateUrls.push(`${swapped}-csgo.png`);
-        }
-
-        // Deduplicate
-        const uniqueUrls = [...new Set(candidateUrls)];
-
-        const browser = await getBrowser();
-        const page = await browser.newPage();
-        try {
-          for (const url of uniqueUrls) {
-            const base64DataUrl = await page.evaluate(async (u: string): Promise<string | null> => {
-              try {
-                const res = await fetch(u, { headers: { 'Referer': 'https://tips.gg/' } });
-                if (!res.ok) return null;
-                const blob = await res.blob();
-                const arr = new Uint8Array(await blob.arrayBuffer());
-                let bin = '';
-                for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
-                return 'data:' + blob.type + ';base64,' + btoa(bin);
-              } catch { return null; }
-            }, url);
-
-            if (base64DataUrl) {
-              const base64Data = base64DataUrl.replace(/^data:[^;]+;base64,/, '');
-              buf = Buffer.from(base64Data, 'base64');
-              if (url !== externalUrl) {
-                console.log(`[logo] ${externalUrl.split('/').pop()} → found at ${url.split('/').pop()}`);
-              }
-              break;
-            }
-          }
-        } finally {
-          await page.close().catch(() => {});
-        }
-        if (!buf) throw new Error('All CDN variants failed');
-      } else {
-        // Non-tips.gg CDN — plain HTTP fetch is fine
-        const resp = await fetch(externalUrl, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'image/*,*/*;q=0.8',
-          },
-          signal: AbortSignal.timeout(8_000),
-        });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        buf = Buffer.from(await resp.arrayBuffer());
-        if (buf.length < 100) throw new Error('Too small');
-      }
+      for (const u of candidates) { buf = await fetchImage(u); if (buf) break; }
+      if (!buf) throw new Error('Logo fetch failed');
 
       ensureCacheDir();
       writeFileSync(binCacheFile, buf);
@@ -1098,35 +989,8 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
     const uniqueUrls = [...new Set(candidates)];
 
     try {
-      const browser = await getBrowser();
-      const page = await browser.newPage();
-      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36');
-
       let buffer: Buffer | null = null;
-      for (const url of uniqueUrls) {
-        const base64DataUrl = await page.evaluate(async (url: string): Promise<string | null> => {
-          try {
-            const res = await fetch(url, { headers: { 'Referer': 'https://tips.gg/' } });
-            if (!res.ok) return null;
-            const blob = await res.blob();
-            const arrayBuffer = await blob.arrayBuffer();
-            const bytes = new Uint8Array(arrayBuffer);
-            let binary = '';
-            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-            return 'data:image/png;base64,' + btoa(binary);
-          } catch { return null; }
-        }, url);
-
-        if (base64DataUrl) {
-          const base64Data = base64DataUrl.replace(/^data:image\/\w+;base64,/, '');
-          buffer = Buffer.from(base64Data, 'base64');
-          console.log(`[logo] ${logoPath} → OK (${url})`);
-          break;
-        }
-      }
-
-      await page.close().catch(() => {});
-
+      for (const url of uniqueUrls) { buffer = await fetchImage(url); if (buffer) break; }
       if (!buffer) throw new Error('All CDN URLs failed');
 
       // Write raw .bin cache (much smaller than number[] JSON)
@@ -1153,57 +1017,6 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       return c.json({ error: 'Not found' }, 404);
     }
   });
-
-  // ── GET /health — validate HTML structure ──
-  if (healthUrl) {
-    router.get('/health', async (c) => {
-      const checks: Record<string, boolean | string> = {};
-      let ok = true;
-
-      try {
-        const stdout = await fetchHtml(healthUrl, 1);
-
-        checks['html_response'] = stdout.length > 5000;
-        checks['json_ld'] = stdout.includes('application/ld+json');
-        checks['json_ld_count'] = String((stdout.match(/application\/ld\+json/gi) || []).length);
-        checks['score_elements'] = stdout.includes('class="score');
-        checks['bookmaker_section'] = stdout.includes('bookmakers-analysis-counters');
-        checks['match_listing'] = stdout.includes('class="element match');
-        checks['fetch_method'] = 'puppeteer';
-
-        if (!checks['json_ld'] || !checks['match_listing']) ok = false;
-      } catch (e) {
-        checks['error'] = e instanceof Error ? e.message : 'Unknown';
-        ok = false;
-      }
-
-      return c.json({ ok, checks });
-    });
-  }
-
-  // ── GET /:date/:slug/:time — single match detail (Dota2 only) ──
-  if (game === 'dota2') {
-    router.get('/:date/:slug/:time', async (c) => {
-      const { date, slug, time } = c.req.param();
-      const matchUrl = `/matches/dota2/${date}/${slug}/${time}/`;
-
-      const detailCacheFile = join(CACHE_DIR, `detail_${date}_${slug}.json`);
-      const cached = readFileCache<TipsGgMatch>(CACHE_TTL_FRESH, detailCacheFile);
-      if (cached && !cached.stale) return c.json(cached.data);
-
-      try {
-        const match = await fetchMatchDetail(matchUrl, 'dota2');
-        if (!match) return c.json({ error: 'Match not found' }, 404);
-        writeFileCacheInternal(match, detailCacheFile);
-        return c.json(match);
-      } catch (err) {
-        if (cached) return c.json(cached.data);
-        const message = err instanceof Error ? err.message : 'Unknown error';
-        console.error(`[${prefix}Matches] Detail scrape failed:`, message);
-        return c.json({ error: 'Failed to fetch match detail', detail: message }, 502);
-      }
-    });
-  }
 
   return router;
 }

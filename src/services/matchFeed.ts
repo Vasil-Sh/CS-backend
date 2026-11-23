@@ -1,23 +1,20 @@
 // ═══════════════════════════════════════════════════════════════
-// Where matches come from.
-//
-// New feed (ODDSPAPI_KEY set, or MATCH_SOURCE=liquipedia) — tips.gg blocks us:
+// Where matches come from:
 //   • Liquipedia  — schedule, series score, live / finished, BO   (every 5 min)
-//   • OddsPapi    — bookmaker odds, added to the same match       (every 12 h)
+//   • OddsPapi    — bookmaker odds, added to the same match       (every 12 h; only with ODDSPAPI_KEY)
 //   • OpenDota    — fresher Dota 2 score between Liquipedia refreshes
 //   If Liquipedia gives nothing, OddsPapi's own schedule is used instead.
-// Old feed (neither set): everything through tips.gg, as before.
-// The returned shape is the same either way, so callers don't change.
+// (tips.gg, HLTV and the browser scraper were removed on 23.11.2026.)
 // ═══════════════════════════════════════════════════════════════
 
-import * as tipsgg from './tipsggScraper';
-import type { TipsGgMatch } from './tipsggScraper';
+import type { TipsGgMatch } from './matchTypes';
 import { cachedMatches, fetchOddsPapiMatches, oddspapiEnabled, refreshOddsPapi } from './oddspapiFeed';
 import { applySeries, recentDotaSeries } from './opendotaScores';
 import { fetchLiquipediaMatches } from './liquipediaFeed';
 import { normalizeTeam } from '../utils/matchUtils';
 
-export const usingNewFeed = () => oddspapiEnabled() || (process.env.MATCH_SOURCE || '').trim().toLowerCase() === 'liquipedia';
+/** Kept for callers: the Liquipedia feed is the only one now. */
+export const usingNewFeed = () => true;
 
 /** Put OddsPapi odds (and tournament name if missing) onto Liquipedia matches: same teams, start within 6 h. */
 export function addOdds(base: TipsGgMatch[], odds: TipsGgMatch[]): number {
@@ -60,23 +57,22 @@ async function newFeed(game: 'cs2' | 'dota2', spendOddsPapi: boolean): Promise<T
 }
 
 export async function fetchDota2Matches(): Promise<TipsGgMatch[]> {
-  return usingNewFeed() ? newFeed('dota2', true) : tipsgg.fetchDota2Matches();
+  return newFeed('dota2', true);
 }
 
 export async function fetchCs2Matches(): Promise<TipsGgMatch[]> {
-  return usingNewFeed() ? newFeed('cs2', true) : tipsgg.fetchCs2Matches();
+  return newFeed('cs2', true);
 }
 
 /** The 2-minute incremental refresh: today's and yesterday's matches. Never spends a billable OddsPapi request directly. */
 export async function fetchTodayMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[] | null> {
-  if (!usingNewFeed()) return tipsgg.fetchTodayMatches(game);
   if (oddspapiEnabled()) void refreshOddsPapi().catch(() => {}); // no-op unless its schedule is due
   const today = new Date().toISOString().slice(0, 10);
   const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
   return (await newFeed(game, false)).filter((m) => m.date === today || m.date === yesterday);
 }
 
-/** Feed loops pause while tips.gg has banned us — not when the new feed is the source. */
+/** Feed loops used to pause while tips.gg had banned us; nothing bans the new feed. */
 export function feedPaused(): boolean {
-  return usingNewFeed() ? false : tipsgg.isBanned();
+  return false;
 }

@@ -69,8 +69,6 @@ export async function isBlocked(jti: string): Promise<boolean> {
  * @param ttlMs — time-to-live in ms (should match remaining token lifetime)
  */
 export async function blocklistJti(jti: string, ttlMs: number): Promise<void> {
-  const ttlSec = Math.ceil(ttlMs / 1000);
-
   const client = await getRedisClient();
   if (client) {
     try {

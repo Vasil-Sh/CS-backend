@@ -5,7 +5,7 @@
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import type { TipsGgMatch } from './tipsggScraper';
+import type { TipsGgMatch } from './matchTypes';
 
 const CACHE_DIR = join(process.cwd(), '.cache');
 const CUSTOM_FILE = join(CACHE_DIR, 'cs2_custom_matches.json');
@@ -134,10 +134,8 @@ function parseMatchLine(line: string, date: string): TipsGgMatch | null {
   // treat the entire original line as a placeholder.
   let team1 = '';
   let team2 = '';
-  let isPlaceholder = false;
 
   if (!rest || /#\d|round\s*(of|of)\s*\d|winner|tbd|tba/i.test(rest)) {
-    isPlaceholder = true;
     // For placeholders like "Esports World Cup 2026 Open Qualifier - Round of 16 #1"
     // The entire line after the format is the placeholder description
     team1 = 'TBD';

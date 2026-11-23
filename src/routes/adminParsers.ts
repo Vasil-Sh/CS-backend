@@ -3,13 +3,10 @@ import { requireAuth, requireAdmin } from '../middleware/auth';
 import { pool } from '../db/client';
 import { listCircuits, pauseInfo, pauseParser, resetCircuit, resumeParser } from '../services/circuitBreaker';
 import { oddspapiEnabled } from '../services/oddspapiFeed';
-import { usingNewFeed } from '../services/matchFeed';
 import { listServerErrors, resolveServerError } from '../services/serverErrors';
 
-/** Parsers shown on the admin screen: Liquipedia + OddsPapi + OpenDota replace tips.gg in the new feed. */
-export const knownParsers = () => (usingNewFeed()
-  ? ['liquipedia', ...(oddspapiEnabled() ? ['oddspapi'] : []), 'opendota', 'hltv_scraper']
-  : ['tipsgg_fetch_cs2_matches', 'tipsgg_fetch_dota2_matches', 'hltv_scraper']);
+/** Parsers shown on the admin screen: Liquipedia + OddsPapi + OpenDota (tips.gg and HLTV removed 23.11.2026). */
+export const knownParsers = () => ['liquipedia', ...(oddspapiEnabled() ? ['oddspapi'] : []), 'opendota'];
 
 const parsers = new Hono();
 
@@ -78,7 +75,7 @@ parsers.post('/admin/parsers/:name/rerun', requireAuth, requireAdmin, async (c) 
   return c.json({ success: true });
 });
 
-const KNOWN = new Set(['tipsgg_fetch_cs2_matches', 'tipsgg_fetch_dota2_matches', 'hltv_scraper', 'oddspapi', 'opendota', 'liquipedia']);
+const KNOWN = new Set(['oddspapi', 'opendota', 'liquipedia']);
 function audit(actor: { userId: number; username: string }, action: string, target: string, details: Record<string, unknown>): void {
   void pool
     .query(`INSERT INTO admin_audit_log(actor_id, actor_name, action, target, details, status) VALUES($1,$2,$3,$4,$5,'success')`,

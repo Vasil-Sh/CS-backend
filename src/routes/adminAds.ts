@@ -195,7 +195,7 @@ ads.get('/ads/placements', async (c) => {
        WHERE active AND review_status='approved' AND (starts_on IS NULL OR starts_on <= $1::date) AND (ends_on IS NULL OR ends_on >= $1::date)
        ORDER BY starts_on NULLS LAST, id`, [today]),
   ]);
-  const pick = ({ list, details, ...r }: any) => r;
+  const pick = ({ list: _list, details: _details, ...r }: any) => r;
   return c.json({
     label: 'Реклама · 21+',
     bookmakers: {

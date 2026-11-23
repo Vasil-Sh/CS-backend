@@ -3,6 +3,7 @@ import { requireAuth } from '../middleware/auth';
 import { createBetSchema, updateBetSchema } from '../middleware/validation';
 import { getPagination } from '../utils/response';
 import { betService } from '../services/betService';
+import { betHints } from '../services/betHints';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function isValidUUID(id: string): boolean { return UUID_RE.test(id); }
@@ -15,6 +16,12 @@ bets.get('/', requireAuth, async (c) => {
   const { page, limit } = getPagination(c);
   const { rows, total } = await betService.getBets(user.userId, page, limit);
   return c.json({ data: rows, meta: { page, limit, total, totalPages: Math.ceil(total / limit) } });
+});
+
+// ── GET /api/bets/result-hints — pending bets whose match has finished: «схоже на виграш / програш» ──
+bets.get('/result-hints', requireAuth, async (c) => {
+  try { return c.json({ hints: await betHints(c.get('user').userId) }); }
+  catch { return c.json({ hints: [] }); }
 });
 
 // ── POST /api/bets ──

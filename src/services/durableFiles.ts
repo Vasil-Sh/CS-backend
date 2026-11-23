@@ -10,7 +10,7 @@ import { dirname, join } from 'node:path';
 import { pool } from '../db/client';
 
 const ROOT = join(process.cwd(), '.cache');
-export const TRACKED = ['cs2_matches.json', 'dota2_matches.json', 'hltv_logos.json', 'logos/tournaments/'];
+export const TRACKED = ['cs2_matches.json', 'dota2_matches.json'];
 const MAX_FILE = 4 * 1024 * 1024;
 const SYNC_MS = 5 * 60_000;
 const saved = new Map<string, number>(); // name → mtime of the copy in Postgres

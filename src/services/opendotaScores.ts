@@ -7,7 +7,7 @@
 
 import { normalizeTeam } from '../utils/matchUtils';
 import { recordFailure, recordSuccess, isOpen } from './circuitBreaker';
-import type { TipsGgMatch } from './tipsggScraper';
+import type { TipsGgMatch } from './matchTypes';
 
 export const OPENDOTA_PARSER = 'opendota';
 const BASE = 'https://api.opendota.com/api';
