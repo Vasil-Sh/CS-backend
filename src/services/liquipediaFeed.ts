@@ -23,6 +23,10 @@ const WIKI: Record<'cs2' | 'dota2', string> = { cs2: 'counterstrike', dota2: 'do
 const REFRESH_MS = Number(process.env.LIQUIPEDIA_REFRESH_MIN || 5) * 60_000;
 const PARSE_GAP_MS = 31_000;
 const FAIL_BACKOFF_MS = 15 * 60_000;
+/** Right after a start (a deploy) the schedule restored from Postgres is served for a few minutes before the first call —
+ *  frequent deploys then do not hit Liquipedia's rate limit (the failures at 13:44 on 23.11). Only when there is a saved copy. */
+const START_DELAY_MS = Number(process.env.LIQUIPEDIA_START_DELAY_MIN ?? 3) * 60_000;
+const STARTED_AT = Date.now();
 const USER_AGENT = (process.env.LIQUIPEDIA_USER_AGENT || 'MatchIQ/1.0 (+https://github.com/Vasil-Sh/cs-backend)').trim();
 const cacheFile = (game: 'cs2' | 'dota2') => join(process.cwd(), '.cache', `liquipedia_${game}.json`);
 
@@ -228,7 +232,7 @@ async function fetchPage(game: 'cs2' | 'dota2', page: string): Promise<TipsGgMat
 export async function fetchLiquipediaMatches(game: 'cs2' | 'dota2'): Promise<TipsGgMatch[]> {
   await hydrate(game);
   const cached = readCache(game);
-  const fresh = cached && Date.now() - cached.at < REFRESH_MS;
+  const fresh = cached && (Date.now() - cached.at < REFRESH_MS || (cached.data.length > 0 && Date.now() - STARTED_AT < START_DELAY_MS));
   if (fresh || isOpen(LIQUIPEDIA_PARSER) || Date.now() - (failedAt[game] || 0) < FAIL_BACKOFF_MS) return withTimeStatus(cached?.data || []);
   if (!inflight[game]) {
     inflight[game] = limited(() => fetchTicker(game)).then((list) => {

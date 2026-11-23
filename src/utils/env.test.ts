@@ -1,4 +1,13 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+// The test must not depend on the shell: CI sets DATABASE_URL / JWT_SECRET, a local run usually does not.
+vi.hoisted(() => {
+  process.env.DATABASE_URL ||= 'postgresql://test:test@localhost:5432/test';
+  process.env.JWT_SECRET ||= 'test-secret';
+  delete process.env.CS_API_URL;
+  delete process.env.JWT_REFRESH_EXPIRES_IN;
+});
+
 import { getEnv } from './env';
 
 describe('env validation', () => {

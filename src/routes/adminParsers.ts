@@ -4,9 +4,10 @@ import { pool } from '../db/client';
 import { listCircuits, pauseInfo, pauseParser, resetCircuit, resumeParser } from '../services/circuitBreaker';
 import { oddspapiEnabled } from '../services/oddspapiFeed';
 import { usingNewFeed } from '../services/matchFeed';
+import { listServerErrors, resolveServerError } from '../services/serverErrors';
 
 /** Parsers shown on the admin screen: Liquipedia + OddsPapi + OpenDota replace tips.gg in the new feed. */
-const knownParsers = () => (usingNewFeed()
+export const knownParsers = () => (usingNewFeed()
   ? ['liquipedia', ...(oddspapiEnabled() ? ['oddspapi'] : []), 'opendota', 'hltv_scraper']
   : ['tipsgg_fetch_cs2_matches', 'tipsgg_fetch_dota2_matches', 'hltv_scraper']);
 
@@ -28,6 +29,13 @@ parsers.get('/admin/parsers', requireAuth, requireAdmin, async (c) => {
     }),
   );
 
+  // Last success — a failure followed by a success is history, not «працює зі збоями»
+  const ok = await pool.query(
+    `SELECT source, MAX(created_at) AS last_success FROM parser_events
+     WHERE event = 'success' AND created_at > now() - INTERVAL '24 hours' GROUP BY source`,
+  ).catch(() => ({ rows: [] as any[] }));
+  const okMap = new Map<string, string>(ok.rows.map((r: any) => [r.source, r.last_success ? new Date(r.last_success).toISOString() : '']));
+
   // Merge known parser sources even if they never failed.
   const known = knownParsers();
   const merged = known.map((name) => {
@@ -43,9 +51,23 @@ parsers.get('/admin/parsers', requireAuth, requireAdmin, async (c) => {
       failures: circuit?.failures ?? 0,
       failures24h: fail?.count ?? 0,
       lastFailure: fail?.lastFailure ?? (circuit?.lastFailure ? new Date(circuit.lastFailure).toISOString() : ''),
+      lastSuccess: okMap.get(name) ?? '',
     };
   });
   return c.json({ parsers: merged });
+});
+
+/** Server errors kept for the admin («Налаштування → Помилки сервера»). */
+parsers.get('/admin/server-errors', requireAuth, requireAdmin, async (c) => {
+  return c.json({ errors: await listServerErrors(parseInt(c.req.query('limit') || '100', 10) || 100) });
+});
+parsers.delete('/admin/server-errors/:id', requireAuth, requireAdmin, async (c) => {
+  const raw = c.req.param('id') || '';
+  const id = raw === 'all' ? 'all' : parseInt(raw, 10);
+  if (id !== 'all' && (!Number.isInteger(id) || id <= 0)) return c.json({ error: 'Invalid id' }, 400);
+  const n = await resolveServerError(id);
+  audit(c.get('user'), 'DELETE', `/admin/server-errors/${raw}`, { removed: n });
+  return c.json({ success: true, removed: n });
 });
 
 /** POST /api/admin/parsers/:name/rerun — reset the breaker so the next fetch retries. */

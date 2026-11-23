@@ -66,9 +66,20 @@ import { fetchCstestMatches } from './services/hltv/cstestClient';
 import { scrapeHltvRankingLogos } from './services/hltv/hltvRankingScraper';
 import { buildLocalLogoStore, loadTipsggLogos, buildDota2LocalStore, extractLogoPacks } from './services/logoStore';
 import { hydrateTeamLogos } from './services/teamLogos';
+import { restoreDurableFiles, startDurableSync, syncDurableFiles } from './services/durableFiles';
+import { captureServerErrors, flushServerErrors, recordServerError } from './services/serverErrors';
+import { knownParsers } from './routes/adminParsers';
+import { listCircuits, pauseInfo } from './services/circuitBreaker';
 import { runWithRequestContext } from './utils/requestContext';
 import { AppError } from './utils/AppError';
 import { allowedOrigins, isAllowedOrigin } from './utils/allowedOrigins';
+
+// ── Server errors → Postgres for the admin (console.error, unhandled rejections, API 500s) ──
+captureServerErrors();
+
+// ── Caches wiped by a deploy: put the saved copies back before anything reads them (≤10 s, then go on without) ──
+await Promise.race([restoreDurableFiles(), new Promise((r) => setTimeout(r, 10_000))]);
+startDurableSync();
 
 const app = new Hono();
 
@@ -124,20 +135,30 @@ app.use('*', async (c, next) => {
 });
 
 // ── Health check (reuses shared pool, no leak) ──
+// For an uptime monitor (UptimeRobot etc.): 503 when the database is down; «degraded» when a match source is down.
 app.get('/api/health', async (c) => {
   let dbStatus = 'unknown';
+  const t0 = Date.now();
   try {
-    const result = await db.execute(sql`SELECT 1`);
+    await db.execute(sql`SELECT 1`);
     dbStatus = 'connected';
   } catch {
     dbStatus = 'disconnected';
   }
+  const circuits = listCircuits();
+  const parsers = Object.fromEntries(knownParsers().map((n) => [n, pauseInfo(n) ? 'paused' : circuits.find((x) => x.name === n)?.open ? 'down' : 'ok']));
+  const down = Object.values(parsers).filter((s) => s === 'down').length;
+  const status = dbStatus !== 'connected' ? 'down' : down ? 'degraded' : 'ok';
   return c.json({
-    status: 'ok',
+    status,
     database: dbStatus,
+    dbMs: Date.now() - t0,
+    parsers,
     uptime: Math.floor(process.uptime()),
+    memoryMb: Math.round(process.memoryUsage().rss / 1048576),
+    version: (process.env.RAILWAY_GIT_COMMIT_SHA || '').slice(0, 7) || undefined,
     timestamp: new Date().toISOString(),
-  });
+  }, status === 'down' ? 503 : 200);
 });
 
 // ── API Docs (embedded TS — no file I/O) ──
@@ -228,8 +249,9 @@ app.onError((err, c) => {
     console.warn(`[AppError] ${err.code} — ${err.message}`);
     return c.json(err.toJSON(), err.httpStatus as 400 | 401 | 403 | 404 | 429);
   }
-  // Programmer error / unknown: mask the message, log full stack
-  console.error('[Error]', err.message, err.stack?.split('\n').slice(0, 3).join(' | '));
+  // Programmer error / unknown: mask the message, log full stack (kept for the admin with the route; stderr directly — not twice via console.error)
+  recordServerError('api', err.message, err.stack || '', `${c.req.method} ${c.req.path}`);
+  process.stderr.write(`[Error] ${err.message} ${err.stack?.split('\n').slice(0, 3).join(' | ') || ''}\n`);
   return c.json({ error: 'Internal server error', code: 'INTERNAL_ERROR' }, 500);
 });
 
@@ -719,6 +741,9 @@ startProExpiry();
 // ── Graceful shutdown ──
 const shutdown = async (signal: string) => {
   console.log(`\n🛑 Received ${signal}, shutting down gracefully...`);
+  // keep the caches and the not-yet-saved errors for the next start (a deploy wipes the disk)
+  await Promise.race([flushServerErrors(), new Promise((r) => setTimeout(r, 3_000))]);
+  await Promise.race([syncDurableFiles().then((n) => console.log(`[durable] ${n} cache files saved`)), new Promise((r) => setTimeout(r, 5_000))]);
   try {
     await pool.end();
     console.log('✅ Database pool closed');
