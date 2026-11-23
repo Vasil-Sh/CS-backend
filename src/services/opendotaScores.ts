@@ -30,19 +30,29 @@ export interface SeriesScore { team1: string; team2: string; score1: number; sco
 
 const TYPE: Record<number, { label: string; games: number }> = { 0: { label: 'BO1', games: 1 }, 1: { label: 'BO3', games: 3 }, 2: { label: 'BO5', games: 5 }, 3: { label: 'BO2', games: 2 } };
 
-async function get<T>(path: string): Promise<T | null> {
+const RETRY_MS = Number(process.env.OPENDOTA_RETRY_MS ?? 10_000);
+const LABEL: Record<string, string> = { '/proMatches': 'професійні ігри', '/live': 'live-ігри' };
+
+/** One GET; a temporary failure (timeout, 429, 5xx) is tried once more after 10 s before it counts as a failure. */
+async function get<T>(path: string, retry = true): Promise<T | null> {
   if (isOpen(OPENDOTA_PARSER)) return null;
+  let why = '', transient = false;
   try {
     const res = await fetch(`${BASE}${path}`, { headers: { Accept: 'application/json', 'User-Agent': 'MatchIQ (contact: admin)' }, signal: AbortSignal.timeout(15_000) });
-    if (!res.ok) { console.warn(`[opendota] ${path} → HTTP ${res.status}`); recordFailure(OPENDOTA_PARSER); return null; }
-    const json = (await res.json()) as T;
-    recordSuccess(OPENDOTA_PARSER);
-    return json;
+    if (res.ok) {
+      const json = (await res.json()) as T;
+      recordSuccess(OPENDOTA_PARSER, `${LABEL[path] || path} · ${Array.isArray(json) ? json.length : 1} записів`);
+      return json;
+    }
+    why = `HTTP ${res.status}`; transient = res.status === 429 || res.status >= 500;
   } catch (e) {
-    console.warn(`[opendota] ${path} failed:`, (e as Error).message);
-    recordFailure(OPENDOTA_PARSER);
-    return null;
+    const m = (e as Error).message;
+    why = /timeout|aborted/i.test(m) ? 'немає відповіді 15 с' : `мережа: ${m.slice(0, 80)}`; transient = true;
   }
+  console.warn(`[opendota] ${path} → ${why}`);
+  if (retry && transient) { await new Promise((r) => setTimeout(r, RETRY_MS)); return get<T>(path, false); }
+  recordFailure(OPENDOTA_PARSER, `${LABEL[path] || path} · ${why}`);
+  return null;
 }
 
 /** Group single games into series and count wins per team (team1 = radiant side of the first game). */

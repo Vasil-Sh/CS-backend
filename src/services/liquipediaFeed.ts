@@ -200,32 +200,48 @@ function logSampleOnce(html: string, game: string, list: TipsGgMatch[]): void {
 /** Pages that carry the match ticker, tried in order (Liquipedia has renamed it before). */
 const TICKER_PAGES = ['Liquipedia:Matches', 'Liquipedia:Upcoming_and_ongoing_matches'];
 
-async function fetchTicker(game: 'cs2' | 'dota2'): Promise<TipsGgMatch[] | null> {
-  // runs inside limited(): the next page waits the 31 s gap here (calling limited() again would wait on itself)
+type PageResult = { list: TipsGgMatch[] } | { why: string; transient: boolean };
+
+/** One run: the ticker page, the same page once more after the 31 s gap when the failure looked
+ *  temporary (timeout, 429, 5xx), then the older page name. Returns the matches or why it failed. */
+async function fetchTicker(game: 'cs2' | 'dota2'): Promise<{ list: TipsGgMatch[] | null; why: string }> {
+  // runs inside limited(): every further request waits the 31 s gap here (calling limited() again would wait on itself)
+  const gap = async () => { await new Promise((r) => setTimeout(r, PARSE_GAP_MS)); lastCall = Date.now(); };
+  let why = '';
   for (let i = 0; i < TICKER_PAGES.length; i++) {
-    if (i > 0) { await new Promise((r) => setTimeout(r, PARSE_GAP_MS)); lastCall = Date.now(); }
-    const list = await fetchPage(game, TICKER_PAGES[i]);
-    if (list?.length) return list;
+    if (i > 0) await gap();
+    let r = await fetchPage(game, TICKER_PAGES[i]);
+    if ('why' in r && r.transient) { console.warn(`[liquipedia] ${game}: ${r.why} — retrying in ${PARSE_GAP_MS / 1000} s`); await gap(); r = await fetchPage(game, TICKER_PAGES[i]); }
+    if ('list' in r) return { list: r.list, why: '' };
+    why ||= r.why;
   }
-  return null;
+  return { list: null, why };
 }
 
-async function fetchPage(game: 'cs2' | 'dota2', page: string): Promise<TipsGgMatch[] | null> {
+async function fetchPage(game: 'cs2' | 'dota2', page: string): Promise<PageResult> {
   const url = `https://liquipedia.net/${WIKI[game]}/api.php?${new URLSearchParams({ action: 'parse', page, format: 'json', prop: 'text' })}`;
   try {
     const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT, 'Accept-Encoding': 'gzip', Accept: 'application/json' }, signal: AbortSignal.timeout(30_000) });
-    if (!res.ok) { console.warn(`[liquipedia] ${game} ${page} → HTTP ${res.status}`); return null; }
+    if (!res.ok) { console.warn(`[liquipedia] ${game} ${page} → HTTP ${res.status}`); return { why: `HTTP ${res.status}`, transient: res.status === 429 || res.status >= 500 }; }
     const json: any = await res.json();
-    if (json?.error) { console.warn(`[liquipedia] ${game} ${page} → ${json.error.code}: ${json.error.info}`); return null; }
+    if (json?.error) { console.warn(`[liquipedia] ${game} ${page} → ${json.error.code}: ${json.error.info}`); return { why: `API: ${json.error.code}`, transient: false }; }
     const html: string = typeof json?.parse?.text === 'string' ? json.parse.text : json?.parse?.text?.['*'] || '';
     const list = parseTicker(html, game);
     logSampleOnce(html, game, list);
-    if (!list.length) { console.warn(`[liquipedia] ${game} ${page} → 0 matches parsed: ${describeHtml(html)}`); return null; }
-    return list;
+    if (!list.length) { console.warn(`[liquipedia] ${game} ${page} → 0 matches parsed: ${describeHtml(html)}`); return { why: 'сторінка без матчів', transient: false }; }
+    return { list };
   } catch (e) {
-    console.warn(`[liquipedia] ${game} ${page} failed:`, (e as Error).message);
-    return null;
+    const m = (e as Error).message;
+    console.warn(`[liquipedia] ${game} ${page} failed:`, m);
+    return { why: /timeout|aborted/i.test(m) ? 'немає відповіді 30 с' : `мережа: ${m.slice(0, 80)}`, transient: true };
   }
+}
+
+/** «CS2 · 48 матчів · 3 live · 20 завершено» — the run's line in the admin log. */
+export function runSummary(game: 'cs2' | 'dota2', list: TipsGgMatch[]): string {
+  const live = list.filter((m) => m.status === 'live').length, fin = list.filter((m) => m.status === 'finished').length;
+  const n = list.length, w = n % 10 === 1 && n % 100 !== 11 ? 'матч' : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? 'матчі' : 'матчів';
+  return `${game === 'cs2' ? 'CS2' : 'Dota 2'} · ${n} ${w}${live ? ` · ${live} live` : ''}${fin ? ` · ${fin} завершено` : ''}`;
 }
 
 /** Matches for one game: from cache when fresher than 5 min, otherwise one (rate-limited) API call. */
@@ -235,10 +251,10 @@ export async function fetchLiquipediaMatches(game: 'cs2' | 'dota2'): Promise<Tip
   const fresh = cached && (Date.now() - cached.at < REFRESH_MS || (cached.data.length > 0 && Date.now() - STARTED_AT < START_DELAY_MS));
   if (fresh || isOpen(LIQUIPEDIA_PARSER) || Date.now() - (failedAt[game] || 0) < FAIL_BACKOFF_MS) return withTimeStatus(cached?.data || []);
   if (!inflight[game]) {
-    inflight[game] = limited(() => fetchTicker(game)).then((list) => {
-      if (list) { const data = writeCache(game, list); recordSuccess(LIQUIPEDIA_PARSER); delete failedAt[game]; return data; }
+    inflight[game] = limited(() => fetchTicker(game)).then(({ list, why }) => {
+      if (list) { const data = writeCache(game, list); recordSuccess(LIQUIPEDIA_PARSER, runSummary(game, list)); delete failedAt[game]; return data; }
       failedAt[game] = Date.now();
-      recordFailure(LIQUIPEDIA_PARSER);
+      recordFailure(LIQUIPEDIA_PARSER, `${game === 'cs2' ? 'CS2' : 'Dota 2'} · ${why || 'невідома помилка'}`);
       return cached?.data || [];
     }).finally(() => { delete inflight[game]; });
   }

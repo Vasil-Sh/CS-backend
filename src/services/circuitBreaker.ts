@@ -15,12 +15,13 @@ interface CircuitState {
 
 // Collapse identical parser events within 60s so the log doesn't spam on
 // every incremental refresh (120s cadence) or repeated scraper failures.
-const lastEvent = new Map<string, { kind: string; at: number }>();
+const lastEvent = new Map<string, { kind: string; message: string; at: number }>();
 function logEvent(name: string, kind: 'success' | 'failure' | 'rerun', message = ''): void {
   const prev = lastEvent.get(name);
   const now = Date.now();
-  if (prev && prev.kind === kind && now - prev.at < 60_000) return;
-  lastEvent.set(name, { kind, at: now });
+  // same kind AND same text within a minute → one line (CS2 and Dota runs with their own counts both stay)
+  if (prev && prev.kind === kind && prev.message === message && now - prev.at < 60_000) return;
+  lastEvent.set(name, { kind, message, at: now });
   adminMatchesService.logParserEvent(name, kind, message);
 }
 
@@ -83,21 +84,24 @@ export function isOpen(name: string): boolean {
   return true;
 }
 
-export function recordSuccess(name: string): void {
+/** `message` goes to the admin log — what the run brought («CS2 · 48 матчів · 3 live»). */
+export function recordSuccess(name: string, message = 'OK'): void {
   const s = getState(name);
   s.failures = 0;
   s.open = false;
-  logEvent(name, 'success', 'OK');
+  logEvent(name, 'success', message);
 }
 
-export function recordFailure(name: string): void {
+/** `reason` goes to the admin log instead of a bare counter («HTTP 503», «timeout»). */
+export function recordFailure(name: string, reason = ''): void {
   if (paused.has(name)) return; // a stopped parser is not failing
   const s = getState(name);
   s.failures++;
   s.lastFailure = Date.now();
   // Persist to parser_failures (best-effort, throttled inside).
-  recordParserFailure(name, `Circuit breaker failure #${s.failures}`);
-  logEvent(name, 'failure', `Circuit breaker failure #${s.failures}`);
+  const msg = reason ? `${reason} · збій ${s.failures} поспіль` : `Circuit breaker failure #${s.failures}`;
+  recordParserFailure(name, msg);
+  logEvent(name, 'failure', msg);
   if (s.failures >= FAILURE_THRESHOLD) {
     s.open = true;
     console.warn(`[circuit-breaker] ${name} OPEN (${s.failures} failures)`);

@@ -1,3 +1,4 @@
+import { forgetAliases } from '../services/matchFeed';
 import { Hono } from 'hono';
 import { deleteTeamLogo, listTeamLogos, saveTeamLogo } from '../services/teamLogos';
 import { requireAuth, requireAdmin } from '../middleware/auth';
@@ -74,6 +75,7 @@ matches.post('/admin/team-aliases', requireAuth, requireAdmin, async (c) => {
       alias: String(b.alias || ''),
       createdBy: actor.username,
     });
+    forgetAliases(); // OddsPapi prices find the team under its new name on the next feed build
     audit(actor, 'POST', '/admin/team-aliases', { game: alias.game, canonical: alias.canonical, alias: alias.alias });
     return c.json(alias, 201);
   } catch (e: any) {
@@ -87,6 +89,7 @@ matches.delete('/admin/team-aliases/:id', requireAuth, requireAdmin, async (c) =
   const id = parseInt(c.req.param('id') || '', 10);
   if (!Number.isInteger(id) || id <= 0) return c.json({ error: 'Invalid id' }, 400);
   const ok = await adminMatchesService.deleteTeamAlias(id);
+  forgetAliases();
   if (!ok) return c.json({ error: 'Псевдонім не знайдено' }, 404);
   audit(actor, 'DELETE', `/admin/team-aliases/${id}`, {});
   return c.json({ success: true });

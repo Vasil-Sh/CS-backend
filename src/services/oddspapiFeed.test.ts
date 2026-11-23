@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { oddsTournaments, pickWinnerMarkets, toMatch, winnerPrices, type RawFixture } from './oddspapiFeed';
+import { oddsEveryMs, oddsTournaments, pickWinnerMarkets, toMatch, winnerPrices, type RawFixture } from './oddspapiFeed';
 import { applySeries, buildSeries } from './opendotaScores';
-import { addOdds, sameTeam } from './matchFeed';
+import { addOdds, sameTeam, teamKey, type OddsMiss } from './matchFeed';
 
 const inHours = (h: number) => new Date(Date.now() + h * 3_600_000).toISOString();
 const fixture = (o: Partial<RawFixture> = {}): RawFixture => ({
@@ -87,6 +87,35 @@ describe('OddsPapi odds → our matches', () => {
     const ours = { ...op, id: 'lp-1', coeff1: null, coeff2: null, performer: null, nameTeam1: 'Tundra Esports', nameTeam2: 'Spirit' };
     expect(addOdds([ours], [op])).toBe(1);
     expect(ours).toMatchObject({ coeff1: 2.3, coeff2: 1.6, performer: 'Spirit' });
+  });
+});
+
+describe('OddsPapi budget and unmatched teams', () => {
+  const H = 3_600_000;
+  it('spends what is left of the month: often near its end, rarely at its start, never past 3 h / 12 h', () => {
+    const nov23 = Date.UTC(2026, 10, 23, 21, 0), nov2 = Date.UTC(2026, 10, 2, 0, 0);
+    expect(oddsEveryMs(218, 2, nov23)).toBe(3 * H); // 7 days, plenty left → every 3 h
+    const start = oddsEveryMs(230, 2, nov2) / H; // 28 days → ~5 h
+    expect(start).toBeGreaterThan(4); expect(start).toBeLessThan(7);
+    expect(oddsEveryMs(230, 10, nov2)).toBeGreaterThan(oddsEveryMs(230, 2, nov2)); // 2 calls a refresh → half as often
+    expect(oddsEveryMs(70, 2, nov2)).toBe(12 * H); // little left → the slowest rate
+    expect(oddsEveryMs(5, 2, nov2)).toBe(24 * H); // reserve only → once a day
+  });
+
+  it('uses admin aliases, and lists priced OddsPapi matches it could not place with our likely match', () => {
+    const at = new Date(Date.now() + 5 * H).toISOString();
+    const op = (a: string, b: string, c1: number | null = 1.5, c2: number | null = 2.5) => ({ ...toMatch(fixture({ participant1Name: a, participant2Name: b }), ['171'])!, coeff1: c1, coeff2: c2, startDate: at });
+    const ours = (a: string, b: string) => ({ ...op(a, b), id: `lp-${a}`, coeff1: null, coeff2: null });
+    const base = [ours('Natus Vincere', 'FaZe Clan'), ours('Vitality', 'MOUZ')];
+    const odds = [op('NAVI', 'FaZe'), op('Team Vitality', 'MOUZ'), op('Nobody', 'Else'), op('G2', 'Spirit', null, null)];
+    const miss: OddsMiss[] = [];
+    expect(addOdds(base, odds, teamKey, miss)).toBe(1); // only Vitality — MOUZ
+    expect(miss.map((x) => [x.odds.team1, x.ours?.team1 ?? null])).toEqual([['NAVI', 'Natus Vincere'], ['Nobody', null]]);
+    const alias = new Map([[teamKey('NAVI'), teamKey('Natus Vincere')]]);
+    const resolve = (n: string) => alias.get(teamKey(n)) || teamKey(n);
+    expect(sameTeam('NAVI', 'Natus Vincere', resolve)).toBe(true);
+    const again = [ours('Natus Vincere', 'FaZe Clan')];
+    expect(addOdds(again, [op('NAVI', 'FaZe')], resolve)).toBe(1);
   });
 });
 
