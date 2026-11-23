@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { deleteTeamLogo, listTeamLogos, saveTeamLogo } from '../services/teamLogos';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { pool } from '../db/client';
 import {
@@ -89,6 +90,34 @@ matches.delete('/admin/team-aliases/:id', requireAuth, requireAdmin, async (c) =
   const ok = await adminMatchesService.deleteTeamAlias(id);
   if (!ok) return c.json({ error: 'Псевдонім не знайдено' }, 404);
   audit(actor, 'DELETE', `/admin/team-aliases/${id}`, {});
+  return c.json({ success: true });
+});
+
+// «Команди → Змінити логотип»: one image for all spellings of the team; it wins over packs and feeds
+matches.get('/admin/team-logos', requireAuth, requireAdmin, (c) => c.json({ logos: listTeamLogos() }));
+
+matches.post('/admin/team-logos', requireAuth, requireAdmin, async (c) => {
+  const actor = c.get('user');
+  const b = await c.req.json().catch(() => null);
+  if (!b || typeof b !== 'object') return c.json({ error: 'Invalid body' }, 400);
+  try {
+    const names = Array.isArray(b.names) ? b.names.map(String) : [String(b.name || '')];
+    const saved = await saveTeamLogo({ game: String(b.game || ''), names, dataUrl: String(b.dataUrl || ''), by: actor.username });
+    audit(actor, 'POST', '/admin/team-logos', { game: saved.game, names: saved.names });
+    return c.json(saved, 201);
+  } catch (e: any) {
+    return c.json({ error: e?.message || 'Не вдалося зберегти логотип' }, 400);
+  }
+});
+
+matches.delete('/admin/team-logos', requireAuth, requireAdmin, async (c) => {
+  const actor = c.get('user');
+  // ?game=cs2&name=Team%20Spirit&name=Spirit
+  const game = c.req.query('game') || '';
+  const names = (c.req.queries('name') || []).map(String);
+  const n = await deleteTeamLogo(game, names);
+  if (!n) return c.json({ error: 'Логотип не знайдено' }, 404);
+  audit(actor, 'DELETE', '/admin/team-logos', { game, names });
   return c.json({ success: true });
 });
 

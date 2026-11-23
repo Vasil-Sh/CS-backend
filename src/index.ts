@@ -65,6 +65,7 @@ import { upsertMatchHistoryBatch } from './services/matchHistoryService';
 import { fetchCstestMatches } from './services/hltv/cstestClient';
 import { scrapeHltvRankingLogos } from './services/hltv/hltvRankingScraper';
 import { buildLocalLogoStore, loadTipsggLogos, buildDota2LocalStore, extractLogoPacks } from './services/logoStore';
+import { hydrateTeamLogos } from './services/teamLogos';
 import { runWithRequestContext } from './utils/requestContext';
 import { AppError } from './utils/AppError';
 import { allowedOrigins, isAllowedOrigin } from './utils/allowedOrigins';
@@ -451,6 +452,9 @@ setTimeout(() => {
     console.warn('[hltvRanking] Startup scrape failed:', (e as Error).message)
   );
 }, 3_000);
+
+// ── Admin-uploaded team logos (index in memory) ──
+hydrateTeamLogos();
 
 // ── Team logo packs: unpack cs2_logos.zip / dota2_logos.zip on start, then index them ──
 setTimeout(() => {

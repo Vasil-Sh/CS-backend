@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { db, schema } from "../db/client";
 import { eq, and } from "drizzle-orm";
 import { generateLogoFallback } from "../services/createMatchesRouter";
+import { customLogoUrl } from "../services/teamLogos";
 import {
   buildPublicProfileStats,
   toNumber,
@@ -69,9 +70,11 @@ publicProfile.get("/:username", async (c) => {
         return {
           ...bet,
           logoTeam1:
+            (bet.team1 ? customLogoUrl(bet.team1, prefix) : null) ||
             bet.logoTeam1 ||
             (bet.team1 ? generateLogoFallback(bet.team1, prefix) : null),
           logoTeam2:
+            (bet.team2 ? customLogoUrl(bet.team2, prefix) : null) ||
             bet.logoTeam2 ||
             (bet.team2 ? generateLogoFallback(bet.team2, prefix) : null),
         };

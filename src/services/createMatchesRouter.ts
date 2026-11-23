@@ -19,6 +19,7 @@ import { lookupLocalLogo, lookupLocalLogoRank, lookupDota2LocalLogoRank, getLoca
 import { touchActivity } from './activityTracker';
 import { withHltvMarkets } from './hltv/hltvMarketCache';
 import { adminMatchesService } from './adminMatchesService';
+import { customLogoUrl, readCustomLogo, normalizeLogoName } from './teamLogos';
 
 interface MatchRouterConfig {
   game: 'dota2' | 'cs2';
@@ -99,6 +100,10 @@ function proxyLogoUrl(url: string | null, prefix: string): string | null {
  * Priority: 1. HLTV local 2. tips.gg local 3. tips.gg CDN map 4. HLTV CDN 5. tips.gg slug.
  */
 export function generateLogoFallback(teamName: string, prefix: string): string | null {
+  // 0. A logo uploaded by an admin («Команди → Змінити логотип»)
+  const custom = customLogoUrl(teamName, prefix);
+  if (custom) return custom;
+
   // 1. HLTV local logo store — 2706 CS2 files, instant
   const localFile = lookupLocalLogo(teamName);
   if (localFile) {
@@ -589,8 +594,9 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
         m.nameTeam2 = String(m.nameTeam2);
         m.tournament = String(m.tournament ?? '');
         m.stage = String(m.stage ?? '');
-        m.logoTeam1 = m.logoTeam1 ? proxyLogoUrl(m.logoTeam1, prefix) : generateLogoFallback(m.nameTeam1, prefix);
-        m.logoTeam2 = m.logoTeam2 ? proxyLogoUrl(m.logoTeam2, prefix) : generateLogoFallback(m.nameTeam2, prefix);
+        // an admin's logo wins over the feed's own
+        m.logoTeam1 = customLogoUrl(m.nameTeam1, prefix) || (m.logoTeam1 ? proxyLogoUrl(m.logoTeam1, prefix) : generateLogoFallback(m.nameTeam1, prefix));
+        m.logoTeam2 = customLogoUrl(m.nameTeam2, prefix) || (m.logoTeam2 ? proxyLogoUrl(m.logoTeam2, prefix) : generateLogoFallback(m.nameTeam2, prefix));
         // Populate ranking positions from the correct local logo store when the
         // source didn't provide them (cstest/tips.gg often omit positions).
         // Filenames encode rank as a numeric prefix ("009_G2.png" → 9).
@@ -784,6 +790,17 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
   });
 
   // ── GET /logo/local/:filename — serve locally stored team logos ──
+  // «Команди → Змінити логотип»: the admin's logo (bytes from Postgres; the URL carries ?v= of the last change)
+  router.get('/logo/custom/:norm', async (c) => {
+    const norm = normalizeLogoName(c.req.param('norm') || '');
+    if (!norm) return c.json({ error: 'Not found' }, 404);
+    const logo = await readCustomLogo(prefix === 'dota2' ? 'dota2' : 'cs2', norm).catch(() => null);
+    if (!logo) return c.json({ error: 'Not found' }, 404);
+    return new Response(new Uint8Array(logo.data), {
+      headers: { 'Content-Type': logo.mime, 'Cache-Control': 'public, max-age=86400', 'Access-Control-Allow-Origin': '*' },
+    });
+  });
+
   router.get('/logo/local/:filename', (c) => {
     const filename = c.req.param('filename');
     if (!filename) return c.json({ error: 'Not found' }, 404);

@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { getPastMatches } from '../services/matchHistoryService';
 import { generateLogoFallback } from '../services/createMatchesRouter';
+import { customLogoUrl } from '../services/teamLogos';
 
 const router = new Hono();
 
@@ -22,12 +23,12 @@ router.get('/', async (c) => {
 
       const prefix = m.game === 'cs2' ? 'cs2-matches' : 'dota2-matches';
       const gameKey = m.game === 'cs2' ? 'cs2' : 'dota2';
-      m.logoTeam1 = m.logoTeam1 && String(m.logoTeam1).startsWith('http')
+      m.logoTeam1 = customLogoUrl(String(m.team1), gameKey) || (m.logoTeam1 && String(m.logoTeam1).startsWith('http')
         ? `/api/v1/${prefix}/logo/external/${Buffer.from(String(m.logoTeam1)).toString('base64url')}`
-        : generateLogoFallback(String(m.team1), gameKey);
-      m.logoTeam2 = m.logoTeam2 && String(m.logoTeam2).startsWith('http')
+        : generateLogoFallback(String(m.team1), gameKey));
+      m.logoTeam2 = customLogoUrl(String(m.team2), gameKey) || (m.logoTeam2 && String(m.logoTeam2).startsWith('http')
         ? `/api/v1/${prefix}/logo/external/${Buffer.from(String(m.logoTeam2)).toString('base64url')}`
-        : generateLogoFallback(String(m.team2), gameKey);
+        : generateLogoFallback(String(m.team2), gameKey));
     }
 
     return c.json(matches);
