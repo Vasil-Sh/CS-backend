@@ -18,7 +18,7 @@ import * as cheerio from 'cheerio';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordFailure, recordSuccess, isOpen } from './circuitBreaker';
-import { mergeSameTimeDuplicates, normalizeTeam } from '../utils/matchUtils';
+import { isTbd, mergeSameTimeDuplicates, normalizeTeam } from '../utils/matchUtils';
 import type { TipsGgMatch } from './matchTypes';
 import { pool } from '../db/client';
 import { isNight } from './nightMode';
@@ -120,7 +120,7 @@ export function parseTicker(html: string, game: 'cs2' | 'dota2', now = Date.now(
     const tourHref = tourBox.find('a[href]').first().attr('href') || '';
     const tourPage = decodeURIComponent(tourHref.replace(/^.*?\/(counterstrike|dota2)\//, '').split('#')[0]);
     const matchHref = decodeURIComponent((b.find('a[href*="Match:"]').first().attr('href') || '').replace(/^.*?\/(counterstrike|dota2)\//, '').split('#')[0]);
-    if (!t1 || !t2 || /^tbd$/i.test(t1) || /^tbd$/i.test(t2)) return;
+    if (isTbd(t1) || isTbd(t2)) return;
     // series score: old layout has two .match-info-header-scoreholder-score; the card layout keeps
     // a score element per opponent (any class with «score» in it) — read whichever is there
     let scores = b.find('.match-info-header-scoreholder-score').map((_, x) => Number($(x).text().trim())).get();
@@ -443,7 +443,7 @@ export function parseSchedule(html: string, game: 'cs2' | 'dota2', page: string,
       return { name, score: /^\d+$/.test(sc) ? Number(sc) : null, logo: lpUrl(im.attr('src') || im.attr('data-src')) };
     };
     const a = side(0), z = side(1);
-    if (!a.name || !z.name || /^tbd$/i.test(a.name) || /^tbd$/i.test(z.name)) return;
+    if (isTbd(a.name) || isTbd(z.name)) return;
     const start = new Date(ts * 1000);
     const finished = timer.attr('data-finished') === 'finished';
     const status: TipsGgMatch['status'] = finished ? 'finished' : start.getTime() <= now ? 'live' : 'upcoming';

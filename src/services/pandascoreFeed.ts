@@ -9,6 +9,7 @@ import type { TipsGgMatch } from './matchTypes';
 import { pool } from '../db/client';
 import { pauseInfo, recordFailure, recordSuccess } from './circuitBreaker';
 import { isNight } from './nightMode';
+import { isTbd } from '../utils/matchUtils';
 
 export const PANDASCORE_PARSER = 'pandascore';
 const BASE = 'https://api.pandascore.co';
@@ -131,7 +132,7 @@ export function psToMatch(m: PsMatch, now = Date.now()): TipsGgMatch | null {
   if (teams.length !== 2) return null;
   const [a, b] = teams;
   const n1 = (a.name || '').trim(), n2 = (b.name || '').trim();
-  if (!n1 || !n2 || /^tbd$/i.test(n1) || /^tbd$/i.test(n2)) return null;
+  if (isTbd(n1) || isTbd(n2)) return null;
   const tier = String(m.tournament?.tier || '').toLowerCase();
   if (!WITH_UNRANKED && (!tier || tier === 'unranked')) return null;
   const when = m.begin_at || m.scheduled_at;

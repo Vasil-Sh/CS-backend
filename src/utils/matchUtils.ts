@@ -50,7 +50,7 @@ const sourceRank = (m: FeedMatch): number => {
   if (id.startsWith('op-')) return 4;
   return -1; // manual and others: never merged away
 };
-const key = (v: string) => normalizeTeam(String(v || '').replace(/\b(e-?sports?|club|clan)\b/gi, ' '));
+const key = (v: string) => (isTbd(v) ? '' : normalizeTeam(String(v || '').replace(/\b(e-?sports?|club|clan)\b/gi, ' ')));
 const PAIRED = [['coeff1', 'coeff2'], ['openCoeff1', 'openCoeff2'], ['closeCoeff1', 'closeCoeff2'], ['bestCoeff1', 'bestCoeff2'], ['bestBook1', 'bestBook2'], ['score1', 'score2'], ['logoTeam1', 'logoTeam2'], ['positionTeam1', 'positionTeam2'], ['pred1', 'pred2']] as const;
 const SINGLE = ['oddsFixtureId', 'tournament', 'stage', 'tier', 'tournamentLogo', 'tournamentPage', 'matchPage', 'maps', 'performer'] as const;
 
@@ -75,7 +75,7 @@ export function mergeSameTimeDuplicates<T extends FeedMatch>(list: T[]): T[] {
       if (dt > 6 * 3_600_000) break;
       if (drop.has(b) || a.id === b.id) continue;
       const b1 = key(b.nameTeam1), b2 = key(b.nameTeam2);
-      const both = (a1 === b1 && a2 === b2) || (a1 === b2 && a2 === b1);
+      const both = !!(a1 && a2) && ((a1 === b1 && a2 === b2) || (a1 === b2 && a2 === b1));
       const one = dt <= 20 * 60_000 && !!(a1 && a2 && b1 && b2) && (a1 === b1 || a2 === b2 || a1 === b2 || a2 === b1);
       if (!both && !one) continue;
       const [keep, lose] = sourceRank(b) < sourceRank(a) ? [b, a] : [a, b];
@@ -92,4 +92,10 @@ export function mergeSameTimeDuplicates<T extends FeedMatch>(list: T[]): T[] {
     }
   }
   return drop.size ? list.filter((m) => !drop.has(m)) : list;
+}
+
+/** An opponent not decided yet: «TBD», «TBA», the page's «TBDTBDTBD» (full, short and icon name run together), empty. */
+export function isTbd(name: string | null | undefined): boolean {
+  const v = String(name || '').replace(/\s+/g, '').toLowerCase();
+  return !v || /^(tbd|tba)+$/.test(v) || v === 'tobedetermined' || v === 'tobeannounced';
 }

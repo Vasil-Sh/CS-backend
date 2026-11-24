@@ -39,3 +39,15 @@ describe('mergeSameTimeDuplicates', () => {
     expect([out[0].status, out[0].score1]).toEqual(['live', null]);
   });
 });
+
+describe('isTbd', () => {
+  it('catches the page\'s run-together placeholder', async () => {
+    const { isTbd } = await import('./matchUtils');
+    expect(['TBD', 'TBDTBDTBD', 'tba', '', ' TBD ', 'To be determined'].every(isTbd)).toBe(true);
+    expect(['PARIVISION', 'TBD Gaming', 'Team Liquid'].some(isTbd)).toBe(false);
+  });
+  it('two undecided matches at the same time are not merged', () => {
+    const out = mergeSameTimeDuplicates([m('lp-a', 'TBD', 'TBD', '2026-11-25T10:00:00Z'), m('lp-b', 'TBD', 'TBD', '2026-11-25T10:00:00Z')]);
+    expect(out).toHaveLength(2);
+  });
+});

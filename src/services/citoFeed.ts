@@ -10,6 +10,7 @@ import type { TipsGgMatch } from './matchTypes';
 import { pool } from '../db/client';
 import { pauseInfo, recordFailure, recordSuccess } from './circuitBreaker';
 import { isNight } from './nightMode';
+import { isTbd } from '../utils/matchUtils';
 
 export const CITO_PARSER = 'cito';
 const BASE = 'https://api.citoapi.com/api/v1';
@@ -154,7 +155,7 @@ const logo = (m: CitoMatch, n: 1 | 2): string | null => {
 
 export function citoToMatch(m: CitoMatch, now = Date.now()): TipsGgMatch | null {
   const t1 = (m.team1Name || '').trim(), t2 = (m.team2Name || '').trim();
-  if (!m.id || !m.startsAt || !t1 || !t2 || /^tbd$/i.test(t1) || /^tbd$/i.test(t2)) return null;
+  if (!m.id || !m.startsAt || isTbd(t1) || isTbd(t2)) return null;
   const start = new Date(m.startsAt);
   if (isNaN(start.getTime())) return null;
   const st = String(m.status || '').toLowerCase();

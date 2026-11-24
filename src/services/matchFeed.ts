@@ -13,7 +13,7 @@ import type { TipsGgMatch } from './matchTypes';
 import { cachedMatches, fetchOddsPapiMatches, oddspapiEnabled, refreshOddsPapi, requestScores } from './oddspapiFeed';
 import { applySeries, recentDotaSeries } from './opendotaScores';
 import { liquipediaOkAt, fetchLiquipediaMatches } from './liquipediaFeed';
-import { mergeSameTimeDuplicates, normalizeTeam } from '../utils/matchUtils';
+import { isTbd, mergeSameTimeDuplicates, normalizeTeam } from '../utils/matchUtils';
 import { citoEnabled, citoMatches, refreshCito } from './citoFeed';
 import { isNight } from './nightMode';
 import { pandascoreEnabled, pandascoreMatches, refreshPandaScore } from './pandascoreFeed';
@@ -209,7 +209,8 @@ async function newFeed(game: 'cs2' | 'dota2', spendOddsPapi: boolean): Promise<T
   // still «—:—» 6 h after the start, and Liquipedia's tournament page did not help: ask OddsPapi (≤ 5 a day)
   const noScore = list.filter((m) => m.status === 'finished' && (m.score1 == null || m.score2 == null) && m.oddsFixtureId && Date.parse(m.startDate) < Date.now() - 6 * 3_600_000);
   if (noScore.length) void requestScores(noScore.map((m) => m.oddsFixtureId!)).catch(() => {});
-  list = mergeSameTimeDuplicates(list);
+  // an opponent not decided yet («TBD», «TBDTBDTBD» saved from a tournament page before this check): not a match to show or bet on
+  list = mergeSameTimeDuplicates(list.filter((m) => !isTbd(m.nameTeam1) && !isTbd(m.nameTeam2)));
   return game === 'dota2' ? withDotaScores(list) : list;
 }
 
