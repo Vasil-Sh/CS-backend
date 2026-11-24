@@ -552,8 +552,10 @@ function withPages(game: 'cs2' | 'dota2', ticker: TipsGgMatch[], now = Date.now(
 /** For the admin card: tournament pages read and the matches only they gave. */
 export function liquipediaPagesInfo(): { pages: number; added: number; empty: number } {
   const all = [...Object.values(pageStore.cs2), ...Object.values(pageStore.dota2)];
-  // a page read with no match at all: a tournament page always lists some — most likely Liquipedia changed its layout
-  return { pages: all.length, added: pagesAdded.cs2 + pagesAdded.dota2, empty: all.filter((p) => !p.matches.length).length };
+  // a page with no dated match: one alone is normal (an overview page that links its stages, a stage still all TBD);
+  // half or more of them is not — most likely Liquipedia changed its layout. `empty` counts only then.
+  const empty = all.filter((p) => !p.matches.length).length;
+  return { pages: all.length, added: pagesAdded.cs2 + pagesAdded.dota2, empty: empty >= 2 && empty * 2 >= all.length ? empty : 0 };
 }
 
 // ── Live CS2: map-by-map score from the match page (≤ 2 pages every 3 min, each waits the 31 s gap) ──

@@ -39,7 +39,7 @@ export interface PsMatch {
   serie?: { full_name?: string | null; name?: string | null } | null;
 }
 
-interface CacheShape { at: number; failedAt: number; calls: { hour: number; n: number }; lists: Record<Game, Record<List, PsMatch[]>> }
+interface CacheShape { at: number; failedAt: number; calls: { hour: number; n: number }; recent?: number[]; lists: Record<Game, Record<List, PsMatch[]>> }
 const emptyLists = (): Record<Game, Record<List, PsMatch[]>> => ({ cs2: { upcoming: [], running: [], past: [] }, dota2: { upcoming: [], running: [], past: [] } });
 let cache: CacheShape = { at: 0, failedAt: 0, calls: { hour: 0, n: 0 }, lists: emptyLists() };
 let hydrated = false;
@@ -69,10 +69,11 @@ const QUERY: Record<List, string> = {
 };
 
 async function get(game: Game, list: List): Promise<PsMatch[] | null> {
-  const hour = Math.floor(Date.now() / H);
-  if (cache.calls.hour !== hour) cache.calls = { hour, n: 0 };
-  if (cache.calls.n >= 900) return null; // never near the 1000-an-hour cap
-  cache.calls.n++;
+  // calls of the last 60 minutes (a rolling hour — a clock hour showed «0 з 1000» right after :00)
+  const now = Date.now();
+  cache.recent = (cache.recent || []).filter((t) => now - t < H);
+  if (cache.recent.length >= 900) return null; // never near the 1000-an-hour cap
+  cache.recent.push(now);
   const path = `/${PATH[game]}/matches/${list}`;
   try {
     const res = await fetch(`${BASE}${path}?${QUERY[list]}`, {
@@ -238,12 +239,15 @@ export function pandascoreMatches(game: Game, now = Date.now()): TipsGgMatch[] {
 export const pandascoreReady = () => pandascoreEnabled() && hydrated && cache.at > 0;
 
 /** For the admin card. Reads the saved copy first: after a deploy, with no visitors, the refresh has not run yet. */
-export async function pandascoreDiag(): Promise<{ at: string; nextAt: string; callsThisHour: number; cs2: number; dota2: number; aliases: number }> {
+/** `waiting` — the next refresh is overdue: the app has no visitors, so the feed refresh sleeps (and asks no one). */
+export async function pandascoreDiag(): Promise<{ at: string; nextAt: string; callsThisHour: number; cs2: number; dota2: number; aliases: number; waiting: boolean }> {
   await hydrate();
   const iso = (t: number) => (t ? new Date(t).toISOString() : '');
   const n = (g: Game) => pandascoreMatches(g).length;
   const aliases = await pool.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM team_aliases WHERE created_by = 'auto:pandascore'`).then((r) => r.rows[0]?.n ?? 0).catch(() => learnedTotal);
-  return { at: iso(cache.at), nextAt: iso(cache.at ? cache.at + EVERY_MS : 0), callsThisHour: cache.calls.hour === Math.floor(Date.now() / H) ? cache.calls.n : 0, cs2: n('cs2'), dota2: n('dota2'), aliases };
+  const every = isNight() ? Math.max(EVERY_MS, 30 * 60_000) : EVERY_MS;
+  return { at: iso(cache.at), nextAt: iso(cache.at ? cache.at + every : 0), callsThisHour: (cache.recent || []).filter((t) => Date.now() - t < H).length, cs2: n('cs2'), dota2: n('dota2'), aliases,
+    waiting: !!cache.at && Date.now() - cache.at > every + 3 * 60_000 };
 }
 
 export function __setPandaScoreCache(lists: Partial<Record<Game, Partial<Record<List, PsMatch[]>>>>): void {
