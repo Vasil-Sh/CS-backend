@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bookPrices, oddsEveryMs, oddsTournaments, pickWinnerMarkets, toMatch, winnerPrices, type RawFixture } from './oddspapiFeed';
+import { bookPrices, closingFromHistory, oddsEveryMs, oddsTournaments, pickWinnerMarkets, toMatch, winnerPrices, type RawFixture } from './oddspapiFeed';
 import { applySeries, buildSeries } from './opendotaScores';
 import { addOdds, sameTeam, teamKey, type OddsMiss } from './matchFeed';
 
@@ -131,6 +131,18 @@ describe('OddsPapi: several bookmakers and the closing line', () => {
     const begun = fixture({ startTime: new Date(Date.now() - 3_600_000).toISOString() });
     expect(toMatch(later, ['171'], undefined, { closing: { c1: 1.7, c2: 2.2 } })?.closeCoeff1).toBeNull();
     expect(toMatch(begun, ['171'], undefined, { closing: { c1: 1.7, c2: 2.2 } })).toMatchObject({ closeCoeff1: 1.7, closeCoeff2: 2.2 });
+  });
+});
+
+describe('OddsPapi historical odds → exact closing line', () => {
+  it('takes the last price before the start for each side', () => {
+    const e = (at: string, price: number) => ({ createdAt: at, price, active: true });
+    const json = { fixtureId: 'id1', bookmakers: { pinnacle: { markets: { '171': { outcomes: {
+      '171': { players: { '0': [e('2026-11-24T08:00:00Z', 1.9), e('2026-11-24T09:55:00Z', 1.82), e('2026-11-24T10:30:00Z', 1.2)] } },
+      '172': { players: { '0': [e('2026-11-24T08:00:00Z', 1.95), e('2026-11-24T09:58:00Z', 2.04)] } },
+    } } } } } };
+    expect(closingFromHistory(json, '2026-11-24T10:00:00Z', ['171'])).toEqual({ c1: 1.82, c2: 2.04 });
+    expect(closingFromHistory({ bookmakers: {} }, '2026-11-24T10:00:00Z', ['171'])).toBeNull();
   });
 });
 

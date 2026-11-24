@@ -58,6 +58,7 @@ import matchesHistoryRoutes from './routes/matchesHistory';
 import { fetchDota2Matches, fetchCs2Matches, fetchTodayMatches, feedPaused, teamKey } from './services/matchFeed';
 import { diffMatch, flushChanges, recordChanges } from './services/matchChanges';
 import { saveClosing } from './services/closingLines';
+import { trackFeed } from './services/feedStats';
 import { join } from 'node:path';
 import { readFileSync, existsSync } from 'node:fs';
 import { writeFileCacheInternal } from './services/createMatchesRouter';
@@ -575,6 +576,7 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
       }
 
       saveClosing(game, existing); // closing lines of matches that have started
+      trackFeed(game, existing); // «Матчі за 7 днів» on the dashboard
 
       // ── Persist newly-finished matches to history DB ──
       // Incremental refresh detects score changes that mean a match just ended.

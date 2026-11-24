@@ -6,6 +6,7 @@ import { forceOddsPapi, oddsRefreshCost, oddspapiDiag, oddspapiEnabled } from '.
 import { fallbackCount, oddsMatched, oddsMisses } from '../services/matchFeed';
 import { forceLiquipedia, liquipediaAskedAt } from '../services/liquipediaFeed';
 import { listServerErrors, resolveServerError } from '../services/serverErrors';
+import { weekReport } from '../services/feedStats';
 
 /** Parsers shown on the admin screen: Liquipedia + OddsPapi + OpenDota (tips.gg and HLTV removed 23.11.2026). */
 export const knownParsers = () => ['liquipedia', ...(oddspapiEnabled() ? ['oddspapi'] : []), 'opendota'];
@@ -110,6 +111,12 @@ function audit(actor: { userId: number; username: string }, action: string, targ
       [actor.userId, actor.username, action, target, JSON.stringify(details)])
     .catch((err) => console.warn('[adminParsers] audit failed:', (err as Error).message));
 }
+
+/** GET /api/admin/matches-week — «Матчі за 7 днів» on the dashboard. */
+parsers.get('/admin/matches-week', requireAuth, requireAdmin, async (c) => {
+  try { return c.json(await weekReport()); }
+  catch (e) { return c.json({ error: (e as Error).message }, 500); }
+});
 
 /** POST /api/admin/parsers/:name/refresh — «Оновити зараз»: fetch from the source now, not at the next planned time.
  *  OddsPapi answers how many of the month's requests it spent. */

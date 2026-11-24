@@ -90,7 +90,9 @@ interface CacheShape {
   /** First winner prices seen per fixture — the opening line, to show how it moved. */
   opening?: Record<string, { c1: number; c2: number; at: number }>;
   /** Last prices seen while the fixture had not started — the closing line once it has. */
-  closing?: Record<string, { c1: number; c2: number; at: number }>;
+  closing?: Record<string, { c1: number; c2: number; at: number; exact?: boolean }>;
+  /** Historical-odds tries per fixture (the endpoint answers only once a fixture is settled). */
+  histTries?: Record<string, number>;
   /** Final series score from /v4/scores, asked only for finished matches Liquipedia left without one. */
   scores?: Record<string, { s1: number; s2: number }>;
   scoresDay?: { day: string; n: number };
@@ -368,7 +370,7 @@ async function refreshOdds(c: CacheShape): Promise<void> {
   }
   // forget fixtures older than 3 days
   const cutoff = Date.now() - 3 * 24 * H;
-  for (const [id, f] of Object.entries(c.fixtures)) if (f.startTime && Date.parse(f.startTime) < cutoff) { delete c.fixtures[id]; delete c.opening?.[id]; delete c.closing?.[id]; delete c.scores?.[id]; }
+  for (const [id, f] of Object.entries(c.fixtures)) if (f.startTime && Date.parse(f.startTime) < cutoff) { delete c.fixtures[id]; delete c.opening?.[id]; delete c.closing?.[id]; delete c.scores?.[id]; delete c.histTries?.[id]; }
   save();
 }
 
@@ -391,6 +393,7 @@ export async function refreshOddsPapi(): Promise<void> {
     await discover(c);
     await refreshOdds(c);
     if (c.used > before) await syncAccount(true); // spent some — read the real count back
+    void refreshClosing(c).catch(() => {}); // free: exact closing lines for settled fixtures
   })().finally(() => { inflight = null; });
   return inflight;
 }
@@ -513,6 +516,64 @@ export async function requestScores(fixtureIds: string[]): Promise<number> {
   save();
   if (got) recordSuccess(ODDSPAPI_PARSER, `рахунок · ${got} завершених матчів без рахунку`);
   return got;
+}
+
+// ── Exact closing line from /v4/historical-odds: free (not counted in the quota), settled fixtures only,
+//    one call per 5 s. Our own «last price before the start» can be up to 3 h old; this is the real last one.
+const HIST_GAP_MS = 5_500;
+const HIST_EVERY_MS = 30 * 60_000;
+const HIST_PER_RUN = 8;
+let lastHistRun = 0, lastHistCall = 0;
+
+/** The last winner prices with createdAt before the start, from a historical-odds answer. */
+export function closingFromHistory(json: any, startIso: string, winnerMarkets: string[], book = ODDS_BOOKMAKER): { c1: number; c2: number } | null {
+  const books = json?.bookmakers || {};
+  const key = Object.keys(books).find((k) => k === book) || Object.keys(books).find((k) => k.startsWith(book));
+  const markets = key ? books[key]?.markets || books[key] : null;
+  if (!markets) return null;
+  const start = Date.parse(startIso);
+  for (const mid of winnerMarkets) {
+    const outcomes = markets[mid]?.outcomes;
+    if (!outcomes) continue;
+    const ids = Object.keys(outcomes).sort((a, z) => Number(a) - Number(z));
+    if (ids.length !== 2) continue;
+    const last = (oid: string): number | null => {
+      const list: any[] = Array.isArray(outcomes[oid]?.players?.['0']) ? outcomes[oid].players['0'] : [];
+      const before = list.filter((e) => typeof e?.price === 'number' && e.price > 1 && Date.parse(e.createdAt) <= start)
+        .sort((a, z) => Date.parse(a.createdAt) - Date.parse(z.createdAt));
+      return before.length ? Math.round(before[before.length - 1].price * 100) / 100 : null;
+    };
+    const c1 = last(ids[0]), c2 = last(ids[1]);
+    if (c1 && c2) return { c1, c2 };
+  }
+  return null;
+}
+
+async function refreshClosing(c: CacheShape): Promise<void> {
+  const key = (process.env.ODDSPAPI_KEY || '').trim();
+  if (!key || Date.now() - lastHistRun < HIST_EVERY_MS) return;
+  lastHistRun = Date.now();
+  c.histTries ||= {}; c.closing ||= {};
+  const winner = withFallback(c.winnerMarkets);
+  const due = Object.values(c.fixtures).filter((f) => {
+    const t = Date.parse(f.startTime || '');
+    return f.fixtureId && t < Date.now() - 4 * H && !c.closing![f.fixtureId]?.exact && (c.histTries![f.fixtureId] || 0) < 4 && c.opening?.[f.fixtureId];
+  }).slice(0, HIST_PER_RUN);
+  let got = 0;
+  for (const f of due) {
+    const wait = lastHistCall + HIST_GAP_MS - Date.now();
+    if (wait > 0) await sleep(wait);
+    lastHistCall = Date.now();
+    c.histTries[f.fixtureId] = (c.histTries[f.fixtureId] || 0) + 1;
+    try {
+      const res = await fetch(`${BASE}/historical-odds?${new URLSearchParams({ fixtureId: f.fixtureId, bookmakers: ODDS_BOOKMAKER, apiKey: key })}`, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(20_000) });
+      if (!res.ok) continue; // not settled yet (or rate limited) — next run
+      const close = closingFromHistory(await res.json(), f.startTime!, winner);
+      if (close) { c.closing[f.fixtureId] = { ...close, at: Date.now(), exact: true }; got++; }
+    } catch { /* next run */ }
+  }
+  save();
+  if (got) recordSuccess(ODDSPAPI_PARSER, `закриття · точне для ${got} матчів (історія коефіцієнтів, без запитів з ліміту)`);
 }
 
 /** Requests «Оновити зараз» would spend: one per 5 tournaments playing soon (at least one). */

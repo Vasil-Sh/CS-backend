@@ -10,6 +10,7 @@ export const CLEANUP_SQL = [
   `DELETE FROM parser_events WHERE created_at < now() - INTERVAL '${KEEP_DAYS} days'`,
   `DELETE FROM parser_failures WHERE created_at < now() - INTERVAL '${KEEP_DAYS} days'`,
   `DELETE FROM match_changes WHERE created_at < now() - INTERVAL '${KEEP_DAYS} days'`,
+  `DELETE FROM feed_matches WHERE date < CURRENT_DATE - ${KEEP_DAYS}`,
 ];
 
 export async function cleanupLogs(): Promise<number> {
