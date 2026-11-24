@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { citoToMatch, citoEveryMs } from './citoFeed';
-import { addCito } from './matchFeed';
+import { addExtra } from './matchFeed';
 import type { TipsGgMatch } from './matchTypes';
 
 const NOW = Date.parse('2026-11-24T12:00:00Z');
@@ -25,20 +25,20 @@ describe('citoToMatch', () => {
   });
 });
 
-describe('addCito', () => {
+describe('addExtra', () => {
   it('skips the same match (swapped teams, other start) and adds a new one', () => {
     const list = [ours('Team Spirit', 'NAVI', '2026-11-25T15:00:00Z')];
-    const n = addCito(list, [cito('1', 'NAVI', 'Spirit', '2026-11-25T16:30:00Z'), cito('2', 'Aurora', 'HEROIC', '2026-11-25T18:00:00Z')]);
+    const n = addExtra(list, [cito('1', 'NAVI', 'Spirit', '2026-11-25T16:30:00Z'), cito('2', 'Aurora', 'HEROIC', '2026-11-25T18:00:00Z')]);
     expect(n).toBe(1);
     expect(list.map((m) => m.id)).toEqual(['lp-Team Spirit-NAVI', 'ct-2']);
   });
   it('one team at the same time is the same match (other spelling of the other team)', () => {
     const list = [ours('NAVI', 'FaZe', '2026-11-25T15:00:00Z')];
-    expect(addCito(list, [cito('1', 'Natus Vincere', 'FaZe Clan', '2026-11-25T15:10:00Z')])).toBe(0);
+    expect(addExtra(list, [cito('1', 'Natus Vincere', 'FaZe Clan', '2026-11-25T15:10:00Z')])).toBe(0);
   });
   it('fills a missing final score the right way round', () => {
     const m = ours('G2', 'FaZe', '2026-11-24T08:00:00Z', { status: 'finished' });
-    addCito([m], [cito('4', 'FaZe', 'G2', '2026-11-24T08:00:00Z', { status: 'completed', team1Score: 2, team2Score: 0 })]);
+    addExtra([m], [cito('4', 'FaZe', 'G2', '2026-11-24T08:00:00Z', { status: 'completed', team1Score: 2, team2Score: 0 })]);
     expect([m.score1, m.score2]).toEqual([0, 2]);
   });
 });

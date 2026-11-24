@@ -16,7 +16,7 @@ const FIELDS: Record<string, (m: any) => string | null> = {
 export function sourceOf(game: string, id: string, field: string): string {
   if (field === 'odds') return 'oddspapi';
   if (field === 'score' && game === 'dota2') return 'liquipedia/opendota';
-  return String(id).startsWith('op-') ? 'oddspapi' : String(id).startsWith('ct-') ? 'cito' : String(id).startsWith('lp-') ? 'liquipedia' : 'feed';
+  return String(id).startsWith('op-') ? 'oddspapi' : String(id).startsWith('ct-') ? 'cito' : String(id).startsWith('ps-') ? 'pandascore' : String(id).startsWith('lp-') ? 'liquipedia' : 'feed';
 }
 
 /** The fields of `prev` that `next` changes, as history lines. */

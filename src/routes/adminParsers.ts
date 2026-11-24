@@ -3,14 +3,15 @@ import { requireAuth, requireAdmin } from '../middleware/auth';
 import { pool } from '../db/client';
 import { listCircuits, pauseInfo, pauseParser, resetCircuit, resumeParser } from '../services/circuitBreaker';
 import { forceOddsPapi, oddsRefreshCost, oddspapiDiag, oddspapiEnabled } from '../services/oddspapiFeed';
-import { citoAdded, fallbackCount, oddsMatched, oddsMisses } from '../services/matchFeed';
+import { citoAdded, fallbackCount, oddsMatched, oddsMisses, pandascoreAdded } from '../services/matchFeed';
+import { pandascoreDiag, pandascoreEnabled, refreshPandaScore } from '../services/pandascoreFeed';
 import { citoDiag, citoEnabled, refreshCito } from '../services/citoFeed';
 import { forceLiquipedia, liquipediaAskedAt } from '../services/liquipediaFeed';
 import { listServerErrors, resolveServerError } from '../services/serverErrors';
 import { weekReport } from '../services/feedStats';
 
 /** Parsers shown on the admin screen: Liquipedia + OddsPapi + OpenDota (tips.gg and HLTV removed 23.11.2026). */
-export const knownParsers = () => ['liquipedia', ...(citoEnabled() ? ['cito'] : []), ...(oddspapiEnabled() ? ['oddspapi'] : []), 'opendota'];
+export const knownParsers = () => ['liquipedia', ...(pandascoreEnabled() ? ['pandascore'] : []), ...(citoEnabled() ? ['cito'] : []), ...(oddspapiEnabled() ? ['oddspapi'] : []), 'opendota'];
 
 const parsers = new Hono();
 
@@ -78,6 +79,7 @@ parsers.get('/admin/parsers', requireAuth, requireAdmin, async (c) => {
       week: weekOf(name),
       ...(name === 'liquipedia' && liquipediaAskedAt() ? { askedAt: new Date(liquipediaAskedAt()).toISOString() } : {}),
       // Cito: second CS2 schedule — how many matches it added and how much of the month's 500 is left
+      ...(name === 'pandascore' ? { pandascore: { ...pandascoreDiag(), added: pandascoreAdded() } } : {}),
       ...(name === 'cito' ? { cito: { ...citoDiag(), added: citoAdded() } } : {}),
       // OddsPapi only adds prices: show what it holds and how much of it reached our matches
       ...(name === 'oddspapi' ? { odds: (() => { const d = oddspapiDiag(), m = oddsMatched(); return { ...d, matched: m.cs2 + m.dota2, refreshCost: oddsRefreshCost(), fallback: fallbackCount(), unmatched: oddsMisses().slice(0, 40), fixturesAt: d.fixturesAt ? new Date(d.fixturesAt).toISOString() : '', oddsAt: d.oddsAt ? new Date(d.oddsAt).toISOString() : '', nextOddsAt: d.nextOddsAt ? new Date(d.nextOddsAt).toISOString() : '' }; })() } : {}),
@@ -107,7 +109,7 @@ parsers.post('/admin/parsers/:name/rerun', requireAuth, requireAdmin, async (c) 
   return c.json({ success: true });
 });
 
-const KNOWN = new Set(['oddspapi', 'opendota', 'liquipedia', 'cito']);
+const KNOWN = new Set(['oddspapi', 'opendota', 'liquipedia', 'cito', 'pandascore']);
 function audit(actor: { userId: number; username: string }, action: string, target: string, details: Record<string, unknown>): void {
   void pool
     .query(`INSERT INTO admin_audit_log(actor_id, actor_name, action, target, details, status) VALUES($1,$2,$3,$4,$5,'success')`,
@@ -131,6 +133,10 @@ parsers.post('/admin/parsers/:name/refresh', requireAuth, requireAdmin, async (c
   resetCircuit(name);
   let cost = 0;
   if (name === 'liquipedia') forceLiquipedia();
+  if (name === 'pandascore') {
+    if (!pandascoreEnabled()) return c.json({ error: 'PandaScore вимкнено: немає ключа' }, 409);
+    void refreshPandaScore(true).catch(() => {});
+  }
   if (name === 'cito') {
     if (!citoEnabled()) return c.json({ error: 'Cito вимкнено: немає ключа' }, 409);
     cost = 2;
