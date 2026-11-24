@@ -1,14 +1,13 @@
-import { describe, expect, it } from 'vitest';
-import { errorKey } from './serverErrors';
+import { describe, it, expect } from 'vitest';
+import { severityOf } from './serverErrors';
 
-describe('server errors', () => {
-  it('errors of one kind share a key (numbers, ids, urls, quoted values blanked)', () => {
-    expect(errorKey('console', 'Circuit breaker failure #3 for https://a.b/x?id=1'))
-      .toBe(errorKey('console', 'Circuit breaker failure #17 for https://c.d/y'));
-    expect(errorKey('api', 'User "bob" not found 5f3a9c2e1b')).toBe(errorKey('api', 'User "alice" not found 77aa88bb99'));
+describe('severityOf', () => {
+  it('database drop is critical', () => expect(severityOf('console', 'Connection terminated unexpectedly').severity).toBe('critical'));
+  it('api 500 is critical and names the status', () => {
+    const r = severityOf('api', 'x is undefined', 500);
+    expect(r.severity).toBe('critical');
+    expect(r.hint).toContain('500');
   });
-  it('different messages or sources stay apart', () => {
-    expect(errorKey('api', 'Timeout')).not.toBe(errorKey('console', 'Timeout'));
-    expect(errorKey('api', 'Timeout')).not.toBe(errorKey('api', 'Refused'));
-  });
+  it('parser refresh failure is a warning', () => expect(severityOf('console', '[liquipedia] Force refresh failed: 429').severity).toBe('warning'));
+  it('plain log line is info', () => expect(severityOf('console', 'something odd').severity).toBe('info'));
 });

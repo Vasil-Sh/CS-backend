@@ -251,7 +251,7 @@ app.onError((err, c) => {
     return c.json(err.toJSON(), err.httpStatus as 400 | 401 | 403 | 404 | 429);
   }
   // Programmer error / unknown: mask the message, log full stack (kept for the admin with the route; stderr directly — not twice via console.error)
-  recordServerError('api', err.message, err.stack || '', `${c.req.method} ${c.req.path}`);
+  recordServerError('api', err.message, err.stack || '', `${c.req.method} ${c.req.path}`, 500);
   process.stderr.write(`[Error] ${err.message} ${err.stack?.split('\n').slice(0, 3).join(' | ') || ''}\n`);
   return c.json({ error: 'Internal server error', code: 'INTERNAL_ERROR' }, 500);
 });
