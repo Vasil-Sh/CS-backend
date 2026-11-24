@@ -21,11 +21,13 @@ import { recordFailure, recordSuccess, isOpen } from './circuitBreaker';
 import { normalizeTeam } from '../utils/matchUtils';
 import type { TipsGgMatch } from './matchTypes';
 import { pool } from '../db/client';
+import { isNight } from './nightMode';
 
 export const LIQUIPEDIA_PARSER = 'liquipedia';
 const WIKI: Record<'cs2' | 'dota2', string> = { cs2: 'counterstrike', dota2: 'dota2' };
 const REFRESH_MS = Number(process.env.LIQUIPEDIA_REFRESH_MIN || 5) * 60_000;
 const PARSE_GAP_MS = 31_000;
+const NIGHT_REFRESH_MS = 15 * 60_000;
 const FAIL_BACKOFF_MS = 15 * 60_000;
 /** Right after a start (a deploy) the schedule restored from Postgres is served for a few minutes before the first call —
  *  frequent deploys then do not hit Liquipedia's rate limit (the failures at 13:44 on 23.11). Only when there is a saved copy. */
@@ -484,7 +486,7 @@ export function parseSchedule(html: string, game: 'cs2' | 'dota2', page: string,
 /** Every 20 min: the 2 tournament pages read longest ago among the tournaments the ticker shows as upcoming or live
  *  (the higher tier first), each page at most once an hour. */
 async function refreshPages(game: 'cs2' | 'dota2'): Promise<void> {
-  if (Date.now() - (lastPages[game] || 0) < PAGES_EVERY_MS || isOpen(LIQUIPEDIA_PARSER)) return;
+  if (isNight() || Date.now() - (lastPages[game] || 0) < PAGES_EVERY_MS || isOpen(LIQUIPEDIA_PARSER)) return;
   lastPages[game] = Date.now();
   await hydratePages(game);
   const data = mem[game]?.data || [];
@@ -596,7 +598,10 @@ export async function fetchLiquipediaMatches(game: 'cs2' | 'dota2'): Promise<Tip
   askedAt = Date.now();
   await hydrate(game);
   const cached = readCache(game);
-  const fresh = cached && (Date.now() - cached.at < REFRESH_MS || (cached.data.length > 0 && Date.now() - STARTED_AT < START_DELAY_MS));
+  // night: every 15 min, unless a match is live or about to start (then as by day)
+  const busy = cached?.data.some((m) => m.status === 'live' || (m.status === 'upcoming' && Date.parse(m.startDate) < Date.now() + 15 * 60_000));
+  const every = isNight() && !busy ? Math.max(REFRESH_MS, NIGHT_REFRESH_MS) : REFRESH_MS;
+  const fresh = cached && (Date.now() - cached.at < every || (cached.data.length > 0 && Date.now() - STARTED_AT < START_DELAY_MS));
   if (fresh || isOpen(LIQUIPEDIA_PARSER) || Date.now() - (failedAt[game] || 0) < FAIL_BACKOFF_MS) {
     void backfillScores(game).catch((e) => console.warn(`[liquipedia] ${game} backfill failed:`, (e as Error).message));
     void refreshMaps(game).catch((e) => console.warn(`[liquipedia] ${game} maps failed:`, (e as Error).message));

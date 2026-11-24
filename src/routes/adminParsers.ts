@@ -9,6 +9,7 @@ import { citoDiag, citoEnabled, refreshCito } from '../services/citoFeed';
 import { forceLiquipedia, liquipediaAskedAt, liquipediaPagesInfo } from '../services/liquipediaFeed';
 import { listServerErrors, resolveServerError } from '../services/serverErrors';
 import { weekReport } from '../services/feedStats';
+import { isNight, nightWindow } from '../services/nightMode';
 
 /** Parsers shown on the admin screen: Liquipedia + OddsPapi + OpenDota (tips.gg and HLTV removed 23.11.2026). */
 export const knownParsers = () => ['liquipedia', ...(pandascoreEnabled() ? ['pandascore'] : []), ...(citoEnabled() ? ['cito'] : []), ...(oddspapiEnabled() ? ['oddspapi'] : []), 'opendota'];
@@ -86,7 +87,7 @@ parsers.get('/admin/parsers', requireAuth, requireAdmin, async (c) => {
       ...(name === 'oddspapi' ? { odds: (() => { const d = oddspapiDiag(), m = oddsMatched(); return { ...d, matched: m.cs2 + m.dota2, refreshCost: oddsRefreshCost(), fallback: fallbackCount(), unmatched: oddsMisses().slice(0, 40), fixturesAt: d.fixturesAt ? new Date(d.fixturesAt).toISOString() : '', oddsAt: d.oddsAt ? new Date(d.oddsAt).toISOString() : '', nextOddsAt: d.nextOddsAt ? new Date(d.nextOddsAt).toISOString() : '' }; })() } : {}),
     };
   });
-  return c.json({ parsers: merged });
+  return c.json({ parsers: merged, night: { ...nightWindow(), active: isNight() } });
 });
 
 /** Server errors kept for the admin («Налаштування → Помилки сервера»). */

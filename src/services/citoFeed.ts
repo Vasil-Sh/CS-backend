@@ -9,6 +9,7 @@
 import type { TipsGgMatch } from './matchTypes';
 import { pool } from '../db/client';
 import { pauseInfo, recordFailure, recordSuccess } from './circuitBreaker';
+import { isNight } from './nightMode';
 
 export const CITO_PARSER = 'cito';
 const BASE = 'https://api.citoapi.com/api/v1';
@@ -117,7 +118,7 @@ async function get(path: string): Promise<CitoMatch[] | null> {
 let busy = false;
 /** Called from the 2-minute refresh; asks Cito only when its share of the month says so. */
 export async function refreshCito(force = false): Promise<void> {
-  if (!citoEnabled() || busy || pauseInfo(CITO_PARSER)) return;
+  if (!citoEnabled() || busy || pauseInfo(CITO_PARSER) || (!force && isNight())) return;
   busy = true;
   try {
     await hydrate();

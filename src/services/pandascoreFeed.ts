@@ -8,6 +8,7 @@
 import type { TipsGgMatch } from './matchTypes';
 import { pool } from '../db/client';
 import { pauseInfo, recordFailure, recordSuccess } from './circuitBreaker';
+import { isNight } from './nightMode';
 
 export const PANDASCORE_PARSER = 'pandascore';
 const BASE = 'https://api.pandascore.co';
@@ -99,7 +100,9 @@ export async function refreshPandaScore(force = false): Promise<void> {
   try {
     await hydrate();
     const now = Date.now();
-    if (!force && (now - cache.at < EVERY_MS || now - cache.failedAt < 10 * 60_000)) return;
+    const live = (['cs2', 'dota2'] as Game[]).some((g) => cache.lists[g].running.length > 0);
+    const every = isNight() && !live ? Math.max(EVERY_MS, 30 * 60_000) : EVERY_MS;
+    if (!force && (now - cache.at < every || now - cache.failedAt < 10 * 60_000)) return;
     let ok = 0, failed = 0;
     for (const game of ['cs2', 'dota2'] as Game[]) {
       for (const list of ['upcoming', 'running', 'past'] as List[]) {

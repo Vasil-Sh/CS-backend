@@ -15,6 +15,7 @@ import { applySeries, recentDotaSeries } from './opendotaScores';
 import { liquipediaOkAt, fetchLiquipediaMatches } from './liquipediaFeed';
 import { normalizeTeam } from '../utils/matchUtils';
 import { citoEnabled, citoMatches, refreshCito } from './citoFeed';
+import { isNight } from './nightMode';
 import { pandascoreEnabled, pandascoreMatches, refreshPandaScore } from './pandascoreFeed';
 import { pool } from '../db/client';
 
@@ -183,7 +184,8 @@ export const oddsMisses = (): OddsMiss[] => [...misses.cs2, ...misses.dota2].sor
 
 /** Liquipedia schedule + OddsPapi odds (OddsPapi spends a request only when its 12-h / daily schedule is due). */
 async function newFeed(game: 'cs2' | 'dota2', spendOddsPapi: boolean): Promise<TipsGgMatch[]> {
-  const odds = !oddspapiEnabled() ? [] : spendOddsPapi ? await fetchOddsPapiMatches(game) : cachedMatches(game);
+  // night: OddsPapi spends nothing (its month's budget goes to the day), the cached prices stay
+  const odds = !oddspapiEnabled() ? [] : spendOddsPapi && !isNight() ? await fetchOddsPapiMatches(game) : cachedMatches(game);
   const lp = await fetchLiquipediaMatches(game);
   // Liquipedia down → OddsPapi's own schedule: all of it when we have nothing, and when Liquipedia has not
   // refreshed for an hour, OddsPapi's matches of the next day that the old Liquipedia list does not have
@@ -220,7 +222,7 @@ export async function fetchCs2Matches(): Promise<TipsGgMatch[]> {
 
 /** The 2-minute incremental refresh: today's and yesterday's matches. Never spends a billable OddsPapi request directly. */
 export async function fetchTodayMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[] | null> {
-  if (oddspapiEnabled()) void refreshOddsPapi().catch(() => {}); // no-op unless its schedule is due
+  if (oddspapiEnabled() && !isNight()) void refreshOddsPapi().catch(() => {}); // no-op unless its schedule is due
   if (game === 'cs2' && citoEnabled()) void refreshCito().catch(() => {}); // no-op unless its share of the month is due
   if (pandascoreEnabled()) void refreshPandaScore().catch(() => {}); // no-op unless 10 min have passed
   const today = new Date().toISOString().slice(0, 10);
