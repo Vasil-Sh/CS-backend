@@ -31,6 +31,8 @@ const ODDS_BOOKMAKER = (process.env.ODDSPAPI_BOOKMAKER || 'pinnacle').trim();
 /** Bookmakers asked in the same odds call (OddsPapi's `bookmakers`, comma-separated) — Pinnacle's line plus the best price elsewhere. */
 const ODDS_BOOKMAKERS = (process.env.ODDSPAPI_BOOKMAKERS || `${ODDS_BOOKMAKER},ggbet,1xbet,bet365,thunderpick`).trim();
 const SCORES_PER_DAY = Number(process.env.ODDSPAPI_SCORES_PER_DAY ?? 5);
+/** Fuse: billable calls per hour, whatever happens (a normal hour spends 0–6). */
+const HOURLY_CAP = Number(process.env.ODDSPAPI_HOURLY_CAP ?? 10);
 const MAX_ODDS_TOURNAMENTS = 10; // 2 calls of 5
 const FAIL_BACKOFF_MS = 3 * H;
 /** Minimum gap between two calls to the same endpoint (OddsPapi cooldowns + margin). */
@@ -98,6 +100,9 @@ interface CacheShape {
   scoresDay?: { day: string; n: number };
   /** Bookmakers OddsPapi accepted (an unknown slug makes the whole call fail with 400). */
   books?: string;
+  /** Billable calls in the current hour (the fuse) and this month per endpoint. */
+  hour?: { h: number; n: number };
+  calls?: Record<string, number>;
 }
 
 const emptyCache = (): CacheShape => ({
@@ -164,7 +169,7 @@ async function hydrate(): Promise<void> {
 export function budgetLeft(): number {
   const c = load();
   const month = new Date().toISOString().slice(0, 7);
-  if (c.month !== month) { c.month = month; c.used = 0; if (c.account) c.account = { ...c.account, count: 0 }; save(); }
+  if (c.month !== month) { c.month = month; c.used = 0; c.calls = {}; if (c.account) c.account = { ...c.account, count: 0 }; save(); }
   const acc = c.account && c.account.at > Date.parse(`${month}-01T00:00:00Z`) ? c.account : null;
   // between two /account reads, add what we spent since the last one
   return acc ? acc.limit - acc.count - Math.max(0, c.used - (accUsedAt ?? c.used)) : MONTHLY_BUDGET - c.used;
@@ -215,6 +220,13 @@ async function get<T>(path: string, params: Record<string, string | number | boo
   if (wait > 0) await sleep(wait);
   lastCall[path] = Date.now();
   const qs = new URLSearchParams({ ...Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)])), apiKey: key });
+  // fuse: whatever goes wrong in the code above, never more than HOURLY_CAP billable calls in an hour
+  const hour = Math.floor(Date.now() / H);
+  if (c.hour?.h !== hour) c.hour = { h: hour, n: 0 };
+  if (c.hour.n >= HOURLY_CAP) { console.warn(`[oddspapi] ${HOURLY_CAP} requests this hour already — skipping ${path}`); return null; }
+  c.hour.n++;
+  c.calls ||= {};
+  c.calls[path] = (c.calls[path] || 0) + 1; // this month, per endpoint — shown in the admin
   c.used++;
   save();
   const fail = (why: string) => { console.warn(`[oddspapi] ${path} ${why}`); c.failedAt[path] = Date.now(); save(); recordFailure(ODDSPAPI_PARSER, `${path} · ${why.replace(/^→ /, '').slice(0, 120)}`); return null; };
@@ -244,13 +256,13 @@ async function get<T>(path: string, params: Record<string, string | number | boo
       // a bookmaker slug OddsPapi does not know: drop the ones it names (or all extras) and ask again at once —
       // not a failure, and no 3-hour back-off for the odds
       if (res.status === 400 && /invalid bookmaker/i.test(body) && typeof params.bookmakers === 'string' && params.bookmakers.includes(',')) {
-        const named = (body.match(/bookmakers?:\s*([a-z0-9_.,\- ]+)/i)?.[1] || '').split(/[,\s]+/).filter(Boolean);
-        const asked = params.bookmakers.split(',');
-        const keep = named.length ? asked.filter((b) => !named.includes(b)) : [ODDS_BOOKMAKER];
-        c.books = (keep.length ? keep : [ODDS_BOOKMAKER]).join(',');
+        // ONE retry, with Pinnacle alone. (The old code guessed from the error text which slugs to drop and asked
+        // again with the rest — when the text listed something else, it asked again and again: every try a billable
+        // request, and the month's 250 were gone in minutes on 24.11.)
+        c.books = ODDS_BOOKMAKER;
         save();
-        console.warn(`[oddspapi] bookmakers ${params.bookmakers} → invalid; using ${c.books}`);
-        return get<T>(path, { ...params, bookmakers: c.books }, retry);
+        console.warn(`[oddspapi] bookmakers ${params.bookmakers} → invalid (${body.slice(0, 160)}); using ${c.books} from now on`);
+        return get<T>(path, { ...params, bookmakers: c.books }, false);
       }
       return fail(`→ HTTP ${res.status} ${body}`);
     }
@@ -593,7 +605,7 @@ const diagOf = (c: CacheShape): NonNullable<CacheShape['diag']> =>
   c.diag || { fixtures: { cs2: 0, dota2: 0 }, fixturesAt: 0, oddsTournaments: 0, oddsRows: 0, oddsAt: 0 };
 
 /** For the admin «Парсери» card: what OddsPapi has right now, from the cache (no API call). */
-export function oddspapiDiag(): { used: number; budget: number; accountAt: number; scheduled: number; priced: number; fixturesAt: number; oddsAt: number; nextOddsAt: number; oddsTournaments: number } {
+export function oddspapiDiag(): { used: number; budget: number; calls: Record<string, number>; accountAt: number; scheduled: number; priced: number; fixturesAt: number; oddsAt: number; nextOddsAt: number; oddsTournaments: number } {
   const c = load();
   budgetLeft();
   const now = Date.now(), winner = withFallback(c.winnerMarkets);
@@ -604,7 +616,7 @@ export function oddspapiDiag(): { used: number; budget: number; accountAt: numbe
   const nextOddsAt = ids.length && c.oddsAt ? c.oddsAt + oddsEveryMs(budgetLeft(), ids.length) : 0;
   const left = budgetLeft();
   const budget = c.account?.limit ?? MONTHLY_BUDGET;
-  return { used: Math.max(0, budget - left), budget, accountAt: c.account?.at || 0, scheduled: soon.length, priced, fixturesAt: d.fixturesAt || Math.max(c.discovered.cs2 || 0, c.discovered.dota2 || 0), oddsAt: c.oddsAt, nextOddsAt, oddsTournaments: d.oddsTournaments };
+  return { used: Math.max(0, budget - left), budget, calls: c.calls || {}, accountAt: c.account?.at || 0, scheduled: soon.length, priced, fixturesAt: d.fixturesAt || Math.max(c.discovered.cs2 || 0, c.discovered.dota2 || 0), oddsAt: c.oddsAt, nextOddsAt, oddsTournaments: d.oddsTournaments };
 }
 
 /** For the admin «Парсери» screen. */
