@@ -451,22 +451,38 @@ import { normalizeTeam, isSameMatch } from './utils/matchUtils.js';
 import { validateScores, needsScoreBackfill } from './utils/scoreValidation.js';
 import { isIdle, IDLE_POLL_MS } from './services/activityTracker.js';
 
+const IDLE_BET_REFRESH_MS = 15 * 60_000;
+let pendingCheck = { at: 0, yes: false };
+/** A pending bet placed in the last 2 days (checked at most once a minute). */
+async function hasRecentPendingBets(): Promise<boolean> {
+  if (Date.now() - pendingCheck.at < 60_000) return pendingCheck.yes;
+  try {
+    const { rows } = await pool.query(`SELECT 1 FROM bets WHERE result = 'Pending' AND date >= CURRENT_DATE - 1 LIMIT 1`);
+    pendingCheck = { at: Date.now(), yes: rows.length > 0 };
+  } catch { pendingCheck = { at: Date.now(), yes: false }; }
+  return pendingCheck.yes;
+}
+
 function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: string): void {
   // One source for both games now (Liquipedia): new matches are added for CS2 too.
   const isPrimarySource = false;
   const ACTIVE_INTERVAL = 120_000;
 
+  let lastIdleRun = 0;
   const tick = async () => {
-    // Skip tips.gg fetch if idle or banned — don't waste requests
-    if (isIdle() || feedPaused()) {
-      // Still schedule next tick, but at slower rate
+    // No visitors: no refresh — except every 15 min while someone has a pending bet from the last 2 days,
+    // so a match that ended at night is «finished» before the ticker drops it (the morning would find it stuck)
+    if (feedPaused() || (isIdle() && (Date.now() - lastIdleRun < IDLE_BET_REFRESH_MS || !(await hasRecentPendingBets())))) {
       setTimeout(tick, IDLE_POLL_MS).unref();
       return;
     }
+    if (isIdle()) lastIdleRun = Date.now();
 
     try {
       const todayMatches = await fetchTodayMatches(game);
-      if (!todayMatches || todayMatches.length === 0) return;
+      // nothing today (or the sources are down after a deploy): try again at the next tick — a bare «return» here
+      // used to skip the scheduling below and stopped this refresh until the next restart
+      if (!todayMatches || todayMatches.length === 0) { setTimeout(tick, ACTIVE_INTERVAL).unref(); return; }
 
       // Read existing cache
       let existing: Record<string, any>[] = [];
@@ -505,7 +521,7 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
             const v = (tm as any)[k];
             if (v != null && JSON.stringify(v) !== JSON.stringify(prev[k])) { prev[k] = v; enriched = true; }
           }
-          for (const k of ['logoTeam1', 'logoTeam2', 'tournamentPage', 'stage', 'tier'] as const) {
+          for (const k of ['logoTeam1', 'logoTeam2', 'tournamentPage', 'stage', 'tier', 'closedBy'] as const) {
             const v = (tm as any)[k];
             if (v && !prev[k]) { prev[k] = v; enriched = true; }
           }
@@ -653,10 +669,12 @@ setTimeout(() => {
   }, 5_000);
 }, 5_000);
 
-// ── Periodic full refresh: re-scrape 8-day window every 4 hours ──
+// ── Periodic full refresh: re-scrape 8-day window every hour ──
 // Catches new matches for future days that the 120s incremental refresh
 // (today-only) would miss. Uses tips.gg for Dota2, cstest for CS2.
-const FULL_REFRESH_MS = 4 * 60 * 60 * 1000; // 4 hours
+// every hour: matches of the coming days from PandaScore / Cito / tournament pages show up within the hour
+// (the sources keep their own caches and limits, so this costs them almost nothing)
+const FULL_REFRESH_MS = 60 * 60 * 1000;
 
 function startFullRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: string): void {
   const tick = async () => {
@@ -714,7 +732,7 @@ function startFullRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: string)
     setTimeout(tick, FULL_REFRESH_MS).unref();
   };
   setTimeout(tick, 60_000).unref(); // first run 1min after startup
-  console.log(`[full-refresh] ${tag}: periodic 4h full scan registered`);
+  console.log(`[full-refresh] ${tag}: periodic hourly full scan registered`);
 }
 
 setTimeout(() => {

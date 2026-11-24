@@ -49,4 +49,6 @@ export interface TipsGgMatch {
   maps?: { map: string; score1: number | null; score2: number | null }[];
   /** Taken from a Liquipedia tournament page, not the ticker (the ticker's copy wins a duplicate). */
   fromPage?: boolean;
+  /** Closed as finished by other sources agreeing for 2 h while Liquipedia was silent («cito+pandascore»). */
+  closedBy?: string;
 }

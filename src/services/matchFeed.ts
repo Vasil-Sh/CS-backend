@@ -16,6 +16,7 @@ import { liquipediaOkAt, fetchLiquipediaMatches } from './liquipediaFeed';
 import { isTbd, mergeSameTimeDuplicates, normalizeTeam } from '../utils/matchUtils';
 import { citoEnabled, citoMatches, refreshCito } from './citoFeed';
 import { isNight } from './nightMode';
+import { checkScores, loadScoreCheck, type Report } from './scoreCheck';
 import { pandascoreEnabled, pandascoreMatches, refreshPandaScore } from './pandascoreFeed';
 import { pool } from '../db/client';
 
@@ -115,7 +116,7 @@ export function addOdds(base: TipsGgMatch[], odds: TipsGgMatch[], resolve: Resol
 /** Another source's matches (PandaScore, Cito) into our list. The same match is one that has both teams within 6 h of each other
  *  (either order), or one team within 20 min — names differ between sources («NAVI» / «Natus Vincere»).
  *  A known match only takes what it lacks (final score, logos, tournament); the rest are added. Returns how many were added. */
-export function addExtra(list: TipsGgMatch[], cito: TipsGgMatch[], resolve: Resolve = teamKey): number {
+export function addExtra(list: TipsGgMatch[], cito: TipsGgMatch[], resolve: Resolve = teamKey, onSame?: (ours: TipsGgMatch, theirs: TipsGgMatch, swapped: boolean) => void): number {
   let added = 0;
   const pool = [...list];
   for (const c of cito) {
@@ -132,6 +133,7 @@ export function addExtra(list: TipsGgMatch[], cito: TipsGgMatch[], resolve: Reso
       return false;
     });
     if (m) {
+      onSame?.(m, c, swapped);
       if (m.status === 'finished' && (m.score1 == null || m.score2 == null) && c.status === 'finished' && c.score1 != null && c.score2 != null) {
         m.score1 = swapped ? c.score2 : c.score1;
         m.score2 = swapped ? c.score1 : c.score2;
@@ -202,8 +204,15 @@ async function newFeed(game: 'cs2' | 'dota2', spendOddsPapi: boolean): Promise<T
     fallback[game] = extra.length;
     if (extra.length) list = [...lp, ...extra].sort((a, z) => Date.parse(a.startDate) - Date.parse(z.startDate));
   }
-  if (pandascoreEnabled()) psAddedN[game] = addExtra(list = [...list], pandascoreMatches(game), await aliasResolver(game));
-  if (game === 'cs2' && citoEnabled()) citoAddedN = addExtra(list = [...list], citoMatches(), await aliasResolver(game));
+  // what PandaScore / Cito said about each of our matches — for the score cross-check below
+  const reports = new Map<TipsGgMatch, Report[]>();
+  const note = (source: Report['source']) => (m: TipsGgMatch, c: TipsGgMatch, swapped: boolean) => {
+    const r: Report = { source, status: c.status, s1: swapped ? c.score2 : c.score1, s2: swapped ? c.score1 : c.score2 };
+    reports.set(m, [...(reports.get(m) || []), r]);
+  };
+  if (pandascoreEnabled()) psAddedN[game] = addExtra(list = [...list], pandascoreMatches(game), await aliasResolver(game), note('pandascore'));
+  if (game === 'cs2' && citoEnabled()) citoAddedN = addExtra(list = [...list], citoMatches(), await aliasResolver(game), note('cito'));
+  if (reports.size) { await loadScoreCheck(); checkScores(game, list, reports); }
   if (lp.length && odds.length) { const miss: OddsMiss[] = []; matched[game] = addOdds(list, odds, await aliasResolver(game), miss, game); misses[game] = miss; }
   else if (lp.length) { matched[game] = 0; misses[game] = []; }
   // still «—:—» 6 h after the start, and Liquipedia's tournament page did not help: ask OddsPapi (≤ 5 a day)

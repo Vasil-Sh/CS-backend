@@ -9,7 +9,7 @@ import type { TipsGgMatch } from './matchTypes';
 import { pool } from '../db/client';
 import { pauseInfo, recordFailure, recordSuccess } from './circuitBreaker';
 import { isNight } from './nightMode';
-import { isTbd } from '../utils/matchUtils';
+import { isTbd, normalizeTeam } from '../utils/matchUtils';
 
 export const PANDASCORE_PARSER = 'pandascore';
 const BASE = 'https://api.pandascore.co';
@@ -113,6 +113,7 @@ export async function refreshPandaScore(force = false): Promise<void> {
     }
     if (ok) cache.at = now;
     if (failed && !ok) cache.failedAt = now;
+    if (ok && now - learnedAt > H) { learnedAt = now; void learnAliases().catch((e) => console.warn('[pandascore] aliases failed:', (e as Error).message)); }
     save();
     if (ok) {
       const n = (g: Game) => cache.lists[g].upcoming.length + cache.lists[g].running.length;
@@ -120,6 +121,48 @@ export async function refreshPandaScore(force = false): Promise<void> {
     }
   } finally {
     busy = false;
+  }
+}
+
+// ── Team aliases from PandaScore's short names: «PVISION» = «PARIVISION», so the sources' copies of a match meet ──
+const tkey = (v: string) => normalizeTeam(v.replace(/\b(e-?sports?|club|clan)\b/gi, ' '));
+let learnedAt = 0;
+let learnedTotal = 0;
+
+/** Short name → full name pairs worth keeping: 3+ letters, differs from the full name, and is not any other team's name. */
+export function aliasPairs(lists: PsMatch[]): { canonical: string; alias: string }[] {
+  const teams = new Map<number, { name: string; acronym: string }>();
+  for (const m of lists) for (const o of m.opponents || []) {
+    const t = o.opponent;
+    if (t?.id && t.name && !isTbd(t.name)) teams.set(t.id, { name: t.name.trim(), acronym: (t.acronym || '').trim() });
+  }
+  const names = new Map<string, number>(); // full-name key → how many teams have it
+  for (const t of teams.values()) names.set(tkey(t.name), (names.get(tkey(t.name)) || 0) + 1);
+  const acr = new Map<string, number>(); // acronym key → how many teams use it
+  for (const t of teams.values()) if (t.acronym) acr.set(tkey(t.acronym), (acr.get(tkey(t.acronym)) || 0) + 1);
+  const out: { canonical: string; alias: string }[] = [];
+  for (const t of teams.values()) {
+    const a = tkey(t.acronym), n = tkey(t.name);
+    if (!t.acronym || a.length < 3 || !n || a === n || isTbd(t.acronym)) continue;
+    if (names.has(a) || (acr.get(a) || 0) > 1) continue; // another team is called that, or shares the short name
+    out.push({ canonical: t.name, alias: t.acronym });
+  }
+  return out;
+}
+
+/** Once an hour: new pairs into team_aliases (an alias the admin already set is never changed). */
+async function learnAliases(): Promise<void> {
+  for (const game of ['cs2', 'dota2'] as Game[]) {
+    const l = cache.lists[game];
+    const pairs = aliasPairs([...l.upcoming, ...l.running, ...l.past]);
+    if (!pairs.length) continue;
+    const { rowCount } = await pool.query(
+      `INSERT INTO team_aliases(game, canonical, alias, created_by)
+       SELECT $1, c, a, 'auto:pandascore' FROM unnest($2::text[], $3::text[]) AS t(c, a)
+       ON CONFLICT (game, alias) DO NOTHING`,
+      [game, pairs.map((p) => p.canonical), pairs.map((p) => p.alias)],
+    );
+    if (rowCount) { learnedTotal += rowCount; console.log(`[pandascore] ${game}: ${rowCount} team aliases learned`); }
   }
 }
 
@@ -195,11 +238,12 @@ export function pandascoreMatches(game: Game, now = Date.now()): TipsGgMatch[] {
 export const pandascoreReady = () => pandascoreEnabled() && hydrated && cache.at > 0;
 
 /** For the admin card. Reads the saved copy first: after a deploy, with no visitors, the refresh has not run yet. */
-export async function pandascoreDiag(): Promise<{ at: string; nextAt: string; callsThisHour: number; cs2: number; dota2: number }> {
+export async function pandascoreDiag(): Promise<{ at: string; nextAt: string; callsThisHour: number; cs2: number; dota2: number; aliases: number }> {
   await hydrate();
   const iso = (t: number) => (t ? new Date(t).toISOString() : '');
   const n = (g: Game) => pandascoreMatches(g).length;
-  return { at: iso(cache.at), nextAt: iso(cache.at ? cache.at + EVERY_MS : 0), callsThisHour: cache.calls.hour === Math.floor(Date.now() / H) ? cache.calls.n : 0, cs2: n('cs2'), dota2: n('dota2') };
+  const aliases = await pool.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM team_aliases WHERE created_by = 'auto:pandascore'`).then((r) => r.rows[0]?.n ?? 0).catch(() => learnedTotal);
+  return { at: iso(cache.at), nextAt: iso(cache.at ? cache.at + EVERY_MS : 0), callsThisHour: cache.calls.hour === Math.floor(Date.now() / H) ? cache.calls.n : 0, cs2: n('cs2'), dota2: n('dota2'), aliases };
 }
 
 export function __setPandaScoreCache(lists: Partial<Record<Game, Partial<Record<List, PsMatch[]>>>>): void {

@@ -43,3 +43,17 @@ describe('pandascoreMatches + addExtra', () => {
     delete process.env.PANDASCORE_API_KEY;
   });
 });
+
+describe('aliasPairs', () => {
+  const t = (id: number, name: string, acronym: string | null) => ({ type: 'Team', opponent: { id, name, acronym } });
+  it('keeps a distinct short name, skips same-as-name, too short, and shared or clashing ones', async () => {
+    const { aliasPairs } = await import('./pandascoreFeed');
+    const lists = [
+      { id: 1, opponents: [t(1, 'PARIVISION', 'PVISION'), t(2, 'Natus Vincere', 'NAVI')] },
+      { id: 2, opponents: [t(3, 'G2 Esports', 'G2'), t(4, 'MOUZ', 'MOUZ')] },
+      { id: 3, opponents: [t(5, 'Team A', 'ABC'), t(6, 'Team B', 'ABC')] },
+      { id: 4, opponents: [t(7, 'Aurora Gaming', 'NAVI2'), t(8, 'BIG', 'NAVI')] }, // NAVI now shared by 2 teams
+    ] as any;
+    expect(aliasPairs(lists)).toEqual([{ canonical: 'PARIVISION', alias: 'PVISION' }, { canonical: 'Aurora Gaming', alias: 'NAVI2' }]);
+  });
+});
