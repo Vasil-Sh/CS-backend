@@ -6,7 +6,7 @@ import { forceOddsPapi, oddsRefreshCost, oddspapiDiag, oddspapiEnabled } from '.
 import { citoAdded, fallbackCount, oddsMatched, oddsMisses, pandascoreAdded } from '../services/matchFeed';
 import { pandascoreDiag, pandascoreEnabled, refreshPandaScore } from '../services/pandascoreFeed';
 import { citoDiag, citoEnabled, refreshCito } from '../services/citoFeed';
-import { forceLiquipedia, liquipediaAskedAt, liquipediaPagesInfo } from '../services/liquipediaFeed';
+import { forceLiquipedia, liquipediaAskedAt, liquipediaPagesInfo, setPagesMode } from '../services/liquipediaFeed';
 import { listServerErrors, resolveServerError } from '../services/serverErrors';
 import { weekReport } from '../services/feedStats';
 import { touchActivity } from '../services/activityTracker';
@@ -105,6 +105,16 @@ parsers.delete('/admin/server-errors/:id', requireAuth, requireAdmin, async (c) 
   const n = await resolveServerError(id);
   audit(c.get('user'), 'DELETE', `/admin/server-errors/${raw}`, { removed: n });
   return c.json({ success: true, removed: n });
+});
+
+/** PUT /api/admin/parsers/liquipedia/pages-mode — «Сторінки турнірів»: auto / on (always add) / off (do not read). */
+parsers.put('/admin/parsers/liquipedia/pages-mode', requireAuth, requireAdmin, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const mode = body?.mode;
+  if (mode !== 'auto' && mode !== 'on' && mode !== 'off') return c.json({ error: 'mode: auto | on | off' }, 400);
+  await setPagesMode(mode);
+  audit(c.get('user'), 'PUT', '/admin/parsers/liquipedia/pages-mode', { mode });
+  return c.json({ success: true, mode });
 });
 
 /** DELETE /api/admin/score-issues/:kind/:id — the admin settled it (picked the right score / checked a closed match). */

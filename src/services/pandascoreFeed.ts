@@ -209,6 +209,7 @@ export function psToMatch(m: PsMatch, now = Date.now()): TipsGgMatch | null {
     date: start.toISOString().slice(0, 10),
     link: '',
     type: m.match_type === 'best_of' && [1, 2, 3, 5].includes(bo) ? `BO${bo}` : 'BO3',
+    ...(m.match_type === 'best_of' && [1, 2, 3, 5].includes(bo) ? {} : { boGuessed: true }),
     score1: status === 'upcoming' ? null : score(a.id),
     score2: status === 'upcoming' ? null : score(b.id),
     nameTeam1: n1,

@@ -51,4 +51,6 @@ export interface TipsGgMatch {
   fromPage?: boolean;
   /** Closed as finished by other sources agreeing for 2 h while Liquipedia was silent («cito+pandascore»). */
   closedBy?: string;
+  /** The source did not say the series length: «BO3» is our default — another source's real one replaces it. */
+  boGuessed?: boolean;
 }

@@ -151,6 +151,7 @@ export function parseTicker(html: string, game: 'cs2' | 'dota2', now = Date.now(
       date,
       link: '',
       type: bo ? `BO${bo}` : 'BO3',
+      ...(bo ? {} : { boGuessed: true }),
       score1: hasScore ? scores[0] : null,
       score2: hasScore ? scores[1] : null,
       nameTeam1: t1,
@@ -456,6 +457,7 @@ export function parseSchedule(html: string, game: 'cs2' | 'dota2', page: string,
       date,
       link: '',
       type: bo ? `BO${bo}` : meta.type || 'BO3',
+      ...(bo ? {} : { boGuessed: true }),
       score1: hasScore ? a.score : null,
       score2: hasScore ? z.score : null,
       nameTeam1: a.name,
@@ -487,7 +489,7 @@ export function parseSchedule(html: string, game: 'cs2' | 'dota2', page: string,
 /** Every 20 min: the 2 tournament pages read longest ago among the tournaments the ticker shows as upcoming or live
  *  (the higher tier first), each page at most once an hour. */
 async function refreshPages(game: 'cs2' | 'dota2'): Promise<void> {
-  if (isNight() || Date.now() - (lastPages[game] || 0) < PAGES_EVERY_MS || isOpen(LIQUIPEDIA_PARSER)) return;
+  if ((await loadPagesMode()) === 'off' || isNight() || Date.now() - (lastPages[game] || 0) < PAGES_EVERY_MS || isOpen(LIQUIPEDIA_PARSER)) return;
   lastPages[game] = Date.now();
   await hydratePages(game);
   const data = mem[game]?.data || [];
@@ -533,6 +535,25 @@ const pageCheck: Record<'cs2' | 'dota2', { checked: number; agreed: number; off:
 const PAGE_TRUST = 0.7;
 const pagesTrusted = (c: { checked: number; agreed: number }) => c.checked < 5 || c.agreed / c.checked >= PAGE_TRUST;
 
+/** The admin's say on tournament pages: «auto» (added while they agree with the ticker), «on» (always), «off» (never read). */
+export type PagesMode = 'auto' | 'on' | 'off';
+const MODE_KEY = 'liquipedia_pages_mode';
+let pagesMode: { mode: PagesMode; at: number } = { mode: 'auto', at: 0 };
+async function loadPagesMode(): Promise<PagesMode> {
+  if (Date.now() - pagesMode.at < 60_000) return pagesMode.mode;
+  try {
+    const { rows } = await pool.query<{ value: string }>('SELECT value FROM app_settings WHERE key = $1', [MODE_KEY]);
+    const v = rows[0]?.value;
+    pagesMode = { mode: v === 'on' || v === 'off' ? v : 'auto', at: Date.now() };
+  } catch { pagesMode = { ...pagesMode, at: Date.now() }; }
+  return pagesMode.mode;
+}
+export async function setPagesMode(mode: PagesMode): Promise<void> {
+  await pool.query(`INSERT INTO app_settings(key, value) VALUES($1, $2) ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`, [MODE_KEY, mode]);
+  pagesMode = { mode, at: Date.now() };
+  if (mode !== 'off') { delete lastPages.cs2; delete lastPages.dota2; }
+}
+
 /** The ticker's matches plus the ones only the tournament pages have (same teams within 6 h = the same match). */
 function withPages(game: 'cs2' | 'dota2', ticker: TipsGgMatch[], now = Date.now()): TipsGgMatch[] {
   const ids = new Set(ticker.map((m) => m.id));
@@ -540,8 +561,10 @@ function withPages(game: 'cs2' | 'dota2', ticker: TipsGgMatch[], now = Date.now(
   const extra: TipsGgMatch[] = [];
   const check = { checked: 0, agreed: 0, off: [] as string[] };
   const compare = (p: TipsGgMatch, x: TipsGgMatch) => {
+    // the ticker card often has no «Bo»: its «BO3» is our guess — the page's real one replaces it, and a guess is no disagreement
+    if (x.boGuessed && !p.boGuessed) { x.type = p.type; delete x.boGuessed; }
     const okTime = Math.abs(Date.parse(p.startDate) - Date.parse(x.startDate)) <= 15 * 60_000;
-    const okBo = p.type === x.type;
+    const okBo = p.boGuessed || x.boGuessed || p.type === x.type;
     check.checked++;
     if (okTime && okBo) check.agreed++;
     else if (check.off.length < 5) check.off.push(`${x.nameTeam1} — ${x.nameTeam2}: ${okTime ? '' : `час ${p.startDate.slice(11, 16)} проти ${x.startDate.slice(11, 16)} UTC`}${!okTime && !okBo ? ', ' : ''}${okBo ? '' : `${p.type} проти ${x.type}`}`);
@@ -565,7 +588,8 @@ function withPages(game: 'cs2' | 'dota2', ticker: TipsGgMatch[], now = Date.now(
     }
   }
   pageCheck[game] = check;
-  if (!extra.length || !pagesTrusted(check)) {
+  if (pagesMode.mode === 'off') { pagesAdded[game] = 0; return ticker; }
+  if (!extra.length || (pagesMode.mode === 'auto' && !pagesTrusted(check))) {
     if (extra.length) console.warn(`[liquipedia] ${game}: tournament pages agree with the ticker on ${check.agreed} of ${check.checked} — their ${extra.length} extra matches are left out`);
     pagesAdded[game] = 0;
     return ticker;
@@ -577,7 +601,7 @@ function withPages(game: 'cs2' | 'dota2', ticker: TipsGgMatch[], now = Date.now(
 }
 
 /** For the admin card: tournament pages read, the matches only they gave, and how they agree with the ticker. */
-export function liquipediaPagesInfo(): { pages: number; added: number; empty: number; checked: number; agreed: number; trusted: boolean; off: string[] } {
+export function liquipediaPagesInfo(): { pages: number; added: number; empty: number; checked: number; agreed: number; trusted: boolean; off: string[]; mode: PagesMode } {
   const all = [...Object.values(pageStore.cs2), ...Object.values(pageStore.dota2)];
   // a page with no dated match: one alone is normal (an overview page that links its stages, a stage still all TBD);
   // half or more of them is not — most likely Liquipedia changed its layout. `empty` counts only then.
@@ -585,7 +609,7 @@ export function liquipediaPagesInfo(): { pages: number; added: number; empty: nu
   const c = { checked: pageCheck.cs2.checked + pageCheck.dota2.checked, agreed: pageCheck.cs2.agreed + pageCheck.dota2.agreed };
   return {
     pages: all.length, added: pagesAdded.cs2 + pagesAdded.dota2, empty: empty >= 2 && empty * 2 >= all.length ? empty : 0,
-    ...c, trusted: pagesTrusted(pageCheck.cs2) && pagesTrusted(pageCheck.dota2), off: [...pageCheck.cs2.off, ...pageCheck.dota2.off].slice(0, 5),
+    ...c, trusted: pagesTrusted(pageCheck.cs2) && pagesTrusted(pageCheck.dota2), off: [...pageCheck.cs2.off, ...pageCheck.dota2.off].slice(0, 5), mode: pagesMode.mode,
   };
 }
 
@@ -646,6 +670,7 @@ export async function fetchLiquipediaMatches(game: 'cs2' | 'dota2'): Promise<Tip
     void refreshMaps(game).catch((e) => console.warn(`[liquipedia] ${game} maps failed:`, (e as Error).message));
     void refreshPages(game).catch((e) => console.warn(`[liquipedia] ${game} pages failed:`, (e as Error).message));
     await hydratePages(game);
+    await loadPagesMode();
     return withTimeStatus(withPages(game, cached?.data || []));
   }
   if (!inflight[game]) {
@@ -658,6 +683,7 @@ export async function fetchLiquipediaMatches(game: 'cs2' | 'dota2'): Promise<Tip
   }
   const ticker = await inflight[game]!;
   await hydratePages(game);
+  await loadPagesMode();
   const out = withTimeStatus(ticker.length ? withPages(game, ticker) : ticker);
   void backfillScores(game).catch((e) => console.warn(`[liquipedia] ${game} backfill failed:`, (e as Error).message));
   void refreshMaps(game).catch((e) => console.warn(`[liquipedia] ${game} maps failed:`, (e as Error).message));

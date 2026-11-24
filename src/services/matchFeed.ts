@@ -144,6 +144,7 @@ export function addExtra(list: TipsGgMatch[], cito: TipsGgMatch[], resolve: Reso
       if (!m.tournament && c.tournament) m.tournament = c.tournament;
       if (!m.stage && c.stage) m.stage = c.stage;
       if (!m.tier && c.tier) m.tier = c.tier;
+      if (m.boGuessed && !c.boGuessed) { m.type = c.type; delete m.boGuessed; } // our «BO3» was a guess, the other source knows
       if (!m.tournamentLogo && c.tournamentLogo) m.tournamentLogo = c.tournamentLogo;
       // a live match Liquipedia has no series score for yet: the other source's
       if (m.status === 'live' && c.status === 'live' && m.score1 == null && m.score2 == null && c.score1 != null && c.score2 != null) {

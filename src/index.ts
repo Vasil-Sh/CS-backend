@@ -529,6 +529,8 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
             if (v && !prev[k]) { prev[k] = v; enriched = true; }
           }
           if (prev.status === 'upcoming' && tm.startDate && tm.startDate !== prev.startDate) { prev.startDate = tm.startDate; enriched = true; }
+          // a real series length (not our «BO3» guess) replaces the one cached
+          if (tm.type && !(tm as any).boGuessed && tm.type !== prev.type) { prev.type = tm.type; delete prev.boGuessed; enriched = true; }
           if (enriched) updates++;
           if (!prev.stage && tm.stage) prev.stage = tm.stage;
           if (!prev.tournamentLogo && tm.tournamentLogo) prev.tournamentLogo = tm.tournamentLogo;

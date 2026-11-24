@@ -165,6 +165,7 @@ export function citoToMatch(m: CitoMatch, now = Date.now()): TipsGgMatch | null 
     date: start.toISOString().slice(0, 10),
     link: '',
     type: [1, 2, 3, 5].includes(bo) ? `BO${bo}` : 'BO3',
+    ...([1, 2, 3, 5].includes(bo) ? {} : { boGuessed: true }),
     score1: status === 'upcoming' ? null : num(m.team1Score),
     score2: status === 'upcoming' ? null : num(m.team2Score),
     nameTeam1: t1,
