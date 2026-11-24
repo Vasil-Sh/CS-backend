@@ -10,7 +10,7 @@ import { forceLiquipedia, liquipediaAskedAt, liquipediaPagesInfo } from '../serv
 import { listServerErrors, resolveServerError } from '../services/serverErrors';
 import { weekReport } from '../services/feedStats';
 import { isNight, nightWindow } from '../services/nightMode';
-import { scoreIssues } from '../services/scoreCheck';
+import { resolveScoreIssue, scoreIssues } from '../services/scoreCheck';
 
 /** Parsers shown on the admin screen: Liquipedia + OddsPapi + OpenDota (tips.gg and HLTV removed 23.11.2026). */
 export const knownParsers = () => ['liquipedia', ...(pandascoreEnabled() ? ['pandascore'] : []), ...(citoEnabled() ? ['cito'] : []), ...(oddspapiEnabled() ? ['oddspapi'] : []), 'opendota'];
@@ -103,6 +103,15 @@ parsers.delete('/admin/server-errors/:id', requireAuth, requireAdmin, async (c) 
   const n = await resolveServerError(id);
   audit(c.get('user'), 'DELETE', `/admin/server-errors/${raw}`, { removed: n });
   return c.json({ success: true, removed: n });
+});
+
+/** DELETE /api/admin/score-issues/:kind/:id — the admin settled it (picked the right score / checked a closed match). */
+parsers.delete('/admin/score-issues/:kind/:id', requireAuth, requireAdmin, async (c) => {
+  const kind = c.req.param('kind'), id = c.req.param('id') || '';
+  if ((kind !== 'conflict' && kind !== 'closed') || !id || id.length > 300) return c.json({ error: 'Invalid issue' }, 400);
+  const ok = await resolveScoreIssue(kind, id);
+  audit(c.get('user'), 'DELETE', `/admin/score-issues/${kind}/${id}`, { kind, id });
+  return c.json({ success: ok });
 });
 
 /** POST /api/admin/parsers/:name/rerun — reset the breaker so the next fetch retries. */

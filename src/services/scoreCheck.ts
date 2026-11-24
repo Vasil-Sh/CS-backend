@@ -27,7 +27,7 @@ export interface ScoreIssue {
 const H = 3_600_000;
 export const CLOSE_AFTER_MS = 2 * H;
 const DB_KEY = 'feed_score_check';
-let state: { agreeAt: Record<string, number>; issues: ScoreIssue[] } = { agreeAt: {}, issues: [] };
+let state: { agreeAt: Record<string, number>; issues: ScoreIssue[]; resolved: Record<string, number> } = { agreeAt: {}, issues: [], resolved: {} };
 let loaded = false;
 let saveTimer: NodeJS.Timeout | null = null;
 
@@ -36,7 +36,7 @@ async function load(): Promise<void> {
   loaded = true;
   try {
     const { rows } = await pool.query<{ value: string }>('SELECT value FROM app_settings WHERE key = $1', [DB_KEY]);
-    if (rows[0]?.value) state = { agreeAt: {}, issues: [], ...JSON.parse(rows[0].value) };
+    if (rows[0]?.value) state = { agreeAt: {}, issues: [], resolved: {}, ...JSON.parse(rows[0].value) };
   } catch { /* start empty */ }
 }
 function save(): void {
@@ -54,6 +54,14 @@ function save(): void {
 const sc = (a: number | null, b: number | null) => `${a ?? '—'}:${b ?? '—'}`;
 const done = (r: Report) => r.status === 'finished' && r.s1 != null && r.s2 != null;
 
+/** The series result a score stands for. A CS2 BO1 is often given in rounds (13:8) by one source and in maps (1:0)
+ *  by another — both mean «team 1 won 1:0». Any number above 5 is rounds: only the winner is compared then. */
+export function sameResult(a1: number, a2: number, b1: number, b2: number): boolean {
+  const rounds = (x: number, y: number) => Math.max(x, y) > 5;
+  if (rounds(a1, a2) || rounds(b1, b2)) return Math.sign(a1 - a2) === Math.sign(b1 - b2);
+  return a1 === b1 && a2 === b2;
+}
+
 /** Apply to one built feed list (mutates it). `reports` — what the other sources said about each of our matches, oriented to it. */
 export function checkScores(game: 'cs2' | 'dota2', list: TipsGgMatch[], reports: Map<TipsGgMatch, Report[]>, now = Date.now()): { conflicts: number; closed: number } {
   let conflicts = 0, closed = 0, changed = false;
@@ -70,14 +78,15 @@ export function checkScores(game: 'cs2' | 'dota2', list: TipsGgMatch[], reports:
     if (!rs.length) continue;
     const base = { id: m.id, game, team1: m.nameTeam1, team2: m.nameTeam2, start: m.startDate, tournament: m.tournament };
     if (m.status === 'finished' && m.score1 != null && m.score2 != null) {
-      const off = rs.filter((r) => r.s1 !== m.score1 || r.s2 !== m.score2);
-      if (off.length && !m.closedBy) { issue({ ...base, kind: 'conflict', ours: sc(m.score1, m.score2), theirs: off.map((r) => ({ source: r.source, score: sc(r.s1, r.s2) })) }); conflicts++; }
+      const off = rs.filter((r) => !sameResult(m.score1!, m.score2!, r.s1!, r.s2!));
+      if (off.length && !m.closedBy && !state.resolved[m.id]) { issue({ ...base, kind: 'conflict', ours: sc(m.score1, m.score2), theirs: off.map((r) => ({ source: r.source, score: sc(r.s1, r.s2) })) }); conflicts++; }
+      else if (!off.length) { const i = state.issues.findIndex((y) => y.id === m.id && y.kind === 'conflict'); if (i >= 0) { state.issues.splice(i, 1); changed = true; } }
       continue;
     }
     if (m.status === 'finished' || Date.parse(m.startDate) > now) continue;
     // not finished by Liquipedia: two other sources agreeing on the same final score for 2 h close it
     const sources = new Set(rs.map((r) => r.source));
-    const same = rs.every((r) => r.s1 === rs[0].s1 && r.s2 === rs[0].s2);
+    const same = rs.every((r) => r.s1 === rs[0].s1 && r.s2 === rs[0].s2) && Math.max(rs[0].s1!, rs[0].s2!) <= 5; // maps, not rounds
     if (sources.size < 2 || !same || rs[0].s1 === rs[0].s2) { if (state.agreeAt[m.id]) { delete state.agreeAt[m.id]; changed = true; } continue; }
     const since = state.agreeAt[m.id] ??= now;
     if (since === now) changed = true;
@@ -94,6 +103,7 @@ export function checkScores(game: 'cs2' | 'dota2', list: TipsGgMatch[], reports:
   const before = state.issues.length;
   state.issues = state.issues.filter((x) => Date.parse(x.at) > weekAgo).slice(0, 100);
   for (const [id, t] of Object.entries(state.agreeAt)) if (now - t > 2 * 24 * H) { delete state.agreeAt[id]; changed = true; }
+  for (const [id, t] of Object.entries(state.resolved)) if (now - t > 7 * 24 * H) { delete state.resolved[id]; changed = true; }
   if (changed || state.issues.length !== before) save();
   return { conflicts, closed };
 }
@@ -102,5 +112,15 @@ export async function scoreIssues(): Promise<ScoreIssue[]> {
   await load();
   return state.issues;
 }
+/** The admin chose the right score (or confirmed a closed match): the item leaves the list and is not raised again. */
+export async function resolveScoreIssue(kind: ScoreIssue['kind'], id: string): Promise<boolean> {
+  await load();
+  const i = state.issues.findIndex((x) => x.id === id && x.kind === kind);
+  if (i < 0) return false;
+  state.issues.splice(i, 1);
+  state.resolved[id] = Date.now();
+  save();
+  return true;
+}
 export async function loadScoreCheck(): Promise<void> { await load(); }
-export function __resetScoreCheck(): void { state = { agreeAt: {}, issues: [] }; loaded = true; }
+export function __resetScoreCheck(): void { state = { agreeAt: {}, issues: [], resolved: {} }; loaded = true; }

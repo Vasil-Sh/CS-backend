@@ -32,3 +32,22 @@ describe('checkScores', () => {
     expect(list[0]).toMatchObject({ kind: 'conflict', ours: '2:0', theirs: [{ source: 'pandascore', score: '2:1' }] });
   });
 });
+
+describe('sameResult (rounds vs maps)', () => {
+  it('13:8 in rounds = 1:0 in maps; 9:13 = 0:1; 2:1 ≠ 2:0', async () => {
+    const { sameResult } = await import('./scoreCheck');
+    expect(sameResult(13, 8, 1, 0)).toBe(true);
+    expect(sameResult(9, 13, 0, 1)).toBe(true);
+    expect(sameResult(13, 8, 0, 1)).toBe(false);
+    expect(sameResult(2, 1, 2, 0)).toBe(false);
+  });
+  it('a BO1 in rounds is not a conflict, and an old false one is cleared', async () => {
+    __resetScoreCheck();
+    const m = match({ status: 'finished', score1: 2, score2: 0 });
+    checkScores('cs2', [m], new Map([[m, [r('cito', 1, 0)]]]), NOW);
+    expect((await scoreIssues())).toHaveLength(1);
+    const m2 = match({ status: 'finished', score1: 13, score2: 8 });
+    checkScores('cs2', [m2], new Map([[m2, [r('cito', 1, 0)]]]), NOW);
+    expect(await scoreIssues()).toHaveLength(0);
+  });
+});
