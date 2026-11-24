@@ -8,19 +8,32 @@ import { pool } from '../db/client';
 
 const last = new Map<string, string>(); // id → state already written (skip unchanged rows)
 
+/** Where a feed match came from, by its id (and the tournament-page mark on Liquipedia's). */
+export function sourceOf(m: { id: unknown; fromPage?: boolean }): string {
+  const id = String(m.id);
+  if (id.startsWith('lp-')) return m.fromPage ? 'liquipedia_page' : 'liquipedia';
+  if (id.startsWith('ps-')) return 'pandascore';
+  if (id.startsWith('ct-')) return 'cito';
+  if (id.startsWith('op-')) return 'oddspapi';
+  if (id.startsWith('manual-')) return 'manual';
+  return 'other';
+}
+const SOURCE_SQL = `COALESCE(source, CASE WHEN id LIKE 'lp-%' THEN 'liquipedia' WHEN id LIKE 'ps-%' THEN 'pandascore' WHEN id LIKE 'ct-%' THEN 'cito'
+  WHEN id LIKE 'op-%' THEN 'oddspapi' WHEN id LIKE 'manual-%' THEN 'manual' ELSE 'other' END)`;
+
 /** Upsert the feed's matches of the last `days` days (only rows whose state changed since the last write). */
 export function trackFeed(game: 'cs2' | 'dota2', matches: any[], days = 2): Promise<void> {
   const since = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
   const rows = matches.filter((m) => m?.id && m.date >= since).map((m) => ({
     id: String(m.id), date: String(m.date).slice(0, 10), status: String(m.status || 'upcoming'),
-    score: m.score1 != null && m.score2 != null && m.score1 + m.score2 > 0, odds: m.coeff1 != null && m.coeff2 != null,
+    score: m.score1 != null && m.score2 != null && m.score1 + m.score2 > 0, odds: m.coeff1 != null && m.coeff2 != null, source: sourceOf(m),
   })).filter((r) => last.get(r.id) !== `${r.status}|${r.score}|${r.odds}`);
   if (!rows.length) return Promise.resolve();
   const vals: unknown[] = [];
-  const ph = rows.map((r, i) => { vals.push(r.id, game, r.date, r.status, r.score, r.odds); const b = i * 6; return `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6})`; });
+  const ph = rows.map((r, i) => { vals.push(r.id, game, r.date, r.status, r.score, r.odds, r.source); const b = i * 7; return `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7})`; });
   return pool.query(
-    `INSERT INTO feed_matches(id, game, date, status, has_score, has_odds) VALUES ${ph.join(',')}
-     ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, has_score = feed_matches.has_score OR EXCLUDED.has_score,
+    `INSERT INTO feed_matches(id, game, date, status, has_score, has_odds, source) VALUES ${ph.join(',')}
+     ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, source = COALESCE(feed_matches.source, EXCLUDED.source), has_score = feed_matches.has_score OR EXCLUDED.has_score,
        has_odds = feed_matches.has_odds OR EXCLUDED.has_odds, date = EXCLUDED.date, updated_at = now()`, vals,
   ).then(() => rows.forEach((r) => last.set(r.id, `${r.status}|${r.score}|${r.odds}`)))
     .then(() => {}, (e) => console.warn('[feed-stats] save failed:', (e as Error).message));
@@ -44,6 +57,8 @@ export interface WeekReport {
   /** Minutes from «finished» to the score, over matches whose score came later; null when none did. */
   scoreDelayMin: number | null; lateScores: number;
   days: { day: string; total: number; noScore: number; withOdds: number }[];
+  /** Matches per source over the week, most first. */
+  bySource: { source: string; n: number }[];
 }
 
 export async function weekReport(): Promise<WeekReport> {
@@ -65,6 +80,9 @@ export async function weekReport(): Promise<WeekReport> {
      SELECT COUNT(*)::int AS n, percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (s.at - f.at)) / 60) AS med
      FROM s JOIN f USING (match_id)`,
   ).catch(() => ({ rows: [{ n: 0, med: null }] }));
+  const src = await pool.query(
+    `SELECT ${SOURCE_SQL} AS source, COUNT(*)::int AS n FROM feed_matches WHERE date >= $1::date AND date <= $2::date GROUP BY 1 ORDER BY 2 DESC`, [days[0], days[6]],
+  ).catch(() => ({ rows: [] as any[] }));
   const first = await pool.query(`SELECT to_char(MIN(first_seen) AT TIME ZONE 'Europe/Kyiv', 'YYYY-MM-DD') AS d FROM feed_matches`).catch(() => ({ rows: [{ d: null }] }));
   const sum = (k: string, game?: string) => rows.filter((r: any) => !game || r.game === game).reduce((a: number, r: any) => a + Number(r[k]), 0);
   return {
@@ -74,6 +92,7 @@ export async function weekReport(): Promise<WeekReport> {
     finished: sum('fin'), noScore: sum('noscore'), withOdds: sum('odds'),
     scoreDelayMin: delay.rows[0]?.med != null ? Math.round(Number(delay.rows[0].med)) : null,
     lateScores: Number(delay.rows[0]?.n || 0),
+    bySource: src.rows.map((r: any) => ({ source: String(r.source), n: Number(r.n) })),
     days: days.map((day) => ({
       day,
       total: rows.filter((r: any) => r.day === day).reduce((a: number, r: any) => a + r.n, 0),
