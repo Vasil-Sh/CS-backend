@@ -576,7 +576,7 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
       }
 
       saveClosing(game, existing); // closing lines of matches that have started
-      trackFeed(game, existing); // «Матчі за 7 днів» on the dashboard
+      void trackFeed(game, existing); // «Матчі за 7 днів» on the dashboard
 
       // ── Persist newly-finished matches to history DB ──
       // Incremental refresh detects score changes that mean a match just ended.
@@ -687,6 +687,7 @@ function startFullRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: string)
           }
           writeFileCacheInternal([...merged.values()], cacheFile);
           persistFinishedToHistory([...merged.values()], game, `full-refresh:${tag}`);
+          void trackFeed(game, [...merged.values()], 7);
           console.log(`[full-refresh] ${tag}: ${fresh.length} fresh merged into ${merged.size} total`);
         } else {
           writeFileCacheInternal(fresh, cacheFile);
