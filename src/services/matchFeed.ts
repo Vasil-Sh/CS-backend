@@ -3,6 +3,7 @@
 //   • Liquipedia  — schedule, series score, live / finished, BO   (every 5 min)
 //   • OddsPapi    — bookmaker odds, added to the same match       (every 3–12 h by budget; only with ODDSPAPI_KEY)
 //   • OpenDota    — fresher Dota 2 score between Liquipedia refreshes
+//   • Cito        — second CS2 schedule: matches Liquipedia lacks are added, missing final scores filled (only with CITO_API_KEY)
 //   If Liquipedia gives nothing, OddsPapi's own schedule is used instead.
 // (tips.gg, HLTV and the browser scraper were removed on 23.11.2026.)
 // ═══════════════════════════════════════════════════════════════
@@ -12,6 +13,7 @@ import { cachedMatches, fetchOddsPapiMatches, oddspapiEnabled, refreshOddsPapi, 
 import { applySeries, recentDotaSeries } from './opendotaScores';
 import { liquipediaOkAt, fetchLiquipediaMatches } from './liquipediaFeed';
 import { normalizeTeam } from '../utils/matchUtils';
+import { citoEnabled, citoMatches, refreshCito } from './citoFeed';
 import { pool } from '../db/client';
 
 /** Kept for callers: the Liquipedia feed is the only one now. */
@@ -107,6 +109,47 @@ export function addOdds(base: TipsGgMatch[], odds: TipsGgMatch[], resolve: Resol
   return n;
 }
 
+/** Cito's CS2 matches into our list. The same match is one that has both teams within 6 h of each other
+ *  (either order), or one team within 20 min — names differ between sources («NAVI» / «Natus Vincere»).
+ *  A known match only takes what it lacks (final score, logos, tournament); the rest are added. Returns how many were added. */
+export function addCito(list: TipsGgMatch[], cito: TipsGgMatch[], resolve: Resolve = teamKey): number {
+  let added = 0;
+  const pool = [...list];
+  for (const c of cito) {
+    const t = Date.parse(c.startDate);
+    let swapped = false;
+    const m = pool.find((x) => {
+      const dt = Math.abs(Date.parse(x.startDate) - t);
+      if (dt >= 6 * 3_600_000) return false;
+      if (sameTeam(x.nameTeam1, c.nameTeam1, resolve) && sameTeam(x.nameTeam2, c.nameTeam2, resolve)) { swapped = false; return true; }
+      if (sameTeam(x.nameTeam1, c.nameTeam2, resolve) && sameTeam(x.nameTeam2, c.nameTeam1, resolve)) { swapped = true; return true; }
+      if (dt > 20 * 60_000) return false;
+      if (sameTeam(x.nameTeam1, c.nameTeam1, resolve) || sameTeam(x.nameTeam2, c.nameTeam2, resolve)) { swapped = false; return true; }
+      if (sameTeam(x.nameTeam1, c.nameTeam2, resolve) || sameTeam(x.nameTeam2, c.nameTeam1, resolve)) { swapped = true; return true; }
+      return false;
+    });
+    if (m) {
+      if (m.status === 'finished' && (m.score1 == null || m.score2 == null) && c.status === 'finished' && c.score1 != null && c.score2 != null) {
+        m.score1 = swapped ? c.score2 : c.score1;
+        m.score2 = swapped ? c.score1 : c.score2;
+      }
+      if (!m.logoTeam1) m.logoTeam1 = swapped ? c.logoTeam2 : c.logoTeam1;
+      if (!m.logoTeam2) m.logoTeam2 = swapped ? c.logoTeam1 : c.logoTeam2;
+      if (!m.tournament && c.tournament) m.tournament = c.tournament;
+      continue;
+    }
+    list.push(c);
+    pool.push(c);
+    added++;
+  }
+  if (added) list.sort((a, z) => Date.parse(a.startDate) - Date.parse(z.startDate));
+  return added;
+}
+
+/** CS2 matches the last feed build took from Cito (not on Liquipedia) — for the admin card. */
+let citoAddedN = 0;
+export const citoAdded = () => citoAddedN;
+
 async function withDotaScores(list: TipsGgMatch[]): Promise<TipsGgMatch[]> {
   // only ask OpenDota while some unfinished match is within its window (started up to 8 h ago or starts within 30 min)
   const now = Date.now();
@@ -145,6 +188,7 @@ async function newFeed(game: 'cs2' | 'dota2', spendOddsPapi: boolean): Promise<T
     fallback[game] = extra.length;
     if (extra.length) list = [...lp, ...extra].sort((a, z) => Date.parse(a.startDate) - Date.parse(z.startDate));
   }
+  if (game === 'cs2' && citoEnabled()) citoAddedN = addCito(list = [...list], citoMatches(), await aliasResolver(game));
   if (lp.length && odds.length) { const miss: OddsMiss[] = []; matched[game] = addOdds(list, odds, await aliasResolver(game), miss, game); misses[game] = miss; }
   else if (lp.length) { matched[game] = 0; misses[game] = []; }
   // still «—:—» 6 h after the start, and Liquipedia's tournament page did not help: ask OddsPapi (≤ 5 a day)
@@ -164,6 +208,7 @@ export async function fetchCs2Matches(): Promise<TipsGgMatch[]> {
 /** The 2-minute incremental refresh: today's and yesterday's matches. Never spends a billable OddsPapi request directly. */
 export async function fetchTodayMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMatch[] | null> {
   if (oddspapiEnabled()) void refreshOddsPapi().catch(() => {}); // no-op unless its schedule is due
+  if (game === 'cs2' && citoEnabled()) void refreshCito().catch(() => {}); // no-op unless its share of the month is due
   const today = new Date().toISOString().slice(0, 10);
   const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
   return (await newFeed(game, false)).filter((m) => m.date === today || m.date === yesterday);

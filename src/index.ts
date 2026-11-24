@@ -68,6 +68,7 @@ import { hydrateTeamLogos } from './services/teamLogos';
 import { startMaintenance } from './services/maintenance';
 import { restoreDurableFiles, startDurableSync, syncDurableFiles } from './services/durableFiles';
 import { captureServerErrors, flushServerErrors, recordServerError } from './services/serverErrors';
+import { citoReady } from './services/citoFeed';
 import { knownParsers } from './routes/adminParsers';
 import { listCircuits, pauseInfo } from './services/circuitBreaker';
 import { runWithRequestContext } from './utils/requestContext';
@@ -378,6 +379,15 @@ setTimeout(() => {
   dedupCache(join(process.cwd(), '.cache', 'cs2_matches.json'), 'cs2');
 }, 2_000);
 
+/** Cito matches cached earlier that the new feed no longer has (Liquipedia lists them now, under its own id) — dropped,
+ *  so the same match is not shown twice. Older than 2 days stay: Cito's lists no longer reach that far back. */
+function dropCitoGone(cached: any[], fresh: any[]): any[] {
+  if (!citoReady()) return cached;
+  const ids = new Set(fresh.map((m: any) => m.id));
+  const from = Date.now() - 2 * 86_400_000;
+  return cached.filter((m: any) => !String(m.id).startsWith('ct-') || ids.has(m.id) || Date.parse(m.startDate) < from);
+}
+
 // ── Cache warmup: CS2 schedule (Liquipedia + OddsPapi) merged into today's cache, never shrinking it ──
 setTimeout(async () => {
   const cacheFile = join(process.cwd(), '.cache', 'cs2_matches.json');
@@ -389,6 +399,7 @@ setTimeout(async () => {
     }
     // Liquipedia gives the schedule: drop the OddsPapi stand-ins cached before it (same matches, other ids)
     if (fresh.some((m: any) => String(m.id).startsWith('lp-'))) existingArr = existingArr.filter((m: any) => !String(m.id).startsWith('op-'));
+    existingArr = dropCitoGone(existingArr, fresh);
     const merged = new Map<string, any>(existingArr.map((m: any) => [m.id, m]));
     for (const m of fresh) merged.set(m.id, merged.has(m.id) ? { ...merged.get(m.id), ...m } : m);
     const mergedArr = [...merged.values()];
@@ -535,7 +546,7 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
         // ── OddsPapi stand-in from a Liquipedia outage: the real Liquipedia match takes its place (no duplicate) ──
         if (String(tm.id).startsWith('lp-')) {
           const t = Date.parse(tm.startDate);
-          const idx = existing.findIndex((m: any) => String(m.id).startsWith('op-') && Math.abs(Date.parse(m.startDate) - t) < 6 * 3_600_000
+          const idx = existing.findIndex((m: any) => /^(op|ct)-/.test(String(m.id)) && Math.abs(Date.parse(m.startDate) - t) < 6 * 3_600_000
             && ((teamKey(m.nameTeam1) === teamKey(tm.nameTeam1) && teamKey(m.nameTeam2) === teamKey(tm.nameTeam2)) || (teamKey(m.nameTeam1) === teamKey(tm.nameTeam2) && teamKey(m.nameTeam2) === teamKey(tm.nameTeam1))));
           if (idx >= 0) {
             existingMap.delete(existing[idx].id);
@@ -668,6 +679,7 @@ function startFullRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: string)
           } catch { /* stale */ }
           // Liquipedia now gives the schedule: drop the OddsPapi stand-ins cached before it (same matches, other ids)
           if (fresh.some((m: any) => String(m.id).startsWith('lp-'))) existing = existing.filter((m: any) => !String(m.id).startsWith('op-'));
+          existing = dropCitoGone(existing, fresh);
           const merged = new Map<string, any>(existing.map((m: any) => [m.id, m]));
           for (const m of fresh) {
             if (merged.has(m.id)) { recordChanges(diffMatch(game, merged.get(m.id), m)); merged.set(m.id, { ...merged.get(m.id), ...m }); continue; }
