@@ -452,6 +452,7 @@ import { validateScores, needsScoreBackfill } from './utils/scoreValidation.js';
 import { isIdle, IDLE_POLL_MS } from './services/activityTracker.js';
 
 const IDLE_BET_REFRESH_MS = 15 * 60_000;
+const IDLE_REFRESH_MS = 30 * 60_000;
 let pendingCheck = { at: 0, yes: false };
 /** A pending bet placed in the last 2 days (checked at most once a minute). */
 async function hasRecentPendingBets(): Promise<boolean> {
@@ -470,9 +471,11 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
 
   let lastIdleRun = 0;
   const tick = async () => {
-    // No visitors: no refresh — except every 15 min while someone has a pending bet from the last 2 days,
-    // so a match that ended at night is «finished» before the ticker drops it (the morning would find it stuck)
-    if (feedPaused() || (isIdle() && (Date.now() - lastIdleRun < IDLE_BET_REFRESH_MS || !(await hasRecentPendingBets())))) {
+    // No visitors: a slow refresh instead of none — every 15 min while someone has a pending bet from the last 2 days
+    // (a match that ended at night is «finished» before the ticker drops it), every 30 min otherwise
+    // (the sources and the admin's cards never go hours without data)
+    const idleEvery = isIdle() ? ((await hasRecentPendingBets()) ? IDLE_BET_REFRESH_MS : IDLE_REFRESH_MS) : 0;
+    if (feedPaused() || (isIdle() && Date.now() - lastIdleRun < idleEvery)) {
       setTimeout(tick, IDLE_POLL_MS).unref();
       return;
     }

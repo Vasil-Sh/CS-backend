@@ -147,12 +147,6 @@ export async function refreshCito(force = false): Promise<void> {
   }
 }
 
-const logo = (m: CitoMatch, n: 1 | 2): string | null => {
-  const t = m[`team${n}`] as { logoUrl?: string } | undefined;
-  const v = m[`team${n}LogoUrl`] ?? m[`team${n}Logo`] ?? t?.logoUrl;
-  return typeof v === 'string' && /^https:\/\//.test(v) ? v : null;
-};
-
 export function citoToMatch(m: CitoMatch, now = Date.now()): TipsGgMatch | null {
   const t1 = (m.team1Name || '').trim(), t2 = (m.team2Name || '').trim();
   if (!m.id || !m.startsAt || isTbd(t1) || isTbd(t2)) return null;
@@ -175,8 +169,9 @@ export function citoToMatch(m: CitoMatch, now = Date.now()): TipsGgMatch | null 
     score2: status === 'upcoming' ? null : num(m.team2Score),
     nameTeam1: t1,
     nameTeam2: t2,
-    logoTeam1: logo(m, 1),
-    logoTeam2: logo(m, 2),
+    // Cito's images may carry their own licence (shown only with a link to the source) — we do not use them
+    logoTeam1: null,
+    logoTeam2: null,
     tournament: (m.eventName || '').trim(),
     stage: '',
     status,

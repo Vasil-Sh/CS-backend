@@ -526,36 +526,67 @@ async function refreshPages(game: 'cs2' | 'dota2'): Promise<void> {
 }
 
 /** The ticker's matches plus the ones only the tournament pages have (same teams within 6 h = the same match). */
+/** How the tournament pages agree with the ticker on the matches both have (start within 15 min, same BO) — the pages'
+ *  parser was written without a live page to test on, so it is checked against the ticker on every build. */
+const pageCheck: Record<'cs2' | 'dota2', { checked: number; agreed: number; off: string[] }> = { cs2: { checked: 0, agreed: 0, off: [] }, dota2: { checked: 0, agreed: 0, off: [] } };
+/** Below this share of agreement (over at least 5 matches) the pages add nothing: they are probably read wrong. */
+const PAGE_TRUST = 0.7;
+const pagesTrusted = (c: { checked: number; agreed: number }) => c.checked < 5 || c.agreed / c.checked >= PAGE_TRUST;
+
+/** The ticker's matches plus the ones only the tournament pages have (same teams within 6 h = the same match). */
 function withPages(game: 'cs2' | 'dota2', ticker: TipsGgMatch[], now = Date.now()): TipsGgMatch[] {
   const ids = new Set(ticker.map((m) => m.id));
+  const byId = new Map(ticker.map((m) => [m.id, m]));
   const extra: TipsGgMatch[] = [];
+  const check = { checked: 0, agreed: 0, off: [] as string[] };
+  const compare = (p: TipsGgMatch, x: TipsGgMatch) => {
+    const okTime = Math.abs(Date.parse(p.startDate) - Date.parse(x.startDate)) <= 15 * 60_000;
+    const okBo = p.type === x.type;
+    check.checked++;
+    if (okTime && okBo) check.agreed++;
+    else if (check.off.length < 5) check.off.push(`${x.nameTeam1} — ${x.nameTeam2}: ${okTime ? '' : `час ${p.startDate.slice(11, 16)} проти ${x.startDate.slice(11, 16)} UTC`}${!okTime && !okBo ? ', ' : ''}${okBo ? '' : `${p.type} проти ${x.type}`}`);
+  };
   for (const pc of Object.values(pageStore[game])) {
     for (const m of pc.matches) {
       const t = Date.parse(m.startDate);
-      if (ids.has(m.id) || t > now + 8 * 24 * 3_600_000 || t < now - 36 * 3_600_000) continue;
+      if (t > now + 8 * 24 * 3_600_000 || t < now - 36 * 3_600_000) continue;
+      const same = byId.get(m.id);
+      if (same) { compare(m, same); continue; }
+      if (ids.has(m.id)) continue;
       if (m.status !== 'finished' && t < now - 6 * 3_600_000) continue; // never marked finished: do not show it «live» for ever
+      if (isTbd(m.nameTeam1) || isTbd(m.nameTeam2)) continue;
       const a = tk(m.nameTeam1), z = tk(m.nameTeam2);
-      const dup = [...ticker, ...extra].some((x) => Math.abs(Date.parse(x.startDate) - t) < 6 * 3_600_000
+      const dup = ticker.find((x) => Math.abs(Date.parse(x.startDate) - t) < 6 * 3_600_000
         && ((tk(x.nameTeam1) === a && tk(x.nameTeam2) === z) || (tk(x.nameTeam1) === z && tk(x.nameTeam2) === a)));
-      if (dup) continue;
+      if (dup) { compare(m, dup); continue; }
+      if (extra.some((x) => Math.abs(Date.parse(x.startDate) - t) < 6 * 3_600_000 && ((tk(x.nameTeam1) === a && tk(x.nameTeam2) === z) || (tk(x.nameTeam1) === z && tk(x.nameTeam2) === a)))) continue;
       ids.add(m.id);
       extra.push(m);
     }
   }
-  if (!extra.length) { pagesAdded[game] = 0; return ticker; }
+  pageCheck[game] = check;
+  if (!extra.length || !pagesTrusted(check)) {
+    if (extra.length) console.warn(`[liquipedia] ${game}: tournament pages agree with the ticker on ${check.agreed} of ${check.checked} — their ${extra.length} extra matches are left out`);
+    pagesAdded[game] = 0;
+    return ticker;
+  }
   // names differ between the ticker and a page («PVISION» / «PARIVISION»): one shared team at the same time is the same match
   const merged = mergeSameTimeDuplicates([...ticker, ...extra].sort((x, y) => Date.parse(x.startDate) - Date.parse(y.startDate)));
   pagesAdded[game] = merged.filter((m) => m.fromPage).length;
   return merged;
 }
 
-/** For the admin card: tournament pages read and the matches only they gave. */
-export function liquipediaPagesInfo(): { pages: number; added: number; empty: number } {
+/** For the admin card: tournament pages read, the matches only they gave, and how they agree with the ticker. */
+export function liquipediaPagesInfo(): { pages: number; added: number; empty: number; checked: number; agreed: number; trusted: boolean; off: string[] } {
   const all = [...Object.values(pageStore.cs2), ...Object.values(pageStore.dota2)];
   // a page with no dated match: one alone is normal (an overview page that links its stages, a stage still all TBD);
   // half or more of them is not — most likely Liquipedia changed its layout. `empty` counts only then.
   const empty = all.filter((p) => !p.matches.length).length;
-  return { pages: all.length, added: pagesAdded.cs2 + pagesAdded.dota2, empty: empty >= 2 && empty * 2 >= all.length ? empty : 0 };
+  const c = { checked: pageCheck.cs2.checked + pageCheck.dota2.checked, agreed: pageCheck.cs2.agreed + pageCheck.dota2.agreed };
+  return {
+    pages: all.length, added: pagesAdded.cs2 + pagesAdded.dota2, empty: empty >= 2 && empty * 2 >= all.length ? empty : 0,
+    ...c, trusted: pagesTrusted(pageCheck.cs2) && pagesTrusted(pageCheck.dota2), off: [...pageCheck.cs2.off, ...pageCheck.dota2.off].slice(0, 5),
+  };
 }
 
 // ── Live CS2: map-by-map score from the match page (≤ 2 pages every 3 min, each waits the 31 s gap) ──

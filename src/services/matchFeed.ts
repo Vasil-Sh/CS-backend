@@ -16,6 +16,7 @@ import { liquipediaOkAt, fetchLiquipediaMatches } from './liquipediaFeed';
 import { isTbd, mergeSameTimeDuplicates, normalizeTeam } from '../utils/matchUtils';
 import { citoEnabled, citoMatches, refreshCito } from './citoFeed';
 import { isNight } from './nightMode';
+import { noteTeamNames } from './teamNames';
 import { checkScores, loadScoreCheck, type Report } from './scoreCheck';
 import { pandascoreEnabled, pandascoreMatches, refreshPandaScore } from './pandascoreFeed';
 import { pool } from '../db/client';
@@ -204,6 +205,8 @@ async function newFeed(game: 'cs2' | 'dota2', spendOddsPapi: boolean): Promise<T
     fallback[game] = extra.length;
     if (extra.length) list = [...lp, ...extra].sort((a, z) => Date.parse(a.startDate) - Date.parse(z.startDate));
   }
+  // names Liquipedia / OddsPapi / Cito use — PandaScore learns aliases only for these
+  noteTeamNames(game, [...list, ...odds, ...(game === 'cs2' && citoEnabled() ? citoMatches() : [])].filter((m) => !String(m.id).startsWith('ps-')).flatMap((m) => [m.nameTeam1, m.nameTeam2]));
   // what PandaScore / Cito said about each of our matches — for the score cross-check below
   const reports = new Map<TipsGgMatch, Report[]>();
   const note = (source: Report['source']) => (m: TipsGgMatch, c: TipsGgMatch, swapped: boolean) => {

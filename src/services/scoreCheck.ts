@@ -78,6 +78,16 @@ export function checkScores(game: 'cs2' | 'dota2', list: TipsGgMatch[], reports:
     if (!rs.length) continue;
     const base = { id: m.id, game, team1: m.nameTeam1, team2: m.nameTeam2, start: m.startDate, tournament: m.tournament };
     if (m.status === 'finished' && m.score1 != null && m.score2 != null) {
+      // a match we closed by PandaScore + Cito that Liquipedia has now finished itself: same result → verified, off the list;
+      // another result → it becomes a conflict below (Liquipedia's score against what we closed with)
+      const ci = m.closedBy ? -1 : state.issues.findIndex((y) => y.id === m.id && y.kind === 'closed');
+      if (ci >= 0) {
+        const c = state.issues[ci];
+        const [c1, c2] = c.ours.split(':').map(Number);
+        state.issues.splice(ci, 1);
+        changed = true;
+        if (!sameResult(m.score1, m.score2, c1, c2)) { issue({ ...base, kind: 'conflict', ours: sc(m.score1, m.score2), theirs: c.theirs }); conflicts++; continue; }
+      }
       const off = rs.filter((r) => !sameResult(m.score1!, m.score2!, r.s1!, r.s2!));
       if (off.length && !m.closedBy && !state.resolved[m.id]) { issue({ ...base, kind: 'conflict', ours: sc(m.score1, m.score2), theirs: off.map((r) => ({ source: r.source, score: sc(r.s1, r.s2) })) }); conflicts++; }
       else if (!off.length) { const i = state.issues.findIndex((y) => y.id === m.id && y.kind === 'conflict'); if (i >= 0) { state.issues.splice(i, 1); changed = true; } }

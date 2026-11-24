@@ -198,8 +198,14 @@ export const adminMatchesService = {
   },
 
   async deleteTeamAlias(id: number): Promise<boolean> {
-    const { rowCount } = await pool.query('DELETE FROM team_aliases WHERE id = $1', [id]);
-    return (rowCount ?? 0) > 0;
+    const { rows } = await pool.query<{ game: string; canonical: string; alias: string; created_by: string }>('DELETE FROM team_aliases WHERE id = $1 RETURNING game, canonical, alias, created_by', [id]);
+    // an automatic pair the admin removed is wrong: remember it as «different teams», so PandaScore does not learn it again
+    const r = rows[0];
+    if (r?.created_by === 'auto:pandascore') {
+      await pool.query(`INSERT INTO team_distinct(game, name, variant, created_by) VALUES($1, $2, $3, 'auto-removed') ON CONFLICT DO NOTHING`, [r.game, r.canonical, r.alias])
+        .catch((e) => console.warn('[aliases] remember removed auto pair failed:', (e as Error).message));
+    }
+    return rows.length > 0;
   },
 
   // ══════════════════════════ Hidden teams (removed from the directory) ══════════════════════════

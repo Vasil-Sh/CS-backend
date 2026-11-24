@@ -51,3 +51,18 @@ describe('sameResult (rounds vs maps)', () => {
     expect(await scoreIssues()).toHaveLength(0);
   });
 });
+
+describe('a closed match later finished by Liquipedia', () => {
+  it('same result → leaves the list; another → becomes a conflict', async () => {
+    __resetScoreCheck();
+    const a = match({ id: 'lp-a' }), b = match({ id: 'lp-b' });
+    const rep = (m: TipsGgMatch) => new Map([[m, [r('pandascore', 2, 1), r('cito', 2, 1)]]]);
+    checkScores('cs2', [a, b], new Map([...rep(a), ...rep(b)]), NOW);
+    const a2 = match({ id: 'lp-a' }), b2 = match({ id: 'lp-b' });
+    checkScores('cs2', [a2, b2], new Map([...rep(a2), ...rep(b2)]), NOW + CLOSE_AFTER_MS);
+    expect((await scoreIssues()).map((x) => `${x.kind}:${x.id}`).sort()).toEqual(['closed:lp-a', 'closed:lp-b']);
+    const a3 = match({ id: 'lp-a', status: 'finished', score1: 2, score2: 1 }), b3 = match({ id: 'lp-b', status: 'finished', score1: 0, score2: 2 });
+    checkScores('cs2', [a3, b3], new Map([...rep(a3), ...rep(b3)]), NOW + CLOSE_AFTER_MS + 60_000);
+    expect((await scoreIssues()).map((x) => `${x.kind}:${x.id}`)).toEqual(['conflict:lp-b']);
+  });
+});

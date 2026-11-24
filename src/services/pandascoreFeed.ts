@@ -10,6 +10,7 @@ import { pool } from '../db/client';
 import { pauseInfo, recordFailure, recordSuccess } from './circuitBreaker';
 import { isNight } from './nightMode';
 import { isTbd, normalizeTeam } from '../utils/matchUtils';
+import { seenCount, seenElsewhere } from './teamNames';
 
 export const PANDASCORE_PARSER = 'pandascore';
 const BASE = 'https://api.pandascore.co';
@@ -151,11 +152,24 @@ export function aliasPairs(lists: PsMatch[]): { canonical: string; alias: string
   return out;
 }
 
-/** Once an hour: new pairs into team_aliases (an alias the admin already set is never changed). */
+/** Once an hour: the pairs that join two sources — the short name is how Liquipedia / Cito / OddsPapi write the team
+ *  while PandaScore writes the full one (or the other way round) — into team_aliases. Auto pairs no longer needed are
+ *  removed (fewer pairs, fewer chances of a wrong one); a pair the admin set is never touched. */
 async function learnAliases(): Promise<void> {
   for (const game of ['cs2', 'dota2'] as Game[]) {
+    if (!seenCount(game)) continue; // the feed has not been built yet: nothing to compare with
     const l = cache.lists[game];
-    const pairs = aliasPairs([...l.upcoming, ...l.running, ...l.past]);
+    // pairs the admin removed earlier («different teams») are never learned again
+    const rejected = await pool.query<{ name: string; variant: string }>('SELECT name, variant FROM team_distinct WHERE game = $1', [game])
+      .then((r) => new Set(r.rows.map((x) => `${tkey(x.name)}|${tkey(x.variant)}`))).catch(() => new Set<string>());
+    const pairs = aliasPairs([...l.upcoming, ...l.running, ...l.past])
+      .filter((p) => seenElsewhere(game, p.alias)) // PandaScore writes the full name; the pair helps only where another source writes the short one
+      .filter((p) => !rejected.has(`${tkey(p.canonical)}|${tkey(p.alias)}`) && !rejected.has(`${tkey(p.alias)}|${tkey(p.canonical)}`));
+    const { rowCount: dropped } = await pool.query(
+      `DELETE FROM team_aliases WHERE game = $1 AND created_by = 'auto:pandascore' AND NOT (alias = ANY($2::text[]))`,
+      [game, pairs.map((p) => p.alias)],
+    );
+    if (dropped) console.log(`[pandascore] ${game}: ${dropped} auto team aliases no longer needed — removed`);
     if (!pairs.length) continue;
     const { rowCount } = await pool.query(
       `INSERT INTO team_aliases(game, canonical, alias, created_by)

@@ -9,6 +9,7 @@ import { citoDiag, citoEnabled, refreshCito } from '../services/citoFeed';
 import { forceLiquipedia, liquipediaAskedAt, liquipediaPagesInfo } from '../services/liquipediaFeed';
 import { listServerErrors, resolveServerError } from '../services/serverErrors';
 import { weekReport } from '../services/feedStats';
+import { touchActivity } from '../services/activityTracker';
 import { isNight, nightWindow } from '../services/nightMode';
 import { resolveScoreIssue, scoreIssues } from '../services/scoreCheck';
 
@@ -19,6 +20,7 @@ const parsers = new Hono();
 
 /** GET /api/admin/parsers — last state of each parser (circuit + recent failures). */
 parsers.get('/admin/parsers', requireAuth, requireAdmin, async (c) => {
+  touchActivity(); // the admin looking at the parsers is a visitor: the feed refresh wakes up
   const circuits = listCircuits();
   const failures = await pool.query(
     `SELECT source, COUNT(*)::int AS count, MAX(created_at) AS last_failure
