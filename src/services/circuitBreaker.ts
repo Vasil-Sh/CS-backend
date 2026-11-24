@@ -38,31 +38,43 @@ function getState(name: string): CircuitState {
 }
 
 // ── Parsers stopped by an admin (persisted in parser_pauses, loaded on start) ──
-const paused = new Map<string, { by: string; at: number }>();
+const paused = new Map<string, { by: string; at: number; until: number | null }>();
 
 export async function loadParserPauses(): Promise<void> {
   try {
-    const { rows } = await pool.query('SELECT name, paused_by, paused_at FROM parser_pauses');
+    const { rows } = await pool.query('SELECT name, paused_by, paused_at, paused_until FROM parser_pauses');
     paused.clear();
-    rows.forEach((r: any) => paused.set(r.name, { by: r.paused_by || '', at: new Date(r.paused_at).getTime() }));
+    rows.forEach((r: any) => paused.set(r.name, { by: r.paused_by || '', at: new Date(r.paused_at).getTime(), until: r.paused_until ? new Date(r.paused_until).getTime() : null }));
     if (rows.length) console.log(`[circuit-breaker] stopped by admin: ${rows.map((r: any) => r.name).join(', ')}`);
   } catch (e) {
     console.warn('[circuit-breaker] could not load parser pauses:', (e as Error).message);
   }
 }
 
-export function pauseInfo(name: string): { by: string; at: number } | null {
+/** A timed stop that has run out starts the parser again (checked on every look, no timer needed). */
+function expire(name: string): void {
+  const p = paused.get(name);
+  if (!p?.until || Date.now() < p.until) return;
+  paused.delete(name);
+  void pool.query('DELETE FROM parser_pauses WHERE name = $1', [name]).catch(() => {});
+  adminMatchesService.logParserEvent(name, 'rerun', 'Запущено автоматично — час зупинки минув');
+}
+
+export function pauseInfo(name: string): { by: string; at: number; until: number | null } | null {
+  expire(name);
   return paused.get(name) || null;
 }
 
-export async function pauseParser(name: string, by: string): Promise<void> {
+/** Stop a parser; `until` (ms) starts it again by itself, null = until started by hand. */
+export async function pauseParser(name: string, by: string, until: number | null = null): Promise<void> {
   await pool.query(
-    `INSERT INTO parser_pauses(name, paused_by) VALUES($1,$2)
-     ON CONFLICT (name) DO UPDATE SET paused_by = EXCLUDED.paused_by, paused_at = now()`,
-    [name, by],
+    `INSERT INTO parser_pauses(name, paused_by, paused_until) VALUES($1,$2,$3)
+     ON CONFLICT (name) DO UPDATE SET paused_by = EXCLUDED.paused_by, paused_at = now(), paused_until = EXCLUDED.paused_until`,
+    [name, by, until ? new Date(until) : null],
   );
-  paused.set(name, { by, at: Date.now() });
-  adminMatchesService.logParserEvent(name, 'rerun', `Зупинено вручну · @${by}`);
+  paused.set(name, { by, at: Date.now(), until });
+  const till = until ? ` до ${new Date(until).toLocaleString('uk-UA', { timeZone: 'Europe/Kyiv', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}` : '';
+  adminMatchesService.logParserEvent(name, 'rerun', `Зупинено вручну${till} · @${by}`);
 }
 
 export async function resumeParser(name: string, by: string): Promise<void> {
@@ -72,6 +84,7 @@ export async function resumeParser(name: string, by: string): Promise<void> {
 }
 
 export function isOpen(name: string): boolean {
+  expire(name);
   if (paused.has(name)) return true; // stopped by hand: no fetch, the feed keeps its cache
   const s = getState(name);
   if (!s.open) return false;

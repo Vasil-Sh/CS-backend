@@ -28,6 +28,9 @@ const H = 60 * 60 * 1000;
 const DISCOVERY_EVERY_MS = 24 * H;
 const ODDS_EVERY_MS = Number(process.env.ODDSPAPI_ODDS_EVERY_H || 12) * H;
 const ODDS_BOOKMAKER = (process.env.ODDSPAPI_BOOKMAKER || 'pinnacle').trim();
+/** Bookmakers asked in the same odds call (OddsPapi's `bookmakers`, comma-separated) — Pinnacle's line plus the best price elsewhere. */
+const ODDS_BOOKMAKERS = (process.env.ODDSPAPI_BOOKMAKERS || `${ODDS_BOOKMAKER},ggbet,1xbet,bet365,thunderpick`).trim();
+const SCORES_PER_DAY = Number(process.env.ODDSPAPI_SCORES_PER_DAY ?? 5);
 const MAX_ODDS_TOURNAMENTS = 10; // 2 calls of 5
 const FAIL_BACKOFF_MS = 3 * H;
 /** Minimum gap between two calls to the same endpoint (OddsPapi cooldowns + margin). */
@@ -86,6 +89,11 @@ interface CacheShape {
   account?: { limit: number; count: number; at: number };
   /** First winner prices seen per fixture — the opening line, to show how it moved. */
   opening?: Record<string, { c1: number; c2: number; at: number }>;
+  /** Last prices seen while the fixture had not started — the closing line once it has. */
+  closing?: Record<string, { c1: number; c2: number; at: number }>;
+  /** Final series score from /v4/scores, asked only for finished matches Liquipedia left without one. */
+  scores?: Record<string, { s1: number; s2: number }>;
+  scoresDay?: { day: string; n: number };
 }
 
 const emptyCache = (): CacheShape => ({
@@ -321,7 +329,7 @@ async function refreshOdds(c: CacheShape): Promise<void> {
   if (Date.now() - c.oddsAt < oddsEveryMs(budgetLeft(), ids.length)) return;
   let ok = false, got = 0;
   for (let i = 0; i < ids.length; i += 5) {
-    const rows = await get<unknown>('/odds-by-tournaments', { tournamentIds: ids.slice(i, i + 5).join(','), bookmaker: ODDS_BOOKMAKER });
+    const rows = await get<unknown>('/odds-by-tournaments', { tournamentIds: ids.slice(i, i + 5).join(','), bookmakers: ODDS_BOOKMAKERS });
     if (rows === null) break;
     ok = true;
     const list = asArray<RawFixture>(rows);
@@ -331,10 +339,13 @@ async function refreshOdds(c: CacheShape): Promise<void> {
   // opening line: the first prices each fixture got (kept until the fixture is forgotten)
   const winner = withFallback(c.winnerMarkets);
   c.opening ||= {};
+  c.closing ||= {};
   for (const [id, f] of Object.entries(c.fixtures)) {
-    if (c.opening[id]) continue;
     const p = winnerPrices(f, winner);
-    if (p.coeff1 != null && p.coeff2 != null) c.opening[id] = { c1: p.coeff1, c2: p.coeff2, at: Date.now() };
+    if (p.coeff1 == null || p.coeff2 == null) continue;
+    if (!c.opening[id]) c.opening[id] = { c1: p.coeff1, c2: p.coeff2, at: Date.now() };
+    // closing line: the latest prices seen before the start (overwritten every refresh until it starts)
+    if (Date.parse(f.startTime || '') > Date.now()) c.closing[id] = { c1: p.coeff1, c2: p.coeff2, at: Date.now() };
   }
   if (ok) {
     c.oddsAt = Date.now();
@@ -344,7 +355,7 @@ async function refreshOdds(c: CacheShape): Promise<void> {
   }
   // forget fixtures older than 3 days
   const cutoff = Date.now() - 3 * 24 * H;
-  for (const [id, f] of Object.entries(c.fixtures)) if (f.startTime && Date.parse(f.startTime) < cutoff) { delete c.fixtures[id]; delete c.opening?.[id]; }
+  for (const [id, f] of Object.entries(c.fixtures)) if (f.startTime && Date.parse(f.startTime) < cutoff) { delete c.fixtures[id]; delete c.opening?.[id]; delete c.closing?.[id]; delete c.scores?.[id]; }
   save();
 }
 
@@ -391,8 +402,18 @@ export function winnerPrices(f: RawFixture, winnerMarkets: string[]): { coeff1: 
   return { coeff1: null, coeff2: null };
 }
 
+/** Every bookmaker's winner prices for the fixture (active ones only). */
+export function bookPrices(f: RawFixture, winnerMarkets: string[]): { book: string; c1: number; c2: number }[] {
+  const out: { book: string; c1: number; c2: number }[] = [];
+  for (const [b, book] of Object.entries(f.bookmakerOdds || {})) {
+    const p = winnerPrices({ ...f, bookmakerOdds: { [b]: book } }, winnerMarkets);
+    if (p.coeff1 != null && p.coeff2 != null) out.push({ book: b, c1: p.coeff1, c2: p.coeff2 });
+  }
+  return out;
+}
+
 /** OddsPapi fixture → the match shape the rest of the backend already uses (tips.gg's). */
-export function toMatch(f: RawFixture, winnerMarkets: string[], opening?: { c1: number; c2: number }): TipsGgMatch | null {
+export function toMatch(f: RawFixture, winnerMarkets: string[], opening?: { c1: number; c2: number }, extra: { closing?: { c1: number; c2: number }; score?: { s1: number; s2: number } } = {}): TipsGgMatch | null {
   if (!f.fixtureId || !f.startTime || !f.participant1Name || !f.participant2Name) return null;
   if (f.statusId === 3) return null; // cancelled
   const start = new Date(f.startTime);
@@ -403,13 +424,22 @@ export function toMatch(f: RawFixture, winnerMarkets: string[], opening?: { c1: 
   const sinceStart = Date.now() - start.getTime();
   if (status !== 'finished') status = sinceStart > 6 * H ? 'finished' : sinceStart > 0 ? 'live' : status;
   const { coeff1, coeff2 } = winnerPrices(f, winnerMarkets);
+  const books = bookPrices(f, winnerMarkets);
+  const best1 = books.reduce<{ book: string; c: number } | null>((a, b) => (!a || b.c1 > a.c ? { book: b.book, c: b.c1 } : a), null);
+  const best2 = books.reduce<{ book: string; c: number } | null>((a, b) => (!a || b.c2 > a.c ? { book: b.book, c: b.c2 } : a), null);
+  const started = start.getTime() <= Date.now();
   return {
     id: `op-${f.fixtureId}`,
+    oddsFixtureId: f.fixtureId,
+    bestCoeff1: best1?.c ?? null, bestBook1: best1?.book ?? null,
+    bestCoeff2: best2?.c ?? null, bestBook2: best2?.book ?? null,
+    closeCoeff1: started && extra.closing ? extra.closing.c1 : null,
+    closeCoeff2: started && extra.closing ? extra.closing.c2 : null,
     date: start.toISOString().slice(0, 10),
     link: '',
     type: 'BO3', // OddsPapi has no series length; Dota gets the real one from OpenDota
-    score1: null,
-    score2: null,
+    score1: extra.score?.s1 ?? null,
+    score2: extra.score?.s2 ?? null,
     nameTeam1: f.participant1Name.trim(),
     nameTeam2: f.participant2Name.trim(),
     logoTeam1: null,
@@ -438,7 +468,7 @@ export function cachedMatches(game: 'cs2' | 'dota2'): TipsGgMatch[] {
   const winner = withFallback(c.winnerMarkets);
   return Object.values(c.fixtures)
     .filter((f) => (f.sportId ?? 0) === SPORT[game] || (!f.sportId && c.tournaments[game].includes(f.tournamentId ?? -1)))
-    .map((f) => toMatch(f, winner, c.opening?.[f.fixtureId]))
+    .map((f) => toMatch(f, winner, c.opening?.[f.fixtureId], { closing: c.closing?.[f.fixtureId], score: c.scores?.[f.fixtureId] }))
     .filter((m): m is TipsGgMatch => !!m)
     .sort((a, b) => a.startDate.localeCompare(b.startDate));
 }
@@ -447,6 +477,42 @@ export function cachedMatches(game: 'cs2' | 'dota2'): TipsGgMatch[] {
 export async function fetchOddsPapiMatches(game: 'cs2' | 'dota2'): Promise<TipsGgMatch[]> {
   await refreshOddsPapi().catch((e) => console.warn('[oddspapi] refresh failed:', (e as Error).message));
   return cachedMatches(game);
+}
+
+/** Final score for finished matches Liquipedia left without one (≤ 5 a day, only while the month's budget has room). */
+export async function requestScores(fixtureIds: string[]): Promise<number> {
+  if (!oddspapiEnabled() || !fixtureIds.length) return 0;
+  const c = load();
+  c.scores ||= {};
+  const day = new Date().toISOString().slice(0, 10);
+  if (c.scoresDay?.day !== day) c.scoresDay = { day, n: 0 };
+  let got = 0;
+  for (const id of fixtureIds) {
+    if (c.scores[id] || c.scoresDay.n >= SCORES_PER_DAY || budgetLeft() < RESERVE + 20) break;
+    c.scoresDay.n++;
+    const r = await get<any>('/scores', { fixtureId: id });
+    const p = r?.scores?.['0'] ?? r?.scores?.[Object.keys(r?.scores || {}).sort().pop() || ''];
+    if (p && Number.isFinite(p.participant1Score) && Number.isFinite(p.participant2Score) && p.participant1Score + p.participant2Score > 0) {
+      c.scores[id] = { s1: p.participant1Score, s2: p.participant2Score };
+      got++;
+    }
+  }
+  save();
+  if (got) recordSuccess(ODDSPAPI_PARSER, `рахунок · ${got} завершених матчів без рахунку`);
+  return got;
+}
+
+/** Requests «Оновити зараз» would spend: one per 5 tournaments playing soon (at least one). */
+export function oddsRefreshCost(): number {
+  return Math.max(1, Math.ceil(oddsTournaments(Object.values(load().fixtures)).length / 5));
+}
+
+/** «Оновити зараз»: odds now instead of at the next planned time (spends oddsRefreshCost() requests). */
+export async function forceOddsPapi(): Promise<void> {
+  const c = load();
+  c.oddsAt = 0; c.failedAt = {};
+  save();
+  await refreshOddsPapi();
 }
 
 const diagOf = (c: CacheShape): NonNullable<CacheShape['diag']> =>

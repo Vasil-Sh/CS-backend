@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { oddsEveryMs, oddsTournaments, pickWinnerMarkets, toMatch, winnerPrices, type RawFixture } from './oddspapiFeed';
+import { bookPrices, oddsEveryMs, oddsTournaments, pickWinnerMarkets, toMatch, winnerPrices, type RawFixture } from './oddspapiFeed';
 import { applySeries, buildSeries } from './opendotaScores';
 import { addOdds, sameTeam, teamKey, type OddsMiss } from './matchFeed';
 
@@ -116,6 +116,21 @@ describe('OddsPapi budget and unmatched teams', () => {
     expect(sameTeam('NAVI', 'Natus Vincere', resolve)).toBe(true);
     const again = [ours('Natus Vincere', 'FaZe Clan')];
     expect(addOdds(again, [op('NAVI', 'FaZe')], resolve)).toBe(1);
+  });
+});
+
+describe('OddsPapi: several bookmakers and the closing line', () => {
+  const two = (a: number, b: number) => ({ markets: { '171': { outcomes: { '171': { players: { '0': { price: a } } }, '172': { players: { '0': { price: b } } } } } } });
+  it('keeps Pinnacle as the line and finds the best price per side across books', () => {
+    const f = fixture({ bookmakerOdds: { pinnacle: two(1.8, 2.0), ggbet: two(1.85, 1.95), '1xbet': two(1.78, 2.12) } });
+    expect(bookPrices(f, ['171'])).toHaveLength(3);
+    expect(toMatch(f, ['171'])).toMatchObject({ coeff1: 1.8, coeff2: 2, bestCoeff1: 1.85, bestBook1: 'ggbet', bestCoeff2: 2.12, bestBook2: '1xbet' });
+  });
+  it('shows the closing line only once the match has started', () => {
+    const later = fixture({ startTime: new Date(Date.now() + 3_600_000).toISOString() });
+    const begun = fixture({ startTime: new Date(Date.now() - 3_600_000).toISOString() });
+    expect(toMatch(later, ['171'], undefined, { closing: { c1: 1.7, c2: 2.2 } })?.closeCoeff1).toBeNull();
+    expect(toMatch(begun, ['171'], undefined, { closing: { c1: 1.7, c2: 2.2 } })).toMatchObject({ closeCoeff1: 1.7, closeCoeff2: 2.2 });
   });
 });
 

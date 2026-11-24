@@ -55,7 +55,9 @@ import dota2MatchesRoutes from './routes/dota2Matches';
 import cs2MatchesRoutes from './routes/cs2Matches';
 import publicProfileRoutes from './routes/publicProfile';
 import matchesHistoryRoutes from './routes/matchesHistory';
-import { fetchDota2Matches, fetchCs2Matches, fetchTodayMatches, feedPaused } from './services/matchFeed';
+import { fetchDota2Matches, fetchCs2Matches, fetchTodayMatches, feedPaused, teamKey } from './services/matchFeed';
+import { diffMatch, flushChanges, recordChanges } from './services/matchChanges';
+import { saveClosing } from './services/closingLines';
 import { join } from 'node:path';
 import { readFileSync, existsSync } from 'node:fs';
 import { writeFileCacheInternal } from './services/createMatchesRouter';
@@ -481,8 +483,21 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
         // ── Try exact ID match first ──
         const prev = existingMap.get(tm.id);
         if (prev) {
+          const before = { ...prev };
           // Enrich tournament/logo metadata from fresh tips.gg parse (best-effort)
           if (!prev.tournament && tm.tournament) prev.tournament = tm.tournament;
+          // Fresh odds, opening/closing line, logos, stage/tier and a moved start time come in every 2 min, not only with the 4-h full refresh
+          let enriched = false;
+          for (const k of ['coeff1', 'coeff2', 'openCoeff1', 'openCoeff2', 'closeCoeff1', 'closeCoeff2', 'bestCoeff1', 'bestCoeff2', 'bestBook1', 'bestBook2', 'maps', 'oddsFixtureId'] as const) {
+            const v = (tm as any)[k];
+            if (v != null && JSON.stringify(v) !== JSON.stringify(prev[k])) { prev[k] = v; enriched = true; }
+          }
+          for (const k of ['logoTeam1', 'logoTeam2', 'tournamentPage', 'stage', 'tier'] as const) {
+            const v = (tm as any)[k];
+            if (v && !prev[k]) { prev[k] = v; enriched = true; }
+          }
+          if (prev.status === 'upcoming' && tm.startDate && tm.startDate !== prev.startDate) { prev.startDate = tm.startDate; enriched = true; }
+          if (enriched) updates++;
           if (!prev.stage && tm.stage) prev.stage = tm.stage;
           if (!prev.tournamentLogo && tm.tournamentLogo) prev.tournamentLogo = tm.tournamentLogo;
           if (prev.status !== 'finished') {
@@ -512,7 +527,22 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
               // Don't downgrade status from finished
             }
           }
+          recordChanges(diffMatch(game, before, prev));
           continue;
+        }
+
+        // ── OddsPapi stand-in from a Liquipedia outage: the real Liquipedia match takes its place (no duplicate) ──
+        if (String(tm.id).startsWith('lp-')) {
+          const t = Date.parse(tm.startDate);
+          const idx = existing.findIndex((m: any) => String(m.id).startsWith('op-') && Math.abs(Date.parse(m.startDate) - t) < 6 * 3_600_000
+            && ((teamKey(m.nameTeam1) === teamKey(tm.nameTeam1) && teamKey(m.nameTeam2) === teamKey(tm.nameTeam2)) || (teamKey(m.nameTeam1) === teamKey(tm.nameTeam2) && teamKey(m.nameTeam2) === teamKey(tm.nameTeam1))));
+          if (idx >= 0) {
+            existingMap.delete(existing[idx].id);
+            existing[idx] = { ...tm, coeff1: tm.coeff1 ?? existing[idx].coeff1, coeff2: tm.coeff2 ?? existing[idx].coeff2 } as any;
+            existingMap.set(tm.id, existing[idx]);
+            updates++;
+            continue;
+          }
         }
 
         // ── Fuzzy dedup: check normalized team names ──
@@ -543,6 +573,8 @@ function startIncrementalRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: 
           skippedUnmatched++;
         }
       }
+
+      saveClosing(game, existing); // closing lines of matches that have started
 
       // ── Persist newly-finished matches to history DB ──
       // Incremental refresh detects score changes that mean a match just ended.
@@ -636,7 +668,7 @@ function startFullRefresh(game: 'dota2' | 'cs2', cacheFile: string, tag: string)
           if (fresh.some((m: any) => String(m.id).startsWith('lp-'))) existing = existing.filter((m: any) => !String(m.id).startsWith('op-'));
           const merged = new Map<string, any>(existing.map((m: any) => [m.id, m]));
           for (const m of fresh) {
-            if (merged.has(m.id)) { merged.set(m.id, { ...merged.get(m.id), ...m }); continue; }
+            if (merged.has(m.id)) { recordChanges(diffMatch(game, merged.get(m.id), m)); merged.set(m.id, { ...merged.get(m.id), ...m }); continue; }
             // Another source (cstest / HLTV) may already have this match under its own id:
             // then only add what it lacks — odds and tournament name.
             const same = [...merged.values()].find((x: any) => x.date === m.date && isSameMatch(x, m));
@@ -682,7 +714,7 @@ startProExpiry();
 const shutdown = async (signal: string) => {
   console.log(`\n🛑 Received ${signal}, shutting down gracefully...`);
   // keep the caches and the not-yet-saved errors for the next start (a deploy wipes the disk)
-  await Promise.race([flushServerErrors(), new Promise((r) => setTimeout(r, 3_000))]);
+  await Promise.race([Promise.all([flushServerErrors(), flushChanges()]), new Promise((r) => setTimeout(r, 3_000))]);
   await Promise.race([syncDurableFiles().then((n) => console.log(`[durable] ${n} cache files saved`)), new Promise((r) => setTimeout(r, 5_000))]);
   try {
     await pool.end();

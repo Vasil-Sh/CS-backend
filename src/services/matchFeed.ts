@@ -8,9 +8,9 @@
 // ═══════════════════════════════════════════════════════════════
 
 import type { TipsGgMatch } from './matchTypes';
-import { cachedMatches, fetchOddsPapiMatches, oddspapiEnabled, refreshOddsPapi } from './oddspapiFeed';
+import { cachedMatches, fetchOddsPapiMatches, oddspapiEnabled, refreshOddsPapi, requestScores } from './oddspapiFeed';
 import { applySeries, recentDotaSeries } from './opendotaScores';
-import { fetchLiquipediaMatches } from './liquipediaFeed';
+import { liquipediaOkAt, fetchLiquipediaMatches } from './liquipediaFeed';
 import { normalizeTeam } from '../utils/matchUtils';
 import { pool } from '../db/client';
 
@@ -69,12 +69,21 @@ export function addOdds(base: TipsGgMatch[], odds: TipsGgMatch[], resolve: Resol
     });
     if (!o) continue;
     used.add(o);
+    if (o.oddsFixtureId) m.oddsFixtureId = o.oddsFixtureId;
+    // a finished match Liquipedia left at «—:—»: OddsPapi's final score, when it has one
+    if (m.status === 'finished' && (m.score1 == null || m.score2 == null) && o.score1 != null && o.score2 != null) {
+      m.score1 = swapped ? o.score2 : o.score1;
+      m.score2 = swapped ? o.score1 : o.score2;
+    }
     if (o.coeff1 != null && o.coeff2 != null) {
       m.coeff1 = swapped ? o.coeff2 : o.coeff1;
       m.coeff2 = swapped ? o.coeff1 : o.coeff2;
-      if (o.openCoeff1 != null && o.openCoeff2 != null) {
-        m.openCoeff1 = swapped ? o.openCoeff2 : o.openCoeff1;
-        m.openCoeff2 = swapped ? o.openCoeff1 : o.openCoeff2;
+      const pair = (a: any, b: any) => (swapped ? [b, a] : [a, b]);
+      if (o.openCoeff1 != null && o.openCoeff2 != null) [m.openCoeff1, m.openCoeff2] = pair(o.openCoeff1, o.openCoeff2);
+      if (o.closeCoeff1 != null && o.closeCoeff2 != null) [m.closeCoeff1, m.closeCoeff2] = pair(o.closeCoeff1, o.closeCoeff2);
+      if (o.bestCoeff1 != null && o.bestCoeff2 != null) {
+        [m.bestCoeff1, m.bestCoeff2] = pair(o.bestCoeff1, o.bestCoeff2);
+        [m.bestBook1, m.bestBook2] = pair(o.bestBook1, o.bestBook2);
       }
       m.performer = m.coeff1! < m.coeff2! ? m.nameTeam1 : m.nameTeam2;
       n++;
@@ -110,6 +119,10 @@ async function withDotaScores(list: TipsGgMatch[]): Promise<TipsGgMatch[]> {
 /** How many of our matches got OddsPapi prices in the last feed build — for the admin «Парсери» card. */
 const matched: Record<'cs2' | 'dota2', number> = { cs2: 0, dota2: 0 };
 const misses: Record<'cs2' | 'dota2', OddsMiss[]> = { cs2: [], dota2: [] };
+/** Matches taken from OddsPapi's schedule because Liquipedia is down — shown on the admin card. */
+const fallback: Record<'cs2' | 'dota2', number> = { cs2: 0, dota2: 0 };
+export const fallbackCount = () => fallback.cs2 + fallback.dota2;
+const FALLBACK_AFTER_MS = Number(process.env.FALLBACK_AFTER_MIN ?? 60) * 60_000;
 export const oddsMatched = () => ({ ...matched });
 export const oddsMisses = (): OddsMiss[] => [...misses.cs2, ...misses.dota2].sort((a, z) => a.odds.start.localeCompare(z.odds.start));
 
@@ -117,9 +130,26 @@ export const oddsMisses = (): OddsMiss[] => [...misses.cs2, ...misses.dota2].sor
 async function newFeed(game: 'cs2' | 'dota2', spendOddsPapi: boolean): Promise<TipsGgMatch[]> {
   const odds = !oddspapiEnabled() ? [] : spendOddsPapi ? await fetchOddsPapiMatches(game) : cachedMatches(game);
   const lp = await fetchLiquipediaMatches(game);
-  const list = lp.length ? lp : odds; // Liquipedia down → OddsPapi's own schedule
+  // Liquipedia down → OddsPapi's own schedule: all of it when we have nothing, and when Liquipedia has not
+  // refreshed for an hour, OddsPapi's matches of the next day that the old Liquipedia list does not have
+  let list = lp.length ? lp : odds;
+  fallback[game] = !lp.length && odds.length ? odds.length : 0;
+  if (lp.length && odds.length && Date.now() - liquipediaOkAt(game) > FALLBACK_AFTER_MS) {
+    const resolve = await aliasResolver(game);
+    const extra = odds.filter((o) => {
+      const t = Date.parse(o.startDate);
+      if (t < Date.now() - 3 * 3_600_000 || t > Date.now() + 24 * 3_600_000) return false;
+      return !lp.some((m) => Math.abs(Date.parse(m.startDate) - t) < 6 * 3_600_000
+        && ((sameTeam(m.nameTeam1, o.nameTeam1, resolve) && sameTeam(m.nameTeam2, o.nameTeam2, resolve)) || (sameTeam(m.nameTeam1, o.nameTeam2, resolve) && sameTeam(m.nameTeam2, o.nameTeam1, resolve))));
+    });
+    fallback[game] = extra.length;
+    if (extra.length) list = [...lp, ...extra].sort((a, z) => Date.parse(a.startDate) - Date.parse(z.startDate));
+  }
   if (lp.length && odds.length) { const miss: OddsMiss[] = []; matched[game] = addOdds(list, odds, await aliasResolver(game), miss, game); misses[game] = miss; }
   else if (lp.length) { matched[game] = 0; misses[game] = []; }
+  // still «—:—» 6 h after the start, and Liquipedia's tournament page did not help: ask OddsPapi (≤ 5 a day)
+  const noScore = list.filter((m) => m.status === 'finished' && (m.score1 == null || m.score2 == null) && m.oddsFixtureId && Date.parse(m.startDate) < Date.now() - 6 * 3_600_000);
+  if (noScore.length) void requestScores(noScore.map((m) => m.oddsFixtureId!)).catch(() => {});
   return game === 'dota2' ? withDotaScores(list) : list;
 }
 

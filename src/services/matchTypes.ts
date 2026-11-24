@@ -31,4 +31,20 @@ export interface TipsGgMatch {
   /** First prices OddsPapi gave for this match — with coeff1/coeff2 they show how the line moved. */
   openCoeff1?: number | null;
   openCoeff2?: number | null;
+  /** Last prices before the start (closing line) — compared with a bet's odds in the journal. */
+  closeCoeff1?: number | null;
+  closeCoeff2?: number | null;
+  /** Best price across the bookmakers OddsPapi returned, and whose it is. */
+  bestCoeff1?: number | null;
+  bestCoeff2?: number | null;
+  bestBook1?: string | null;
+  bestBook2?: string | null;
+  /** OddsPapi fixture matched to this match (for its score lookup). */
+  oddsFixtureId?: string;
+  /** Liquipedia tier: S (1) … D (5); null when the page does not say. */
+  tier?: 'S' | 'A' | 'B' | 'C' | 'D' | null;
+  /** Liquipedia match page («Match:ID_…») — where live map scores are read. */
+  matchPage?: string;
+  /** Map-by-map score (CS2 live/finished), team1 first. */
+  maps?: { map: string; score1: number | null; score2: number | null }[];
 }

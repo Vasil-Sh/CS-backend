@@ -2,8 +2,9 @@ import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { pool } from '../db/client';
 import { listCircuits, pauseInfo, pauseParser, resetCircuit, resumeParser } from '../services/circuitBreaker';
-import { oddspapiDiag, oddspapiEnabled } from '../services/oddspapiFeed';
-import { oddsMatched, oddsMisses } from '../services/matchFeed';
+import { forceOddsPapi, oddsRefreshCost, oddspapiDiag, oddspapiEnabled } from '../services/oddspapiFeed';
+import { fallbackCount, oddsMatched, oddsMisses } from '../services/matchFeed';
+import { forceLiquipedia, liquipediaAskedAt } from '../services/liquipediaFeed';
 import { listServerErrors, resolveServerError } from '../services/serverErrors';
 
 /** Parsers shown on the admin screen: Liquipedia + OddsPapi + OpenDota (tips.gg and HLTV removed 23.11.2026). */
@@ -41,9 +42,18 @@ parsers.get('/admin/parsers', requireAuth, requireAdmin, async (c) => {
      FROM parser_events WHERE created_at > now() - INTERVAL '7 days' GROUP BY 1, 2`,
   ).catch(() => ({ rows: [] as any[] }));
   const days = Array.from({ length: 7 }, (_, i) => new Date(Date.now() - (6 - i) * 86_400_000).toLocaleDateString('en-CA', { timeZone: 'Europe/Kyiv' }));
+  // why a day went red: failure texts per day, most frequent first (digits folded so «збій 3 поспіль» groups)
+  const why = await pool.query(
+    `SELECT source, to_char((created_at AT TIME ZONE 'Europe/Kyiv')::date, 'YYYY-MM-DD') AS day,
+            regexp_replace(COALESCE(NULLIF(message, ''), 'без опису'), '(#|збій )\\d+', '\\1N', 'g') AS msg, COUNT(*)::int AS n,
+            to_char(MIN(created_at) AT TIME ZONE 'Europe/Kyiv', 'HH24:MI') AS first, to_char(MAX(created_at) AT TIME ZONE 'Europe/Kyiv', 'HH24:MI') AS last
+     FROM parser_events WHERE event = 'failure' AND created_at > now() - INTERVAL '7 days' GROUP BY 1, 2, 3 ORDER BY n DESC`,
+  ).catch(() => ({ rows: [] as any[] }));
   const weekOf = (name: string) => days.map((day) => {
     const r = wk.rows.find((x: any) => x.source === name && x.day === day);
-    return { day, ok: Number(r?.ok || 0), fail: Number(r?.fail || 0) };
+    const reasons = why.rows.filter((x: any) => x.source === name && x.day === day).slice(0, 5)
+      .map((x: any) => ({ message: String(x.msg), n: Number(x.n), first: String(x.first), last: String(x.last) }));
+    return { day, ok: Number(r?.ok || 0), fail: Number(r?.fail || 0), reasons };
   });
 
   // Merge known parser sources even if they never failed.
@@ -57,14 +67,16 @@ parsers.get('/admin/parsers', requireAuth, requireAdmin, async (c) => {
       paused: !!stop,
       pausedBy: stop?.by ?? '',
       pausedAt: stop ? new Date(stop.at).toISOString() : '',
+      pausedUntil: stop?.until ? new Date(stop.until).toISOString() : '',
       open: circuit?.open ?? false,
       failures: circuit?.failures ?? 0,
       failures24h: fail?.count ?? 0,
       lastFailure: fail?.lastFailure ?? (circuit?.lastFailure ? new Date(circuit.lastFailure).toISOString() : ''),
       lastSuccess: okMap.get(name) ?? '',
       week: weekOf(name),
+      ...(name === 'liquipedia' && liquipediaAskedAt() ? { askedAt: new Date(liquipediaAskedAt()).toISOString() } : {}),
       // OddsPapi only adds prices: show what it holds and how much of it reached our matches
-      ...(name === 'oddspapi' ? { odds: (() => { const d = oddspapiDiag(), m = oddsMatched(); return { ...d, matched: m.cs2 + m.dota2, unmatched: oddsMisses().slice(0, 40), fixturesAt: d.fixturesAt ? new Date(d.fixturesAt).toISOString() : '', oddsAt: d.oddsAt ? new Date(d.oddsAt).toISOString() : '', nextOddsAt: d.nextOddsAt ? new Date(d.nextOddsAt).toISOString() : '' }; })() } : {}),
+      ...(name === 'oddspapi' ? { odds: (() => { const d = oddspapiDiag(), m = oddsMatched(); return { ...d, matched: m.cs2 + m.dota2, refreshCost: oddsRefreshCost(), fallback: fallbackCount(), unmatched: oddsMisses().slice(0, 40), fixturesAt: d.fixturesAt ? new Date(d.fixturesAt).toISOString() : '', oddsAt: d.oddsAt ? new Date(d.oddsAt).toISOString() : '', nextOddsAt: d.nextOddsAt ? new Date(d.nextOddsAt).toISOString() : '' }; })() } : {}),
     };
   });
   return c.json({ parsers: merged });
@@ -99,13 +111,36 @@ function audit(actor: { userId: number; username: string }, action: string, targ
     .catch((err) => console.warn('[adminParsers] audit failed:', (err as Error).message));
 }
 
+/** POST /api/admin/parsers/:name/refresh — «Оновити зараз»: fetch from the source now, not at the next planned time.
+ *  OddsPapi answers how many of the month's requests it spent. */
+parsers.post('/admin/parsers/:name/refresh', requireAuth, requireAdmin, async (c) => {
+  const name = c.req.param('name') || '';
+  if (!KNOWN.has(name)) return c.json({ error: 'Невідомий парсер' }, 400);
+  if (pauseInfo(name)) return c.json({ error: 'Парсер зупинено — спершу запустіть його' }, 409);
+  const actor = c.get('user');
+  resetCircuit(name);
+  let cost = 0;
+  if (name === 'liquipedia') forceLiquipedia();
+  if (name === 'oddspapi') {
+    if (!oddspapiEnabled()) return c.json({ error: 'OddsPapi вимкнено: немає ключа' }, 409);
+    cost = oddsRefreshCost();
+    void forceOddsPapi().catch(() => {});
+  }
+  audit(actor, 'POST', `/admin/parsers/${name}/refresh`, { name, cost });
+  return c.json({ success: true, cost });
+});
+
 /** POST /api/admin/parsers/:name/stop — stop the parser until it is started again (survives restarts). */
 parsers.post('/admin/parsers/:name/stop', requireAuth, requireAdmin, async (c) => {
   const name = c.req.param('name') || '';
   if (!KNOWN.has(name)) return c.json({ error: 'Невідомий парсер' }, 400);
   const actor = c.get('user');
-  await pauseParser(name, actor.username);
-  audit(actor, 'POST', `/admin/parsers/${name}/stop`, { name });
+  // body { minutes?: number } — 60 = an hour, «до ранку» is sent as minutes until 08:00 Kyiv; none = until started by hand
+  const body = await c.req.json().catch(() => ({}));
+  const min = Number(body?.minutes);
+  const until = Number.isFinite(min) && min > 0 ? Date.now() + Math.min(min, 7 * 24 * 60) * 60_000 : null;
+  await pauseParser(name, actor.username, until);
+  audit(actor, 'POST', `/admin/parsers/${name}/stop`, { name, until: until ? new Date(until).toISOString() : null });
   return c.json({ success: true });
 });
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { lpUrl, parseResults, parseTicker } from './liquipediaFeed';
+import * as cheerio from 'cheerio';
+import { lpUrl, parseMaps, parseResults, parseTicker, stageOf, tierOf } from './liquipediaFeed';
 import { addOdds } from './matchFeed';
 import { toMatch } from './oddspapiFeed';
 
@@ -56,6 +57,28 @@ describe('Liquipedia ticker', () => {
     expect(parseResults(html)).toEqual([
       { team1: 'Team Spirit', team2: 'MOUZ', score1: 2, score2: 1 },
       { team1: 'Virtus.pro', team2: 'FURIA', score1: 0, score2: 2 },
+    ]);
+  });
+
+  it('names the stage from the tournament page path, and only a stage', () => {
+    expect(stageOf('PGL/2026/Singapore/Stage_1')).toBe('Stage 1');
+    expect(stageOf('BLAST/Premier/2026/World_Final/Playoffs')).toBe('Playoffs');
+    expect(stageOf('PGL/2026/Singapore')).toBe('');
+    expect(stageOf('IEM')).toBe('');
+  });
+
+  it('reads the tier from the filter category or a «Tier N» label', () => {
+    const $ = cheerio.load('<div data-filter-category="2"><div class="card" id="a">x</div></div><div class="card" id="b">Tier 1 · y</div><div class="card" id="c">z</div>');
+    expect(tierOf($, $('#a')[0])).toBe('A');
+    expect(tierOf($, $('#b')[0])).toBe('S');
+    expect(tierOf($, $('#c')[0])).toBeNull();
+  });
+
+  it('reads map-by-map scores from a match page, team1 first', () => {
+    const row = (m: string, a: string, b: string) => `<div class="brkts-popup-body-game"><div>${a}</div><div><a title="${m}">${m}</a></div><div>${b}</div></div>`;
+    expect(parseMaps(`<div>${row('Mirage', '13', '9')}${row('Inferno', '7', '13')}${row('Nuke', '', '')}</div>`)).toEqual([
+      { map: 'Mirage', score1: 13, score2: 9 },
+      { map: 'Inferno', score1: 7, score2: 13 },
     ]);
   });
 

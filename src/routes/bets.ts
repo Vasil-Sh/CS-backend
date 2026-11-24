@@ -3,6 +3,7 @@ import { requireAuth } from '../middleware/auth';
 import { createBetSchema, updateBetSchema } from '../middleware/validation';
 import { getPagination } from '../utils/response';
 import { betService } from '../services/betService';
+import { closingLines } from '../services/closingLines';
 import { betHints } from '../services/betHints';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -22,6 +23,12 @@ bets.get('/', requireAuth, async (c) => {
 bets.get('/result-hints', requireAuth, async (c) => {
   try { return c.json({ hints: await betHints(c.get('user').userId) }); }
   catch { return c.json({ hints: [] }); }
+});
+
+// ── GET /api/bets/closing-lines — the bet's odds against the closing line («закриття 1.80 · +8 %») ──
+bets.get('/closing-lines', requireAuth, async (c) => {
+  try { return c.json({ lines: await closingLines(c.get('user').userId) }); }
+  catch { return c.json({ lines: [] }); }
 });
 
 // ── POST /api/bets ──

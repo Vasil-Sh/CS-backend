@@ -9,6 +9,7 @@ const DAY = 24 * 3_600_000;
 export const CLEANUP_SQL = [
   `DELETE FROM parser_events WHERE created_at < now() - INTERVAL '${KEEP_DAYS} days'`,
   `DELETE FROM parser_failures WHERE created_at < now() - INTERVAL '${KEEP_DAYS} days'`,
+  `DELETE FROM match_changes WHERE created_at < now() - INTERVAL '${KEEP_DAYS} days'`,
 ];
 
 export async function cleanupLogs(): Promise<number> {

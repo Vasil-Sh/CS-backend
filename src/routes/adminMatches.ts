@@ -1,3 +1,4 @@
+import { listChanges, recordChanges } from '../services/matchChanges';
 import { forgetAliases } from '../services/matchFeed';
 import { Hono } from 'hono';
 import { deleteTeamLogo, listTeamLogos, saveTeamLogo } from '../services/teamLogos';
@@ -221,10 +222,23 @@ matches.patch('/admin/matches/:game/:matchId', requireAuth, requireAdmin, async 
       decidedBy: actor.username,
     });
     audit(actor, 'PATCH', `/admin/matches/${game}/${matchId}`, { status: override.status, score1: override.score1, score2: override.score2, startDate: override.startDate });
+    // «Історія змін»: the admin's edit as one line per field it sets (old value unknown here — the sheet shows the new one)
+    recordChanges([
+      ...(override.startDate ? [{ field: 'start', newValue: new Date(override.startDate).toISOString() }] : []),
+      ...(override.status ? [{ field: 'status', newValue: String(override.status) }] : []),
+      ...(override.score1 != null || override.score2 != null ? [{ field: 'score', newValue: `${override.score1 ?? '—'}:${override.score2 ?? '—'}` }] : []),
+    ].map((x) => ({ game, matchId, oldValue: null, source: `адмін @${actor.username}`, ...x })));
     return c.json(override);
   } catch (e: any) {
     return c.json({ error: e?.message || 'Не вдалося зберегти правку' }, 400);
   }
+});
+
+/** GET /api/admin/matches/:game/:matchId/changes — «Історія змін» in the match sheet. */
+matches.get('/admin/matches/:game/:matchId/changes', requireAuth, requireAdmin, async (c) => {
+  const matchId = decodeURIComponent(c.req.param('matchId') || '');
+  try { return c.json({ changes: await listChanges(matchId) }); }
+  catch { return c.json({ changes: [] }); }
 });
 
 matches.delete('/admin/matches/:game/:matchId', requireAuth, requireAdmin, async (c) => {
@@ -234,6 +248,7 @@ matches.delete('/admin/matches/:game/:matchId', requireAuth, requireAdmin, async
   const ok = await adminMatchesService.deleteOverride(game, matchId);
   if (!ok) return c.json({ error: 'Правку не знайдено' }, 404);
   audit(actor, 'DELETE', `/admin/matches/${game}/${matchId}`, {});
+  recordChanges([{ game, matchId, field: 'override', oldValue: 'ручна правка', newValue: 'дані парсера', source: `адмін @${actor.username}` }]);
   return c.json({ success: true });
 });
 
