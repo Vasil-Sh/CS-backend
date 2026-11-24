@@ -44,7 +44,7 @@ const BOOK_ORDER = ['pinnacle', 'ggbet', 'thunderpick', '1xbet', 'bet365', 'stak
 const WINNER_FALLBACK = ['171', '161', '178077'];
 const withFallback = (ids: string[]) => [...new Set([...ids, ...WINNER_FALLBACK])];
 /** Bump when the way the cache is filled changes: the next start refetches once (≈5 requests). */
-const CACHE_VER = 2;
+const CACHE_VER = 3; // 3: the 400 on unknown bookmakers left the odds in a 3-hour back-off
 /** ISO time without milliseconds — the format OddsPapi documents (YYYY-MM-DDTHH:MM:SSZ). */
 const isoSec = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
 
@@ -94,6 +94,8 @@ interface CacheShape {
   /** Final series score from /v4/scores, asked only for finished matches Liquipedia left without one. */
   scores?: Record<string, { s1: number; s2: number }>;
   scoresDay?: { day: string; n: number };
+  /** Bookmakers OddsPapi accepted (an unknown slug makes the whole call fail with 400). */
+  books?: string;
 }
 
 const emptyCache = (): CacheShape => ({
@@ -237,6 +239,17 @@ async function get<T>(path: string, params: Record<string, string | number | boo
     }
     if (!res.ok) {
       const body = (await res.text().catch(() => '')).replace(key, '***').slice(0, 300);
+      // a bookmaker slug OddsPapi does not know: drop the ones it names (or all extras) and ask again at once —
+      // not a failure, and no 3-hour back-off for the odds
+      if (res.status === 400 && /invalid bookmaker/i.test(body) && typeof params.bookmakers === 'string' && params.bookmakers.includes(',')) {
+        const named = (body.match(/bookmakers?:\s*([a-z0-9_.,\- ]+)/i)?.[1] || '').split(/[,\s]+/).filter(Boolean);
+        const asked = params.bookmakers.split(',');
+        const keep = named.length ? asked.filter((b) => !named.includes(b)) : [ODDS_BOOKMAKER];
+        c.books = (keep.length ? keep : [ODDS_BOOKMAKER]).join(',');
+        save();
+        console.warn(`[oddspapi] bookmakers ${params.bookmakers} → invalid; using ${c.books}`);
+        return get<T>(path, { ...params, bookmakers: c.books }, retry);
+      }
       return fail(`→ HTTP ${res.status} ${body}`);
     }
     const json = (await res.json()) as T;
@@ -329,7 +342,7 @@ async function refreshOdds(c: CacheShape): Promise<void> {
   if (Date.now() - c.oddsAt < oddsEveryMs(budgetLeft(), ids.length)) return;
   let ok = false, got = 0;
   for (let i = 0; i < ids.length; i += 5) {
-    const rows = await get<unknown>('/odds-by-tournaments', { tournamentIds: ids.slice(i, i + 5).join(','), bookmakers: ODDS_BOOKMAKERS });
+    const rows = await get<unknown>('/odds-by-tournaments', { tournamentIds: ids.slice(i, i + 5).join(','), bookmakers: c.books || ODDS_BOOKMAKERS });
     if (rows === null) break;
     ok = true;
     const list = asArray<RawFixture>(rows);

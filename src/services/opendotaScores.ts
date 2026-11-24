@@ -38,7 +38,7 @@ async function get<T>(path: string, retry = true): Promise<T | null> {
   if (isOpen(OPENDOTA_PARSER)) return null;
   let why = '', transient = false;
   try {
-    const res = await fetch(`${BASE}${path}`, { headers: { Accept: 'application/json', 'User-Agent': 'MatchIQ (contact: admin)' }, signal: AbortSignal.timeout(15_000) });
+    const res = await fetch(`${BASE}${path}`, { headers: { Accept: 'application/json', 'User-Agent': 'MatchIQ (contact: admin)' }, signal: AbortSignal.timeout(25_000) });
     if (res.ok) {
       const json = (await res.json()) as T;
       recordSuccess(OPENDOTA_PARSER, `${LABEL[path] || path} · ${Array.isArray(json) ? json.length : 1} записів`);
@@ -47,7 +47,7 @@ async function get<T>(path: string, retry = true): Promise<T | null> {
     why = `HTTP ${res.status}`; transient = res.status === 429 || res.status >= 500;
   } catch (e) {
     const m = (e as Error).message;
-    why = /timeout|aborted/i.test(m) ? 'немає відповіді 15 с' : `мережа: ${m.slice(0, 80)}`; transient = true;
+    why = /timeout|aborted/i.test(m) ? 'немає відповіді 25 с' : `мережа: ${m.slice(0, 80)}`; transient = true;
   }
   console.warn(`[opendota] ${path} → ${why}`);
   if (retry && transient) { await new Promise((r) => setTimeout(r, RETRY_MS)); return get<T>(path, false); }
