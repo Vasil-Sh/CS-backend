@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import * as cheerio from 'cheerio';
-import { lpUrl, parseMaps, parseResults, parseTicker, stageOf, tierOf } from './liquipediaFeed';
+import { lpUrl, parseMaps, parseResults, parseSchedule, parseTicker, stageOf, tierOf } from './liquipediaFeed';
 import { addOdds } from './matchFeed';
 import { toMatch } from './oddspapiFeed';
 
@@ -109,5 +109,28 @@ describe('Liquipedia ticker', () => {
     expect(l).toHaveLength(2);
     expect(l[0]).toMatchObject({ nameTeam1: 'Team Liquid', score1: 2, score2: 1, status: 'finished', type: 'BO3', tournament: 'DreamLeague S28' });
     expect(l[1]).toMatchObject({ nameTeam1: 'OG', score1: null, status: 'upcoming' });
+  });
+});
+
+describe('parseSchedule (tournament page)', () => {
+  const NOW = Date.parse('2026-11-24T12:00:00Z');
+  const ts = (iso: string) => Math.floor(Date.parse(iso) / 1000);
+  const opp = (name: string, score = '') => `<div class="brkts-opponent-entry" aria-label="${name}"><div class="block-team"><span class="name"><a title="${name}">${name.split(' ')[0]}</a></span><img src="/commons/images/${name[0]}.png"></div><div class="brkts-opponent-score-inner">${score}</div></div>`;
+  const match = (a: string, b: string, iso: string, extra = '', sa = '', sb = '') =>
+    `<div class="brkts-match">${opp(a, sa)}${opp(b, sb)}<div class="brkts-popup"><span class="timer-object" data-timestamp="${ts(iso)}"${extra}></span> (Bo1)</div></div>`;
+  const html = match('Team Spirit', 'MOUZ', '2026-11-25T15:00:00Z')
+    + match('Vitality', 'G2 Esports', '2026-11-24T08:00:00Z', ' data-finished="finished"', '2', '0')
+    + match('FURIA', 'TBD', '2026-11-26T15:00:00Z')
+    + `<div class="brkts-match">${opp('NAVI')}${opp('FaZe Clan')}</div>`; // no time — skipped
+  const list = parseSchedule(html, 'cs2', 'BLAST/Premier/2026/World_Final/Playoffs', { tournament: 'BLAST World Final', tier: 'S', type: 'BO3' }, NOW);
+
+  it('reads timed matches with two teams, skips TBD and undated ones', () => {
+    expect(list.map((m) => `${m.nameTeam1}-${m.nameTeam2}`)).toEqual(['Vitality-G2 Esports', 'Team Spirit-MOUZ']);
+  });
+  it('takes the format, tournament, tier and stage', () => {
+    expect(list[1]).toMatchObject({ id: 'lp-cs2-2026-11-25-team-spirit-vs-mouz', type: 'BO1', tournament: 'BLAST World Final', tier: 'S', status: 'upcoming', score1: null });
+  });
+  it('finished only when the page says so, with its score', () => {
+    expect(list[0]).toMatchObject({ status: 'finished', score1: 2, score2: 0 });
   });
 });

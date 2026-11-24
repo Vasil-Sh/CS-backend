@@ -9,6 +9,9 @@
 //   • cache as long as possible; content is CC-BY-SA 3.0 — credit Liquipedia.
 // We parse each wiki at most every 5 minutes and serialise all calls through
 // one limiter (≥ 31 s apart), so 2 wikis = ≤ 24 calls / hour.
+// The ticker holds only 50 upcoming matches per wiki, so the pages of the tournaments it shows are
+// read too (≤ 2 per wiki every 20 min, each page at most hourly): their full group and playoff
+// schedule adds the matches the ticker had no room for.
 // ═══════════════════════════════════════════════════════════════
 
 import * as cheerio from 'cheerio';
@@ -393,6 +396,158 @@ async function backfillScores(game: 'cs2' | 'dota2'): Promise<void> {
   console.log(`[liquipedia] ${game}: score backfill — ${filled} of ${todo.length} from ${pages.length} pages`);
 }
 
+// ── Tournament pages: the full schedule of the tournaments the ticker shows ──
+const PAGES_EVERY_MS = 20 * 60_000;
+const PAGE_MIN_AGE_MS = 60 * 60_000;
+const PAGES_PER_RUN = 2;
+interface PageCache { at: number; matches: TipsGgMatch[] }
+const pageStore: Record<'cs2' | 'dota2', Record<string, PageCache>> = { cs2: {}, dota2: {} };
+const lastPages: Partial<Record<'cs2' | 'dota2', number>> = {};
+const pagesAdded: Record<'cs2' | 'dota2', number> = { cs2: 0, dota2: 0 };
+const PAGES_DB_KEY = (game: 'cs2' | 'dota2') => `feed_liquipedia_pages_${game}`;
+const pagesHydrated: Partial<Record<'cs2' | 'dota2', boolean>> = {};
+
+async function hydratePages(game: 'cs2' | 'dota2'): Promise<void> {
+  if (pagesHydrated[game]) return;
+  pagesHydrated[game] = true;
+  try {
+    const { rows } = await pool.query<{ value: string }>('SELECT value FROM app_settings WHERE key = $1', [PAGES_DB_KEY(game)]);
+    if (rows[0]?.value) pageStore[game] = JSON.parse(rows[0].value);
+  } catch { /* start empty */ }
+}
+
+/** Matches on a tournament page (brackets and group match lists). Only matches with a start time and two named teams.
+ *  «Finished» only when the page marks it so (bets settle on it); a score is kept for live and finished ones. */
+export function parseSchedule(html: string, game: 'cs2' | 'dota2', page: string, meta: Partial<TipsGgMatch> = {}, now = Date.now()): TipsGgMatch[] {
+  const $ = cheerio.load(html);
+  const out = new Map<string, TipsGgMatch>();
+  const add = (m: TipsGgMatch) => { const prev = out.get(m.id); if (!prev || (m.status === 'finished' && prev.status !== 'finished')) out.set(m.id, m); };
+  // the newer layout reuses the ticker's «match-info» blocks inside the bracket popups
+  for (const m of parseTicker(html, game, now)) add({ ...m, tournament: m.tournament || meta.tournament || '', tier: m.tier ?? meta.tier ?? null, tournamentLogo: m.tournamentLogo || meta.tournamentLogo || null, tournamentPage: page, stage: m.stage || stageOf(page) });
+  $('.brkts-match, .brkts-matchlist-match').each((_, el) => {
+    const b = $(el);
+    const timer = b.find('.timer-object[data-timestamp]').first();
+    const ts = Number(timer.attr('data-timestamp'));
+    if (!ts) return;
+    const opps = b.find('.brkts-opponent-entry, .brkts-matchlist-opponent').filter((_, x) => !$(x).parents('.brkts-popup, .brkts-match-info-popup').length);
+    if (opps.length < 2) return;
+    const side = (i: number) => {
+      const o = opps.eq(i);
+      const name = (o.find('a[title]').first().attr('title') || o.attr('aria-label') || o.find('[data-highlightingclass]').first().attr('data-highlightingclass')
+        || o.find('.name, .team-template-text').first().text() || '').replace(/\s*\(page does not exist\)\s*$/, '').trim();
+      const scoreEl = o.find('.brkts-opponent-score-inner, .brkts-matchlist-score').first();
+      const sc = (scoreEl.length ? scoreEl : o.siblings('.brkts-matchlist-score').eq(i)).text().trim();
+      const im = o.find('.team-template-lightmode img').first().length ? o.find('.team-template-lightmode img').first() : o.find('img').first();
+      return { name, score: /^\d+$/.test(sc) ? Number(sc) : null, logo: lpUrl(im.attr('src') || im.attr('data-src')) };
+    };
+    const a = side(0), z = side(1);
+    if (!a.name || !z.name || /^tbd$/i.test(a.name) || /^tbd$/i.test(z.name)) return;
+    const start = new Date(ts * 1000);
+    const finished = timer.attr('data-finished') === 'finished';
+    const status: TipsGgMatch['status'] = finished ? 'finished' : start.getTime() <= now ? 'live' : 'upcoming';
+    const bo = (b.text().match(/\(\s*bo\s*(\d)\s*\)|\bbo\s*(\d)\b/i) || []).slice(1).find(Boolean);
+    const hasScore = status !== 'upcoming' && a.score != null && z.score != null;
+    const date = start.toISOString().slice(0, 10);
+    const matchHref = decodeURIComponent((b.find('a[href*="Match:"]').first().attr('href') || '').replace(/^.*?\/(counterstrike|dota2)\//, '').split('#')[0]);
+    add({
+      id: `lp-${game}-${date}-${slug(a.name)}-vs-${slug(z.name)}`,
+      date,
+      link: '',
+      type: bo ? `BO${bo}` : meta.type || 'BO3',
+      score1: hasScore ? a.score : null,
+      score2: hasScore ? z.score : null,
+      nameTeam1: a.name,
+      nameTeam2: z.name,
+      logoTeam1: a.logo,
+      logoTeam2: z.logo,
+      tournament: meta.tournament || '',
+      stage: stageOf(page),
+      tier: meta.tier ?? null,
+      ...(matchHref ? { matchPage: matchHref } : {}),
+      status,
+      tipsCount: 0,
+      performer: null,
+      startDate: start.toISOString(),
+      pred1: null,
+      pred2: null,
+      coeff1: null,
+      coeff2: null,
+      positionTeam1: null,
+      positionTeam2: null,
+      tournamentLogo: meta.tournamentLogo || null,
+      tournamentPage: page,
+    });
+  });
+  return [...out.values()].sort((x, y) => x.startDate.localeCompare(y.startDate));
+}
+
+/** Every 20 min: the 2 tournament pages read longest ago among the tournaments the ticker shows as upcoming or live
+ *  (the higher tier first), each page at most once an hour. */
+async function refreshPages(game: 'cs2' | 'dota2'): Promise<void> {
+  if (Date.now() - (lastPages[game] || 0) < PAGES_EVERY_MS || isOpen(LIQUIPEDIA_PARSER)) return;
+  lastPages[game] = Date.now();
+  await hydratePages(game);
+  const data = mem[game]?.data || [];
+  const rank = (t?: TipsGgMatch['tier']) => (t ? 'SABCD'.indexOf(t) : 5);
+  const byPage = new Map<string, TipsGgMatch>();
+  for (const m of data) if (m.tournamentPage && m.status !== 'finished' && !byPage.has(m.tournamentPage)) byPage.set(m.tournamentPage, m);
+  const store = pageStore[game];
+  for (const k of Object.keys(store)) if (!byPage.has(k) && Date.now() - store[k].at > 2 * 24 * 3_600_000) delete store[k]; // tournament over
+  const due = [...byPage.entries()]
+    .filter(([p]) => Date.now() - (store[p]?.at || 0) >= PAGE_MIN_AGE_MS)
+    .sort(([pa, a], [pb, z]) => (store[pa]?.at || 0) - (store[pb]?.at || 0) || rank(a.tier) - rank(z.tier))
+    .slice(0, PAGES_PER_RUN);
+  let got = 0, pages = 0;
+  for (const [page, sample] of due) {
+    const url = `https://liquipedia.net/${WIKI[game]}/api.php?${new URLSearchParams({ action: 'parse', page, format: 'json', prop: 'text' })}`;
+    const html = await limited(async () => {
+      try {
+        const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT, 'Accept-Encoding': 'gzip', Accept: 'application/json' }, signal: AbortSignal.timeout(30_000) });
+        if (!res.ok) return '';
+        const json: any = await res.json();
+        return typeof json?.parse?.text === 'string' ? json.parse.text : json?.parse?.text?.['*'] || '';
+      } catch { return ''; }
+    });
+    if (!html) continue;
+    const list = parseSchedule(html, game, page, { tournament: sample.tournament, tier: sample.tier, tournamentLogo: sample.tournamentLogo, type: sample.type });
+    if (!list.length) console.warn(`[liquipedia] ${game} ${page}: no scheduled matches parsed — ${describeHtml(html)}`);
+    store[page] = { at: Date.now(), matches: list };
+    got += list.length; pages++;
+  }
+  if (!pages) return;
+  pool.query(
+    `INSERT INTO app_settings(key, value) VALUES($1, $2) ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+    [PAGES_DB_KEY(game), JSON.stringify(store)],
+  ).catch(() => {});
+  console.log(`[liquipedia] ${game}: tournament pages — ${got} matches on ${pages} pages`);
+}
+
+/** The ticker's matches plus the ones only the tournament pages have (same teams within 6 h = the same match). */
+function withPages(game: 'cs2' | 'dota2', ticker: TipsGgMatch[], now = Date.now()): TipsGgMatch[] {
+  const ids = new Set(ticker.map((m) => m.id));
+  const extra: TipsGgMatch[] = [];
+  for (const pc of Object.values(pageStore[game])) {
+    for (const m of pc.matches) {
+      const t = Date.parse(m.startDate);
+      if (ids.has(m.id) || t > now + 8 * 24 * 3_600_000 || t < now - 36 * 3_600_000) continue;
+      if (m.status !== 'finished' && t < now - 6 * 3_600_000) continue; // never marked finished: do not show it «live» for ever
+      const a = tk(m.nameTeam1), z = tk(m.nameTeam2);
+      const dup = [...ticker, ...extra].some((x) => Math.abs(Date.parse(x.startDate) - t) < 6 * 3_600_000
+        && ((tk(x.nameTeam1) === a && tk(x.nameTeam2) === z) || (tk(x.nameTeam1) === z && tk(x.nameTeam2) === a)));
+      if (dup) continue;
+      ids.add(m.id);
+      extra.push(m);
+    }
+  }
+  pagesAdded[game] = extra.length;
+  return extra.length ? [...ticker, ...extra].sort((x, y) => Date.parse(x.startDate) - Date.parse(y.startDate)) : ticker;
+}
+
+/** For the admin card: tournament pages read and the matches only they gave. */
+export function liquipediaPagesInfo(): { pages: number; added: number } {
+  return { pages: Object.keys(pageStore.cs2).length + Object.keys(pageStore.dota2).length, added: pagesAdded.cs2 + pagesAdded.dota2 };
+}
+
 // ── Live CS2: map-by-map score from the match page (≤ 2 pages every 3 min, each waits the 31 s gap) ──
 const MAPS_EVERY_MS = 3 * 60_000;
 let lastMaps = 0, mapsTurn = 0;
@@ -433,7 +588,7 @@ export const liquipediaAskedAt = () => askedAt;
 
 /** «Оновити зараз»: forget the 5-minute freshness and the failure back-off, then fetch both games (each waits the 31 s gap). */
 export function forceLiquipedia(): void {
-  for (const g of ['cs2', 'dota2'] as const) { if (mem[g]) mem[g] = { ...mem[g]!, at: 0 }; delete failedAt[g]; }
+  for (const g of ['cs2', 'dota2'] as const) { if (mem[g]) mem[g] = { ...mem[g]!, at: 0 }; delete failedAt[g]; delete lastPages[g]; }
   void fetchLiquipediaMatches('cs2').then(() => fetchLiquipediaMatches('dota2')).catch(() => {});
 }
 
@@ -445,7 +600,9 @@ export async function fetchLiquipediaMatches(game: 'cs2' | 'dota2'): Promise<Tip
   if (fresh || isOpen(LIQUIPEDIA_PARSER) || Date.now() - (failedAt[game] || 0) < FAIL_BACKOFF_MS) {
     void backfillScores(game).catch((e) => console.warn(`[liquipedia] ${game} backfill failed:`, (e as Error).message));
     void refreshMaps(game).catch((e) => console.warn(`[liquipedia] ${game} maps failed:`, (e as Error).message));
-    return withTimeStatus(cached?.data || []);
+    void refreshPages(game).catch((e) => console.warn(`[liquipedia] ${game} pages failed:`, (e as Error).message));
+    await hydratePages(game);
+    return withTimeStatus(withPages(game, cached?.data || []));
   }
   if (!inflight[game]) {
     inflight[game] = limited(() => fetchTicker(game)).then(({ list, why }) => {
@@ -455,9 +612,12 @@ export async function fetchLiquipediaMatches(game: 'cs2' | 'dota2'): Promise<Tip
       return cached?.data || [];
     }).finally(() => { delete inflight[game]; });
   }
-  const out = withTimeStatus(await inflight[game]!);
+  const ticker = await inflight[game]!;
+  await hydratePages(game);
+  const out = withTimeStatus(ticker.length ? withPages(game, ticker) : ticker);
   void backfillScores(game).catch((e) => console.warn(`[liquipedia] ${game} backfill failed:`, (e as Error).message));
   void refreshMaps(game).catch((e) => console.warn(`[liquipedia] ${game} maps failed:`, (e as Error).message));
+  void refreshPages(game).catch((e) => console.warn(`[liquipedia] ${game} pages failed:`, (e as Error).message));
   return out;
 }
 

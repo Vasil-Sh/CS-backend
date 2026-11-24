@@ -6,7 +6,7 @@ import { forceOddsPapi, oddsRefreshCost, oddspapiDiag, oddspapiEnabled } from '.
 import { citoAdded, fallbackCount, oddsMatched, oddsMisses, pandascoreAdded } from '../services/matchFeed';
 import { pandascoreDiag, pandascoreEnabled, refreshPandaScore } from '../services/pandascoreFeed';
 import { citoDiag, citoEnabled, refreshCito } from '../services/citoFeed';
-import { forceLiquipedia, liquipediaAskedAt } from '../services/liquipediaFeed';
+import { forceLiquipedia, liquipediaAskedAt, liquipediaPagesInfo } from '../services/liquipediaFeed';
 import { listServerErrors, resolveServerError } from '../services/serverErrors';
 import { weekReport } from '../services/feedStats';
 
@@ -77,6 +77,7 @@ parsers.get('/admin/parsers', requireAuth, requireAdmin, async (c) => {
       lastFailure: fail?.lastFailure ?? (circuit?.lastFailure ? new Date(circuit.lastFailure).toISOString() : ''),
       lastSuccess: okMap.get(name) ?? '',
       week: weekOf(name),
+      ...(name === 'liquipedia' ? { pages: liquipediaPagesInfo() } : {}),
       ...(name === 'liquipedia' && liquipediaAskedAt() ? { askedAt: new Date(liquipediaAskedAt()).toISOString() } : {}),
       // Cito: second CS2 schedule — how many matches it added and how much of the month's 500 is left
       ...(name === 'pandascore' ? { pandascore: { ...pandascoreDiag(), added: pandascoreAdded() } } : {}),
