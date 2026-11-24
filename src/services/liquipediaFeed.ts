@@ -18,7 +18,7 @@ import * as cheerio from 'cheerio';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordFailure, recordSuccess, isOpen } from './circuitBreaker';
-import { normalizeTeam } from '../utils/matchUtils';
+import { mergeSameTimeDuplicates, normalizeTeam } from '../utils/matchUtils';
 import type { TipsGgMatch } from './matchTypes';
 import { pool } from '../db/client';
 import { isNight } from './nightMode';
@@ -425,7 +425,7 @@ export function parseSchedule(html: string, game: 'cs2' | 'dota2', page: string,
   const out = new Map<string, TipsGgMatch>();
   const add = (m: TipsGgMatch) => { const prev = out.get(m.id); if (!prev || (m.status === 'finished' && prev.status !== 'finished')) out.set(m.id, m); };
   // the newer layout reuses the ticker's «match-info» blocks inside the bracket popups
-  for (const m of parseTicker(html, game, now)) add({ ...m, tournament: m.tournament || meta.tournament || '', tier: m.tier ?? meta.tier ?? null, tournamentLogo: m.tournamentLogo || meta.tournamentLogo || null, tournamentPage: page, stage: m.stage || stageOf(page) });
+  for (const m of parseTicker(html, game, now)) add({ ...m, fromPage: true, tournament: m.tournament || meta.tournament || '', tier: m.tier ?? meta.tier ?? null, tournamentLogo: m.tournamentLogo || meta.tournamentLogo || null, tournamentPage: page, stage: m.stage || stageOf(page) });
   $('.brkts-match, .brkts-matchlist-match').each((_, el) => {
     const b = $(el);
     const timer = b.find('.timer-object[data-timestamp]').first();
@@ -478,6 +478,7 @@ export function parseSchedule(html: string, game: 'cs2' | 'dota2', page: string,
       positionTeam2: null,
       tournamentLogo: meta.tournamentLogo || null,
       tournamentPage: page,
+      fromPage: true,
     });
   });
   return [...out.values()].sort((x, y) => x.startDate.localeCompare(y.startDate));
@@ -541,8 +542,11 @@ function withPages(game: 'cs2' | 'dota2', ticker: TipsGgMatch[], now = Date.now(
       extra.push(m);
     }
   }
-  pagesAdded[game] = extra.length;
-  return extra.length ? [...ticker, ...extra].sort((x, y) => Date.parse(x.startDate) - Date.parse(y.startDate)) : ticker;
+  if (!extra.length) { pagesAdded[game] = 0; return ticker; }
+  // names differ between the ticker and a page («PVISION» / «PARIVISION»): one shared team at the same time is the same match
+  const merged = mergeSameTimeDuplicates([...ticker, ...extra].sort((x, y) => Date.parse(x.startDate) - Date.parse(y.startDate)));
+  pagesAdded[game] = merged.filter((m) => m.fromPage).length;
+  return merged;
 }
 
 /** For the admin card: tournament pages read and the matches only they gave. */

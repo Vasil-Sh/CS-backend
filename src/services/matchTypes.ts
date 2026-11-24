@@ -47,4 +47,6 @@ export interface TipsGgMatch {
   matchPage?: string;
   /** Map-by-map score (CS2 live/finished), team1 first. */
   maps?: { map: string; score1: number | null; score2: number | null }[];
+  /** Taken from a Liquipedia tournament page, not the ticker (the ticker's copy wins a duplicate). */
+  fromPage?: boolean;
 }

@@ -5,6 +5,7 @@
  * Mirrors the previous dota2Matches.ts / cs2Matches.ts architecture.
  */
 
+import { mergeSameTimeDuplicates } from '../utils/matchUtils';
 import { Hono } from 'hono';
 import type { TipsGgMatch } from './matchTypes';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, renameSync, statSync } from 'node:fs';
@@ -174,6 +175,8 @@ function readFileCache<T>(maxAge: number, key: string): { data: T; stale: boolea
 }
 
 export function writeFileCacheInternal(data: unknown, key: string): void {
+  // a match cache never keeps the same match twice (another source / page under another name)
+  if (Array.isArray(data) && /_matches\.json$/.test(key)) data = mergeSameTimeDuplicates(data as any[]);
   try {
     ensureCacheDir();
     const today = new Date().toISOString().split('T')[0];

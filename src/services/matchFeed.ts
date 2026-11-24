@@ -13,7 +13,7 @@ import type { TipsGgMatch } from './matchTypes';
 import { cachedMatches, fetchOddsPapiMatches, oddspapiEnabled, refreshOddsPapi, requestScores } from './oddspapiFeed';
 import { applySeries, recentDotaSeries } from './opendotaScores';
 import { liquipediaOkAt, fetchLiquipediaMatches } from './liquipediaFeed';
-import { normalizeTeam } from '../utils/matchUtils';
+import { mergeSameTimeDuplicates, normalizeTeam } from '../utils/matchUtils';
 import { citoEnabled, citoMatches, refreshCito } from './citoFeed';
 import { isNight } from './nightMode';
 import { pandascoreEnabled, pandascoreMatches, refreshPandaScore } from './pandascoreFeed';
@@ -209,6 +209,7 @@ async function newFeed(game: 'cs2' | 'dota2', spendOddsPapi: boolean): Promise<T
   // still «—:—» 6 h after the start, and Liquipedia's tournament page did not help: ask OddsPapi (≤ 5 a day)
   const noScore = list.filter((m) => m.status === 'finished' && (m.score1 == null || m.score2 == null) && m.oddsFixtureId && Date.parse(m.startDate) < Date.now() - 6 * 3_600_000);
   if (noScore.length) void requestScores(noScore.map((m) => m.oddsFixtureId!)).catch(() => {});
+  list = mergeSameTimeDuplicates(list);
   return game === 'dota2' ? withDotaScores(list) : list;
 }
 
