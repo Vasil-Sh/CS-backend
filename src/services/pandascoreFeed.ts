@@ -194,7 +194,9 @@ export function pandascoreMatches(game: Game, now = Date.now()): TipsGgMatch[] {
 /** The cache is loaded and holds lists — only then may a cached PandaScore match missing from the feed be dropped. */
 export const pandascoreReady = () => pandascoreEnabled() && hydrated && cache.at > 0;
 
-export function pandascoreDiag(): { at: string; nextAt: string; callsThisHour: number; cs2: number; dota2: number } {
+/** For the admin card. Reads the saved copy first: after a deploy, with no visitors, the refresh has not run yet. */
+export async function pandascoreDiag(): Promise<{ at: string; nextAt: string; callsThisHour: number; cs2: number; dota2: number }> {
+  await hydrate();
   const iso = (t: number) => (t ? new Date(t).toISOString() : '');
   const n = (g: Game) => pandascoreMatches(g).length;
   return { at: iso(cache.at), nextAt: iso(cache.at ? cache.at + EVERY_MS : 0), callsThisHour: cache.calls.hour === Math.floor(Date.now() / H) ? cache.calls.n : 0, cs2: n('cs2'), dota2: n('dota2') };

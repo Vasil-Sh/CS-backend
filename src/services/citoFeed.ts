@@ -212,11 +212,13 @@ export function citoMatches(now = Date.now()): TipsGgMatch[] {
 /** The cache is loaded and holds a schedule — only then may a cached Cito match missing from the feed be dropped. */
 export const citoReady = () => citoEnabled() && hydrated && cache.upcomingAt > 0;
 
-export function citoDiag(): { used: number; left: number; budget: number; upcomingAt: string; recentAt: string; upcoming: number; recent: number; nextAt: string } {
+/** For the admin card. Reads the saved copy first: after a deploy, with no visitors, the refresh has not run yet. */
+export async function citoDiag(): Promise<{ used: number; left: number; budget: number; upcomingAt: string; recentAt: string; upcoming: number; recent: number; nextAt: string; matches: number }> {
+  await hydrate();
   const left = citoLeft();
-  const next = Math.min(cache.upcomingAt + citoEveryMs(left, 2 / 3, MIN_UPCOMING_MS), cache.recentAt + citoEveryMs(left, 1 / 3, MIN_RECENT_MS));
+  const next = !cache.upcomingAt ? 0 : Math.min(cache.upcomingAt + citoEveryMs(left, 2 / 3, MIN_UPCOMING_MS), cache.recentAt ? cache.recentAt + citoEveryMs(left, 1 / 3, MIN_RECENT_MS) : Infinity);
   const iso = (t: number) => (t && Number.isFinite(t) ? new Date(t).toISOString() : '');
-  return { used: MONTHLY - left, left, budget: MONTHLY, upcomingAt: iso(cache.upcomingAt), recentAt: iso(cache.recentAt), upcoming: cache.upcoming.length, recent: cache.recent.length, nextAt: iso(next) };
+  return { used: MONTHLY - left, left, budget: MONTHLY, upcomingAt: iso(cache.upcomingAt), recentAt: iso(cache.recentAt), upcoming: cache.upcoming.length, recent: cache.recent.length, nextAt: iso(next), matches: citoMatches().length };
 }
 
 export function __setCitoCache(c: Partial<CacheShape>): void { cache = { ...empty(), ...c }; hydrated = true; }

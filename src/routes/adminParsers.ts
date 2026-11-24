@@ -62,6 +62,7 @@ parsers.get('/admin/parsers', requireAuth, requireAdmin, async (c) => {
 
   // Merge known parser sources even if they never failed.
   const known = knownParsers();
+  const [psDiag, ctDiag] = await Promise.all([pandascoreEnabled() ? pandascoreDiag() : null, citoEnabled() ? citoDiag() : null]);
   const merged = known.map((name) => {
     const circuit = circuits.find((x) => x.name === name);
     const fail = failureMap.get(name);
@@ -81,8 +82,8 @@ parsers.get('/admin/parsers', requireAuth, requireAdmin, async (c) => {
       ...(name === 'liquipedia' ? { pages: liquipediaPagesInfo() } : {}),
       ...(name === 'liquipedia' && liquipediaAskedAt() ? { askedAt: new Date(liquipediaAskedAt()).toISOString() } : {}),
       // Cito: second CS2 schedule — how many matches it added and how much of the month's 500 is left
-      ...(name === 'pandascore' ? { pandascore: { ...pandascoreDiag(), added: pandascoreAdded() } } : {}),
-      ...(name === 'cito' ? { cito: { ...citoDiag(), added: citoAdded() } } : {}),
+      ...(name === 'pandascore' ? { pandascore: { ...psDiag!, added: pandascoreAdded() } } : {}),
+      ...(name === 'cito' ? { cito: { ...ctDiag!, added: citoAdded() } } : {}),
       // OddsPapi only adds prices: show what it holds and how much of it reached our matches
       ...(name === 'oddspapi' ? { odds: (() => { const d = oddspapiDiag(), m = oddsMatched(); return { ...d, matched: m.cs2 + m.dota2, refreshCost: oddsRefreshCost(), fallback: fallbackCount(), unmatched: oddsMisses().slice(0, 40), fixturesAt: d.fixturesAt ? new Date(d.fixturesAt).toISOString() : '', oddsAt: d.oddsAt ? new Date(d.oddsAt).toISOString() : '', nextOddsAt: d.nextOddsAt ? new Date(d.nextOddsAt).toISOString() : '' }; })() } : {}),
     };
