@@ -117,7 +117,29 @@ async function savePost(handle: string, post: PagePost, ocr: string, p: TgParsed
 }
 
 /** Read one channel now: new posts → parsed → saved. Returns how many posts were new. */
+const busy = new Set<string>();
+/** «Перечитати»: how many posts the re-read started with (progress in the admin). */
+export const rereadTotal = new Map<string, number>();
+
+/** Reads the channel until every saved post is re-read (8 a pass), not waiting for the next 10-minute pass. */
+export async function rereadChannel(handle: string, total: number): Promise<void> {
+  rereadTotal.set(handle, total);
+  try {
+    for (let i = 0; i < 8; i++) {
+      await collectChannel(handle);
+      const left = Number((await pool.query<{ n: string }>('SELECT count(*) AS n FROM tg_posts WHERE handle = $1 AND photos IS NULL', [handle])).rows[0]?.n || 0);
+      if (!left) break;
+    }
+    await settleTgTips().catch(() => 0);
+  } finally { rereadTotal.delete(handle); }
+}
+
 export async function collectChannel(handle: string, cands?: TgCandidate[]): Promise<number> {
+  if (busy.has(handle)) return 0; // a pass on this channel is already reading it
+  busy.add(handle);
+  try { return await collectChannel1(handle, cands); } finally { busy.delete(handle); }
+}
+async function collectChannel1(handle: string, cands?: TgCandidate[]): Promise<number> {
   const ch = (await pool.query<{ last_post_id: number; game: string; rules: TgRules }>('SELECT last_post_id, game, rules FROM tg_channels WHERE handle = $1', [handle])).rows[0];
   if (!ch) return 0;
   let page;

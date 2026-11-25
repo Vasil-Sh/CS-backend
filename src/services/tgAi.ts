@@ -49,16 +49,29 @@ export async function aiReadPost(caption: string, photos: string[]): Promise<AiT
       if (buf.length > 4 * 1024 * 1024) continue;
       parts.push({ inline_data: { mime_type: r.headers.get('content-type') || 'image/jpeg', data: buf.toString('base64') } });
     }
-    aiStats.model = MODEL();
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL()}:generateContent`, {
-      method: 'POST', signal: AbortSignal.timeout(40_000),
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-      body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: SCHEMA } }),
-    });
-    aiStats.calls++; aiStats.lastAt = new Date().toISOString();
-    if (!res.ok) throw new Error(`Gemini ${res.status}: ${(await res.text()).slice(0, 160)}`);
-    const body = await res.json() as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
-    const txt = body.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
+    // «high demand» (503) / quota (429) are usually short: wait and retry, then the other Flash model
+    const models = [...new Set([MODEL(), 'gemini-flash-latest'])];
+    let body = null as Resp | null, lastErr = '';
+    for (const model of models) {
+      for (let attempt = 0; attempt < 3 && !body; attempt++) {
+        if (attempt) await new Promise((ok) => setTimeout(ok, attempt * 5_000));
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+          method: 'POST', signal: AbortSignal.timeout(40_000),
+          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+          body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: SCHEMA } }),
+        });
+        aiStats.calls++; aiStats.lastAt = new Date().toISOString(); aiStats.model = model;
+        if (res.ok) { body = await res.json() as Resp; break; }
+        const raw = await res.text();
+        let msg = raw;
+        try { msg = (JSON.parse(raw) as { error?: { message?: string } }).error?.message || raw; } catch { /* not JSON */ }
+        lastErr = `Gemini ${res.status}: ${msg.replace(/\s+/g, ' ').slice(0, 140)}`;
+        if (![429, 500, 503].includes(res.status)) throw new Error(lastErr);
+      }
+      if (body) break;
+    }
+    if (!body) throw new Error(lastErr || 'Gemini: no answer');
+    const txt = (body as Resp).candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
     return JSON.parse(txt) as AiTip;
   } catch (e) {
     aiStats.failed++; aiStats.lastError = (e as Error).message.slice(0, 200);
@@ -67,6 +80,7 @@ export async function aiReadPost(caption: string, photos: string[]): Promise<AiT
   }
 }
 
+type Resp = { candidates?: { content?: { parts?: { text?: string }[] } }[] };
 const n2 = (x: number) => String(x).replace(',', '.');
 /** The model's answer as a tip line for the parser; '' for «not a tip». */
 export function aiLine(a: AiTip): string {

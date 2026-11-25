@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { pool } from '../db/client';
-import { collectChannel, previewChannel, publicHandle, settleTgTips, tgCandidates, tgCycle, tgNextAt } from '../services/tgSources';
+import { collectChannel, rereadChannel, rereadTotal, previewChannel, publicHandle, settleTgTips, tgCandidates, tgCycle, tgNextAt } from '../services/tgSources';
 import { isNight } from '../services/nightMode';
 import { ocrStats } from '../services/tgOcr';
 import { aiEnabled, aiStats } from '../services/tgAi';
@@ -62,7 +62,7 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
       posts7d: wk.length, tips7d: tips, unknown7d: unk, recognized: tips + unk ? Math.round((tips / (tips + unk)) * 100) : null,
       settled: settled.length, wins, winrate: settled.length ? Math.round((wins / settled.length) * 100) : null,
       roi: priced.length ? Math.round((profit / priced.length) * 100) : null, pending: ps.filter((p) => p.kind === 'bet' && !p.result).length,
-      users, rereading: rereading.get(ch.handle) || 0,
+      users, rereading: rereading.get(ch.handle) || 0, rereadTotal: rereadTotal.get(ch.handle) || null,
       all: { posts: n(a?.total), tips: tipsAll, unknown: unkAll, other: n(a?.other), repeats: n(a?.repeats), won: wonAll, lost: lostAll, pending: n(a?.pending),
         recognized: tipsAll + unkAll ? Math.round((tipsAll / (tipsAll + unkAll)) * 100) : null, winrate: wonAll + lostAll ? Math.round((wonAll / (wonAll + lostAll)) * 100) : null,
         profit: pricedAll ? profitAll : null, roi: pricedAll ? Math.round(profitAll / pricedAll) : null, firstAt: a?.first_at ?? null },
@@ -181,7 +181,7 @@ tg.post('/admin/tg-sources/:handle/reread', requireAuth, requireAdmin, async (c)
   const actor = c.get('user'), handle = c.req.param('handle') || '';
   const { rowCount } = await pool.query('UPDATE tg_posts SET photos = NULL WHERE handle = $1 AND fixed_by IS NULL', [handle]);
   audit(actor, 'tg_channel_reread', handle, { posts: rowCount });
-  void collectChannel(handle).then(() => settleTgTips()).catch(() => {});
+  void rereadChannel(handle, rowCount || 0).catch((e) => console.warn(`[tg] reread ${handle}:`, (e as Error).message));
   return c.json({ ok: true, posts: rowCount || 0 });
 });
 
