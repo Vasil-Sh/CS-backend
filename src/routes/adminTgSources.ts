@@ -3,6 +3,8 @@ import { requireAuth, requireAdmin } from '../middleware/auth';
 import { pool } from '../db/client';
 import { collectChannel, previewChannel, publicHandle, settleTgTips, tgCandidates, tgCycle, tgNextAt } from '../services/tgSources';
 import { isNight } from '../services/nightMode';
+import { ocrStats } from '../services/tgOcr';
+import { aiEnabled, aiStats } from '../services/tgAi';
 
 /** «Telegram-джерела» in the admin: channels we read, their posts, the queue of posts we did not understand. */
 const tg = new Hono();
@@ -16,7 +18,7 @@ const kyivDay = (t: number) => new Intl.DateTimeFormat('sv-SE', { timeZone: 'Eur
 
 /** GET /api/admin/tg-sources — channels with their week, totals, invites users added (not readable yet). */
 tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
-  const [chs, posts, groups, all] = await Promise.all([
+  const [chs, posts, groups, all, again] = await Promise.all([
     pool.query(`SELECT handle, title, subscribers, game, is_test AS "isTest", paused, added_by AS "addedBy", last_post_at AS "lastPostAt", checked_at AS "checkedAt", error, created_at AS "createdAt" FROM tg_channels ORDER BY created_at`),
     pool.query<{ handle: string; posted_at: string; kind: string; result: string | null; odds: string | null }>(
       `SELECT handle, posted_at, kind, result, odds FROM tg_posts WHERE posted_at > now() - interval '30 days'`),
@@ -31,8 +33,10 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
               sum(CASE WHEN kind = 'bet' AND result = 'Win' AND odds IS NOT NULL THEN (odds - 1) * 100 WHEN kind = 'bet' AND result = 'Loss' AND odds IS NOT NULL THEN -100 END) AS profit,
               count(*) FILTER (WHERE kind = 'bet' AND result IS NOT NULL AND odds IS NOT NULL) AS priced, min(posted_at) AS first_at
          FROM tg_posts GROUP BY handle`),
+    pool.query<{ handle: string; n: string }>(`SELECT handle, count(*) AS n FROM tg_posts WHERE photos IS NULL GROUP BY handle`),
   ]);
   const agg = new Map(all.rows.map((r) => [r.handle, r]));
+  const rereading = new Map(again.rows.map((r) => [r.handle, Number(r.n)]));
   const now = Date.now(), days = Array.from({ length: 7 }, (_, i) => kyivDay(now - (6 - i) * DAY));
   const who = new Map<string, Set<string>>(), blocked = new Set<string>();
   const invites: { name: string; link: string; who: string[] }[] = [];
@@ -58,7 +62,7 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
       posts7d: wk.length, tips7d: tips, unknown7d: unk, recognized: tips + unk ? Math.round((tips / (tips + unk)) * 100) : null,
       settled: settled.length, wins, winrate: settled.length ? Math.round((wins / settled.length) * 100) : null,
       roi: priced.length ? Math.round((profit / priced.length) * 100) : null, pending: ps.filter((p) => p.kind === 'bet' && !p.result).length,
-      users,
+      users, rereading: rereading.get(ch.handle) || 0,
       all: { posts: n(a?.total), tips: tipsAll, unknown: unkAll, other: n(a?.other), repeats: n(a?.repeats), won: wonAll, lost: lostAll, pending: n(a?.pending),
         recognized: tipsAll + unkAll ? Math.round((tipsAll / (tipsAll + unkAll)) * 100) : null, winrate: wonAll + lostAll ? Math.round((wonAll / (wonAll + lostAll)) * 100) : null,
         profit: pricedAll ? profitAll : null, roi: pricedAll ? Math.round(profitAll / pricedAll) : null, firstAt: a?.first_at ?? null },
@@ -74,6 +78,8 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
     totals: { channels: channels.length, running: channels.filter((x) => x.status === 'run').length, posts24h: p24.length, tips24h: p24.filter((p) => p.kind === 'bet').length,
       recognized: tips7 + unk7 ? Math.round((tips7 / (tips7 + unk7)) * 100) : null, unknown7d: unk7, queue: all.rows.reduce((x, r) => x + Number(r.unknown || 0), 0), settled30d: settled.length,
       winrate30d: settled.length ? Math.round((settled.filter((p) => p.result === 'Win').length / settled.length) * 100) : null, pending: posts.rows.filter((p) => p.kind === 'bet' && !p.result).length },
+    reader: { ai: aiEnabled(), model: aiStats.model || null, aiCalls: aiStats.calls, aiFailed: aiStats.failed, aiError: aiStats.lastError,
+      ocrImages: ocrStats.images, ocrFailed: ocrStats.failed, ocrAvgMs: ocrStats.images ? Math.round(ocrStats.ms / ocrStats.images) : null, ocrError: ocrStats.lastError },
     night: isNight(), nextAt: tgNextAt.at ? new Date(tgNextAt.at).toISOString() : null,
   });
 });
@@ -165,9 +171,18 @@ tg.post('/admin/tg-sources/:handle/pause', requireAuth, requireAdmin, async (c) 
 tg.post('/admin/tg-sources/:handle/refresh', requireAuth, requireAdmin, async (c) => {
   const handle = c.req.param('handle') || '';
   if (handle === 'all') { void tgCycle().catch(() => {}); return c.json({ ok: true, started: true }); }
-  const added = await collectChannel(handle);
-  await settleTgTips().catch(() => 0);
-  return c.json({ ok: true, added });
+  // reading screenshots takes seconds a post: the pass runs on, the admin reloads the list
+  void collectChannel(handle).then(() => settleTgTips()).catch((e) => console.warn(`[tg] ${handle}:`, (e as Error).message));
+  return c.json({ ok: true, started: true });
+});
+
+/** POST /api/admin/tg-sources/:handle/reread — read the channel's saved posts again (after GEMINI_API_KEY is added, say); manual fixes stay. */
+tg.post('/admin/tg-sources/:handle/reread', requireAuth, requireAdmin, async (c) => {
+  const actor = c.get('user'), handle = c.req.param('handle') || '';
+  const { rowCount } = await pool.query('UPDATE tg_posts SET photos = NULL WHERE handle = $1 AND fixed_by IS NULL', [handle]);
+  audit(actor, 'tg_channel_reread', handle, { posts: rowCount });
+  void collectChannel(handle).then(() => settleTgTips()).catch(() => {});
+  return c.json({ ok: true, posts: rowCount || 0 });
 });
 
 /** DELETE /api/admin/tg-sources/:handle — remove a test channel with its posts. */

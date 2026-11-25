@@ -27,9 +27,13 @@ async function getWorker(): Promise<Worker> {
   return worker;
 }
 
+/** What the reader did since the start (for the admin). */
+export const ocrStats = { images: 0, failed: 0, ms: 0, lastError: null as string | null, lastAt: null as string | null };
+
 /** OCR of one image URL; '' when the image can't be fetched or read. Calls run one at a time. */
 export function ocrImage(url: string): Promise<string> {
   const run = async () => {
+    const t0 = Date.now();
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
       if (!res.ok) return '';
@@ -42,9 +46,11 @@ export function ocrImage(url: string): Promise<string> {
       for (const psm of ['3', '6', '11']) { await w.setParameters({ tessedit_pageseg_mode: psm }); passes.push((await w.recognize(img)).data.text); }
       await w.setParameters({ tessedit_pageseg_mode: '6' });
       passes.push((await w.recognize(bw)).data.text); // + black-and-white: faint grey labels
+      ocrStats.images++; ocrStats.ms += Date.now() - t0; ocrStats.lastAt = new Date().toISOString();
       return passes.reduce((acc, x) => mergeOcr(acc, x));
     } catch (e) {
       console.warn('[tg] ocr:', (e as Error).message);
+      ocrStats.failed++; ocrStats.lastError = (e as Error).message.slice(0, 200);
       return '';
     }
   };
@@ -53,13 +59,13 @@ export function ocrImage(url: string): Promise<string> {
   return p;
 }
 
-/** Channel screenshots are small (≈380 px wide on t.me/s): grey, contrast-stretched and scaled up to ≈1900 px so tesseract sees the small print. */
+/** Channel screenshots are small (≈380 px wide on t.me/s): grey, contrast-stretched and scaled up to ≈1600 px so tesseract sees the small print. */
 async function prepare(buf: Buffer, light = false): Promise<Buffer> {
   try {
     const sharp = (await import('sharp')).default;
     const meta = await sharp(buf).metadata();
     const w = meta.width || 0;
-    const k = w && w < 1800 ? Math.min(4, 1900 / w) : 1;
+    const k = w && w < 700 ? Math.min(4, 1600 / w) : 1; // big screenshots are read as they are (CPU)
     let img = sharp(buf).grayscale();
     if (k > 1.05) img = img.resize({ width: Math.round(w * k), kernel: 'lanczos3' });
     img = light ? img.threshold(220) /* light-grey print → black: «Карта 1: Переможець карти» */ : img.clahe({ width: 96, height: 96, maxSlope: 3 }); // local contrast

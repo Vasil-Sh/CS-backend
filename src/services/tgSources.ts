@@ -12,6 +12,7 @@ import { resultFor } from './betHints';
 import { teamKey } from './matchFeed';
 import { isNight } from './nightMode';
 import { closeOcr, ocrImage } from './tgOcr';
+import { aiLine, aiReadPost } from './tgAi';
 import { normalizeTeam } from '../utils/matchUtils';
 
 export const TG_EVERY_MS = 10 * 60_000, TG_NIGHT_MS = 60 * 60_000;
@@ -65,7 +66,13 @@ const gameOk = (chGame: string, p: TgParsed) => chGame === 'both' || !('match' i
 type PagePost = { id: number; at: string; text: string; photos: string[] };
 
 /** The caption + what OCR read on its screenshots (up to 2) — what the parser sees. */
-async function readPost(post: PagePost): Promise<{ ocr: string; full: string }> {
+async function readPost(post: PagePost): Promise<{ ocr: string; full: string; ai?: boolean }> {
+  // the model first (when GEMINI_API_KEY is set): it tells a tip from news and reads the slip; its answer becomes a plain tip line
+  const ai = await aiReadPost(post.text, post.photos);
+  if (ai) {
+    const line = aiLine(ai);
+    return { ocr: `ШІ: ${line ? line.replace(/\n/g, ' · ') : 'не прогноз'}`, full: line, ai: true };
+  }
   const parts: string[] = [];
   for (const url of post.photos.slice(0, 2)) { const t = await ocrImage(url); if (t) parts.push(t); }
   const ocr = parts.join('\n\n');
@@ -123,12 +130,14 @@ export async function collectChannel(handle: string, cands?: TgCandidate[]): Pro
   // posts saved by an older reader (photos IS NULL): read again — own text (not a reply's quote), screenshots
   const older = page.posts.filter((p) => p.id <= ch.last_post_id);
   const unread = older.length ? new Set((await pool.query<{ post_id: number }>('SELECT post_id FROM tg_posts WHERE handle = $1 AND photos IS NULL AND post_id = ANY($2::int[])', [handle, older.map((p) => p.id)])).rows.map((r) => r.post_id)) : new Set<number>();
-  const todo = [...fresh, ...older.filter((p) => unread.has(p.id))].sort((a, b) => a.id - b.id);
+  // re-reading is spread over passes (8 posts a pass, newest first) so a pass stays short
+  const again = older.filter((p) => unread.has(p.id)).sort((a, b) => b.id - a.id).slice(0, 8);
+  const todo = [...fresh, ...again].sort((a, b) => a.id - b.id);
   const oldest = todo.reduce((a, p) => (a && a < p.at ? a : p.at), '');
   const list = cands && !unread.size ? cands : await tgCandidates(oldest || undefined);
   for (const post of todo) {
-    const { ocr, full } = await readPost(post);
-    let parsed = parseTgPost(full, post.at, list, ch.rules || {});
+    const { ocr, full, ai } = await readPost(post);
+    let parsed = ai && !full ? { kind: 'other' as const } : parseTgPost(full, post.at, list, ch.rules || {});
     if (!gameOk(ch.game, parsed)) parsed = { kind: 'other' };
     parsed = await repeatOf(handle, post, parsed);
     await savePost(handle, post, ocr, parsed, post.id <= ch.last_post_id);
@@ -220,14 +229,9 @@ export async function previewChannel(link: string) {
   try { page = await fetchChannelPage(handle); } catch (e) { return { ok: false as const, error: (e as Error).message }; }
   if (!page.isPublic) return { ok: false as const, error: 'Канал не знайдено або він приватний' };
   const cands = await tgCandidates();
-  // screenshots of the last 5 posts are read too (OCR ~1 s each), the rest by caption only
+  // the preview reads captions only (a screenshot takes seconds) — screenshots are read once the channel is added
   const parsed: TgParsed[] = [];
-  const recent = new Set(page.posts.slice(-5).map((p) => p.id));
-  for (const p of page.posts) {
-    if (!p.text && !p.photos.length) continue;
-    parsed.push(parseTgPost(recent.has(p.id) && p.photos.length ? (await readPost(p)).full : p.text, p.at, cands));
-  }
-  await closeOcr();
+  for (const p of page.posts) { if (p.text) parsed.push(parseTgPost(p.text, p.at, cands)); }
   const exists = (await pool.query('SELECT 1 FROM tg_channels WHERE handle = $1', [handle])).rowCount! > 0;
   return { ok: true as const, handle, title: page.title, subscribers: page.subscribers, posts: page.posts.length, tipLike: parsed.filter((p) => p.kind !== 'other').length, recognized: parsed.filter((p) => p.kind === 'bet').length, exists };
 }
