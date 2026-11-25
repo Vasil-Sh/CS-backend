@@ -89,7 +89,7 @@ tg.get('/admin/tg-sources/:handle/posts', requireAuth, requireAdmin, async (c) =
 /** GET /api/admin/tg-posts/unrecognized — posts that look like tips but were not understood (not sorted yet, newest 100). */
 tg.get('/admin/tg-posts/unrecognized', requireAuth, requireAdmin, async (c) => {
   const { rows } = await pool.query(
-    `SELECT ${postCols.replace(/handle,/, 'p.handle,')}, ch.title FROM tg_posts p LEFT JOIN tg_channels ch ON ch.handle = p.handle
+    `SELECT ${postCols.replace(/(^|, )(?!COALESCE)(\w+)/g, '$1p.$2').replace('COALESCE(photos', 'COALESCE(p.photos')}, ch.title FROM tg_posts p LEFT JOIN tg_channels ch ON ch.handle = p.handle
      WHERE p.kind = 'unknown' AND p.fixed_by IS NULL ORDER BY p.posted_at DESC LIMIT 100`);
   return c.json({ posts: rows });
 });

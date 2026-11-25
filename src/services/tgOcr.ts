@@ -35,14 +35,14 @@ export function ocrImage(url: string): Promise<string> {
       if (!res.ok) return '';
       const buf = Buffer.from(await res.arrayBuffer());
       if (!buf.length || buf.length > MAX_BYTES) return '';
-      const img = await prepare(buf);
+      const img = await prepare(buf), bw = await prepare(buf, true);
       const w = await getWorker();
-      // two passes: page layout (lines in order) + sparse text (small labels on coloured tickets: «3DMAX», «1.90»)
-      await w.setParameters({ tessedit_pageseg_mode: '3' });
-      const a = (await w.recognize(img)).data.text;
-      await w.setParameters({ tessedit_pageseg_mode: '11' });
-      const b = (await w.recognize(img)).data.text;
-      return mergeOcr(a, b);
+      // four passes: page layout, one uniform block (keeps «Карта 1: Переможець карти: X 1.58» on one line), sparse text (small labels: «3DMAX», «1.90»)
+      const passes: string[] = [];
+      for (const psm of ['3', '6', '11']) { await w.setParameters({ tessedit_pageseg_mode: psm }); passes.push((await w.recognize(img)).data.text); }
+      await w.setParameters({ tessedit_pageseg_mode: '6' });
+      passes.push((await w.recognize(bw)).data.text); // + black-and-white: faint grey labels
+      return passes.reduce((acc, x) => mergeOcr(acc, x));
     } catch (e) {
       console.warn('[tg] ocr:', (e as Error).message);
       return '';
@@ -53,15 +53,16 @@ export function ocrImage(url: string): Promise<string> {
   return p;
 }
 
-/** Channel screenshots are small (≈380 px wide on t.me/s): grey, contrast-stretched and scaled up to ≈1200 px so tesseract sees the small print. */
-async function prepare(buf: Buffer): Promise<Buffer> {
+/** Channel screenshots are small (≈380 px wide on t.me/s): grey, contrast-stretched and scaled up to ≈1900 px so tesseract sees the small print. */
+async function prepare(buf: Buffer, light = false): Promise<Buffer> {
   try {
     const sharp = (await import('sharp')).default;
     const meta = await sharp(buf).metadata();
     const w = meta.width || 0;
-    const k = w && w < 1100 ? Math.min(3, 1200 / w) : 1;
-    let img = sharp(buf).grayscale().normalize();
+    const k = w && w < 1800 ? Math.min(4, 1900 / w) : 1;
+    let img = sharp(buf).grayscale();
     if (k > 1.05) img = img.resize({ width: Math.round(w * k), kernel: 'lanczos3' });
+    img = light ? img.threshold(220) /* light-grey print → black: «Карта 1: Переможець карти» */ : img.clahe({ width: 96, height: 96, maxSlope: 3 }); // local contrast
     return await img.png().toBuffer();
   } catch { return buf; }
 }

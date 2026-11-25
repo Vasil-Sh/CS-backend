@@ -26,13 +26,20 @@ const P12 = re(String.raw`<B(п|w|p)\s?([12])(?![${L}]|[.,]\d)`);
 const MAP = re(String.raw`(?<![\d.,])[1-5]\s*-?(?:[ая]{1,2}|ша|га|тя|я|й)?\s*карт(?:а|у|е|і)(?![${L}])|<Bкарт(?:а|е|і|ы)\s*(?:#|№)?\s*[1-5](?![\d.,])|<Bmap\s*(?:#|№)?\s*[1-5](?![\d.,])`);
 // other sports in the same channels (football screenshots): not ours
 const NOT_ESPORTS = re(String.raw`<Bуефа|<Bфутбол|<Bfootball|<Bsoccer|<Bnba|<Bnhl|<Bтайм|<Bполовин|<Bhalf\s?time|<Btotal in time period|<Bтеніс|<Bтеннис|<Bхокей|<Bхоккей|<Bбаскетбол|<B(фк|fc)B>`);
-const WIN = re(String.raw`перемо[гж]|побед|<BwinB>|виграє|выиграет|забира|візьм|возьм|ставка на|ставлю на|<BберуB>`);
+const WIN = re(String.raw`перемо[гж]|побед|<BwinB>|<Bwinner|виграє|выиграет|забира|візьм|возьм|ставка на|ставлю на|<BберуB>`);
 
 /** Lowercase, emoji and punctuation out, spaces kept — for whole-word team lookups. */
 const words = (s: string) => ` ${s.toLowerCase().replace(/[^a-z0-9а-яіїєґё+\-.,@]+/gi, ' ').replace(/\s+/g, ' ').trim()} `;
 
+// OCR reads Latin capitals as Cyrillic look-alikes («ВВ Теат» for «BB Team»): a second look with them folded to Latin
+const LOOK: Record<string, string> = { а: 'a', в: 'b', е: 'e', к: 'k', м: 'm', н: 'h', о: 'o', р: 'p', с: 'c', т: 't', у: 'y', х: 'x', і: 'i', ј: 'j', ѕ: 's' };
+export const foldLatin = (s: string) => s.toLowerCase().replace(/[авекмнорстухіјѕ]/g, (c) => LOOK[c] || c);
+
 /** Where a team name appears in the text (word positions), [] if not. Short names (≤3) must be whole words. */
 function teamAt(text: string, names: string[]): number[] {
+  return [...new Set([...teamAt1(text, names), ...teamAt1(foldLatin(text), names)])].sort((x, y) => x - y); // same length: positions line up
+}
+function teamAt1(text: string, names: string[]): number[] {
   const w = words(text), compact = normalizeTeam(text), out: number[] = [];
   for (const n of names) {
     const nw = words(n).trim(), k = normalizeTeam(n);
@@ -43,6 +50,43 @@ function teamAt(text: string, names: string[]): number[] {
   }
   return out.sort((x, y) => x - y);
 }
+// a name token: letters/digits (Latin, or Cyrillic team names), not a score, odds or a word of the ticket
+const NAME_TOKEN = /^[\p{L}\d][\p{L}\d.'&!_-]*$/u;
+const STOP_TOKEN = /^(\d+[:.,]\d+|\d+|bo\d|матч\w*|ставк\w*|сума|сумма|коеф\w*|коэф\w*|id|карт\w*|map|переможець|победитель|winner|та|и|і|and)$/iu;
+const EVENT_TOKEN = /^(res|blast|esl|pgl|iem|cct|epl|betboom|pinnacle|thunderpick|fissure|dreamleague|major|qualifier|qualifiers|cup|league|season|showdown|series|open|closed|playoffs|europe|asia|america|na|eu|sa|cis|online|lan|\d+)$/i;
+function nameFrom(tokens: string[], fromEnd: boolean): string {
+  const seq = fromEnd ? [...tokens].reverse() : tokens, out: string[] = [];
+  for (const tk of seq) {
+    if (!NAME_TOKEN.test(tk) || STOP_TOKEN.test(tk)) break;
+    const latin = /[a-z]/i.test(out.join('')) || /[a-z]/i.test(tk), cyr = /[а-яіїєґё]/i.test(tk);
+    if (out.length && latin && cyr) break; // «BB Team ВВ СУМА» → «BB Team»
+    if (out.length && out[out.length - 1].toLowerCase() === tk.toLowerCase()) continue; // «OG OG vs …»
+    out.push(tk);
+    if (out.length === 3) break;
+  }
+  return (fromEnd ? out.reverse() : out).join(' ');
+}
+/** «A vs B» in the text or an hltv.org match link — the teams of a match we may not have in our feed. */
+export function teamsFromText(t: string): [string, string] | null {
+  // OCR glues «OG vs BB Team» into «OGvsBBTeam»
+  const unglued = t.replace(/([A-Za-z0-9])vs([A-Z][A-Za-z0-9]*)/g, (_m, a: string, b: string) => `${a} vs ${b.replace(/([A-Z])([A-Z][a-z])/g, '$1 $2')}`);
+  for (const line of unglued.split('\n')) {
+    const m = /(.*?)\s+(?:vs\.?|v\.?|против|проти)\s+(.*)/i.exec(line);
+    if (!m) continue;
+    const a = nameFrom(m[1].split(/\s+/).filter(Boolean), true), b = nameFrom(m[2].split(/\s+/).filter(Boolean), false);
+    if (a && b && a.toLowerCase() !== b.toLowerCase()) return [a, b];
+  }
+  const h = /hltv\.org\/matches\/\d+\/([a-z0-9-]+?)-vs-([a-z0-9-]+)/i.exec(t);
+  if (h) {
+    const b: string[] = [];
+    for (const tk of h[2].split('-')) { if (EVENT_TOKEN.test(tk) || b.length === 3) break; b.push(tk); }
+    const title = (x: string) => x.replace(/\b[a-z]/g, (c) => c.toUpperCase());
+    if (b.length) return [title(h[1].replace(/-/g, ' ')), title(b.join(' '))];
+  }
+  return null;
+}
+const slug = (s: string) => foldLatin(s).replace(/[^a-z0-9а-яіїєґё]+/g, '-').replace(/^-|-$/g, '');
+
 const num = (s: string) => Number(s.replace(',', '.').replace(/[−–]/, '-').replace(/\s/g, ''));
 
 export function parseTgPost(text: string, postedAt: string, cands: TgCandidate[], rules: TgRules = {}): TgParsed {
@@ -74,6 +118,16 @@ export function parseTgPost(text: string, postedAt: string, cands: TgCandidate[]
   const half = halves[0]?.c;
   if (!betLike) return { kind: 'other' };
   if (!match && NOT_ESPORTS.test(t)) return { kind: 'other' };
+  // not in our feed (an older match, a smaller league): the teams written in the post — settled later by names and date
+  if (!match) {
+    const tp = teamsFromText(t);
+    if (tp) {
+      const game = /dota|дот/i.test(t) ? 'dota2' : 'cs2';
+      const c: TgCandidate = { id: `tg:${(postedAt || '').slice(0, 10)}:${slug(tp[0])}:${slug(tp[1])}`, game, team1: tp[0], team2: tp[1], start: postedAt };
+      const i1 = teamAt(t, [c.team1]), i2 = teamAt(t, [c.team2]);
+      match = c; p1 = i1; p2 = i2;
+    }
+  }
   if (EXPRESS.test(t)) return { kind: 'unknown', reason: 'Експреси поки не рахуємо', match, odds };
   if (INDIVIDUAL.test(t)) return { kind: 'unknown', reason: 'Індивідуальні тотали поки не рахуємо', match, odds };
   const tot0 = TOTAL.test(t);

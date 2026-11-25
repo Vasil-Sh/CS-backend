@@ -12,6 +12,7 @@ import { resultFor } from './betHints';
 import { teamKey } from './matchFeed';
 import { isNight } from './nightMode';
 import { closeOcr, ocrImage } from './tgOcr';
+import { normalizeTeam } from '../utils/matchUtils';
 
 export const TG_EVERY_MS = 10 * 60_000, TG_NIGHT_MS = 60 * 60_000;
 const GAP_MS = 1500;
@@ -164,6 +165,24 @@ export async function settleTgTips(): Promise<number> {
     const res = resultFor({ id: '', team1: r.team1, team2: r.team2, selection: r.pick, betType: r.market, game: r.game, date: r.hdate }, { team1: r.h1, team2: r.h2, score1: r.s1, score2: r.s2, date: r.hdate, game: r.game });
     if (!res) continue;
     await pool.query('UPDATE tg_posts SET result = $3, score = $4 WHERE handle = $1 AND post_id = $2', [r.handle, r.post_id, res, `${r.s1}:${r.s2}`]);
+    n++;
+  }
+  // tips on matches we did not have (teams taken from the post): the finished match of these two teams within days of the post
+  const loose = await pool.query<{ handle: string; post_id: number; market: string; pick: string | null; team1: string; team2: string; game: string; day: string }>(
+    `SELECT handle, post_id, market, pick, team1, team2, game, to_char(posted_at AT TIME ZONE 'Europe/Kyiv', 'YYYY-MM-DD') AS day FROM tg_posts
+      WHERE kind = 'bet' AND result IS NULL AND match_id LIKE 'tg:%' AND posted_at > now() - interval '120 days' LIMIT 200`);
+  for (const r of loose.rows) {
+    const k1 = normalizeTeam(r.team1), k2 = normalizeTeam(r.team2);
+    if (!k1 || !k2) continue;
+    const same = (a: string, b: string) => { const x = normalizeTeam(a); return !!x && (x === b || (b.length >= 4 && x.includes(b)) || (x.length >= 4 && b.includes(x))); };
+    const hs = await pool.query<{ team1: string; team2: string; score1: number | null; score2: number | null; date: string }>(
+      `SELECT team1, team2, score1, score2, to_char(date, 'YYYY-MM-DD') AS date FROM matches_history WHERE status = 'finished' AND date BETWEEN $1::date - 1 AND $1::date + 3 ORDER BY date`, [r.day]);
+    const h = hs.rows.find((x) => (same(x.team1, k1) && same(x.team2, k2)) || (same(x.team1, k2) && same(x.team2, k1)));
+    if (!h || !(h.score1 || h.score2)) continue;
+    const res = resultFor({ id: '', team1: r.team1, team2: r.team2, selection: r.pick, betType: r.market, game: r.game, date: h.date }, { team1: h.team1, team2: h.team2, score1: h.score1, score2: h.score2, date: h.date, game: r.game });
+    if (!res) continue;
+    const flip = same(h.team1, k2);
+    await pool.query('UPDATE tg_posts SET result = $3, score = $4 WHERE handle = $1 AND post_id = $2', [r.handle, r.post_id, res, flip ? `${h.score2}:${h.score1}` : `${h.score1}:${h.score2}`]);
     n++;
   }
   return n;

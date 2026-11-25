@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseTgPost, parseTgPage, type TgCandidate } from './tgPostParser';
+import { parseTgPost, parseTgPage, teamsFromText, type TgCandidate } from './tgPostParser';
 import { cleanOcr, mergeOcr } from './tgOcr';
 
 // What tesseract read on real bet screenshots (25.11), + the caption
@@ -47,4 +47,17 @@ describe('screenshots (OCR text)', () => {
     expect(cleanOcr('  Liquid \n\n| ~ \n x 2.418 = = ')).toBe('Liquid\nx 2.418 = =');
     expect(mergeOcr('NODWIN CLUTCH\n$100 — $190.00', 'NODWIN CLUTCH\n3DMAX\n1.90')).toBe('NODWIN CLUTCH\n$100 — $190.00\n3DMAX 1.90');
   });
+  it('a match we do not have: the teams written in the post', () => {
+    const p = parseTgPost('Спробую таку взяти\n📊 Тип прогнозу: Match Winner - magic\n💰 Коефіцієнт: 1.72\n🎯 Посилання на гру: https://www.hltv.org/matches/2395660/magic-vs-inner-circle-res-showdown-4-europe-blast-premier-rising-event', '2026-07-10T16:25:00Z', C);
+    expect(p).toMatchObject({ kind: 'bet', match: { id: 'tg:2026-07-10:magic:inner-circle', team1: 'Magic', team2: 'Inner Circle' }, market: 'Match Winner', pick: 'Magic', odds: 1.72 });
+  });
+  it('a ticket where OCR glued «OGvsBBTeam» and read «ВВ Team» in Cyrillic', () => {
+    const ocr = '$? Виграш\n2026-08-04\nOG OGvsBBTeam [3\n© ПЕРЕМОЖЕЦЬ МАТЧУ\nВВ Теат\nСУМА КОЕФЦИЕНТ\n25000 1.37\nBurpaw (© ПЕРЕМОЖЕЦЬ МАТЧУ ВВ Team #5000 1.37 ПРОФИТ ЗАГАЛЬНА СУМА';
+    expect(parseTgPost('взяв таку ставку на доту сьогодні\n' + ocr, '2026-08-04T14:05:00Z', [])).toMatchObject({ kind: 'bet', match: { team1: 'OG', team2: 'BB Team', game: 'dota2' }, market: 'Match Winner', pick: 'BB Team', odds: 1.37 });
+  });
+  it('teams from «A vs B» stop at scores and ticket words', () => {
+    expect(teamsFromText('Team OG vs Aurora Gaming 0:0 и!')).toEqual(['Team OG', 'Aurora Gaming']);
+    expect(teamsFromText('просто текст без матчу')).toBeNull();
+  });
 });
+
