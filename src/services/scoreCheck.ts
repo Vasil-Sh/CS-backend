@@ -123,14 +123,14 @@ export async function scoreIssues(): Promise<ScoreIssue[]> {
   return state.issues;
 }
 /** The admin chose the right score (or confirmed a closed match): the item leaves the list and is not raised again. */
-export async function resolveScoreIssue(kind: ScoreIssue['kind'], id: string): Promise<boolean> {
+export async function resolveScoreIssue(kind: ScoreIssue['kind'], id: string): Promise<ScoreIssue | null> {
   await load();
   const i = state.issues.findIndex((x) => x.id === id && x.kind === kind);
-  if (i < 0) return false;
-  state.issues.splice(i, 1);
+  if (i < 0) return null;
+  const [item] = state.issues.splice(i, 1);
   state.resolved[id] = Date.now();
   save();
-  return true;
+  return item;
 }
 export async function loadScoreCheck(): Promise<void> { await load(); }
 export function __resetScoreCheck(): void { state = { agreeAt: {}, issues: [], resolved: {} }; loaded = true; }

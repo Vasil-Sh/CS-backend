@@ -121,9 +121,10 @@ parsers.put('/admin/parsers/liquipedia/pages-mode', requireAuth, requireAdmin, a
 parsers.delete('/admin/score-issues/:kind/:id', requireAuth, requireAdmin, async (c) => {
   const kind = c.req.param('kind'), id = c.req.param('id') || '';
   if ((kind !== 'conflict' && kind !== 'closed') || !id || id.length > 300) return c.json({ error: 'Invalid issue' }, 400);
-  const ok = await resolveScoreIssue(kind, id);
-  audit(c.get('user'), 'DELETE', `/admin/score-issues/${kind}/${id}`, { kind, id });
-  return c.json({ success: ok });
+  const item = await resolveScoreIssue(kind, id);
+  // the audit reads «розв’язав розбіжність рахунку · HEROIC — M80», not the raw id
+  audit(c.get('user'), 'DELETE', `/admin/score-issues/${kind}/${id}`, { kind, id, ...(item ? { team1: item.team1, team2: item.team2 } : {}) });
+  return c.json({ success: !!item });
 });
 
 /** POST /api/admin/parsers/:name/rerun — reset the breaker so the next fetch retries. */
