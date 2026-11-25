@@ -29,7 +29,8 @@ describe('parseTgPost', () => {
     expect(parseTgPost('Liquid vs Heroic кф 1.85 💰', at, C, { oddsOnly: 'p1' })).toMatchObject({ kind: 'bet', pick: 'Team Liquid' });
   });
   it('one team only → «немає суперника»; express / individual totals → not counted yet', () => {
-    expect(parseTgPost('NAVI сьогодні забирають 🔥 1.6', at, C)).toMatchObject({ kind: 'unknown', reason: 'Матч не знайдено — немає суперника' });
+    expect(parseTgPost('G2 сьогодні забирають 🔥 1.6', at, C)).toMatchObject({ kind: 'unknown', reason: 'Матч не знайдено — немає суперника' }); // G2 has two matches that day
+    expect(parseTgPost('NAVI сьогодні забирають 🔥 1.6', at, C)).toMatchObject({ kind: 'bet', match: { id: 'lp-1' }, pick: 'Natus Vincere' }); // its only match
     expect(parseTgPost('Экспресс: NAVI + Spirit @3.1', at, C)).toMatchObject({ kind: 'unknown', reason: 'Експреси поки не рахуємо' });
     expect(parseTgPost('Liquid vs Heroic ИТБ1 1.5 @1.9', at, C)).toMatchObject({ kind: 'unknown', reason: 'Індивідуальні тотали поки не рахуємо' });
   });
@@ -52,6 +53,6 @@ describe('parseTgPage', () => {
     const p = parseTgPage(html);
     expect(p.title).toBe('BetZone & CS2');
     expect(p.subscribers).toBe(12400);
-    expect(p.posts).toEqual([{ id: 101, at: '2026-11-25T15:10:00.000Z', text: 'NAVI vs G2\nП1 @1.72' }, { id: 102, at: '2026-11-25T16:00:00.000Z', text: '' }]);
+    expect(p.posts).toEqual([{ id: 101, at: '2026-11-25T15:10:00.000Z', text: 'NAVI vs G2\nП1 @1.72', photos: [] }, { id: 102, at: '2026-11-25T16:00:00.000Z', text: '', photos: [] }]);
   });
 });

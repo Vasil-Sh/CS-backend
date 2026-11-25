@@ -16,12 +16,16 @@ export type TgParsed =
 const L = 'a-zа-яіїєґё0-9';
 const re = (src: string) => new RegExp(src.replace(/<B/g, `(?<![${L}])`).replace(/B>/g, `(?![${L}])`), 'iu');
 const ODDS = re(String.raw`(?:@|<Bкф\.?|<Bкоэф\.?|<Bкоеф\.?|<Bкэф|<Bкоэффициент|<Bкоефіцієнт|<Bodds|<Bk\.?)\s*:?\s*(\d{1,2}[.,]\d{1,3})`);
-const BARE_ODDS = /(?:^|\s)([1-9][.,]\d{1,2})(?=\s|$|[^\d])/;
+const BARE_ODDS = /(?:^|\s)([1-9][.,]\d{1,3})(?=\s|$|[^\d])/;
 const EXPRESS = re(String.raw`экспресс|експрес|<BexpressB>|<BparlayB>`);
 const INDIVIDUAL = re(String.raw`<B[иі]т[бм]|індивідуальн|индивидуальн`);
 const TOTAL = re(String.raw`(?:<B(тб|тм|tb|tm)B>|<Bтотал\s*(больше|більше|меньше|менше|over|under)|<B(over|under)B>)\s*\(?\s*(\d+[.,]5)`);
 const HCP = re(String.raw`(?:<Bф(?:ора)?|<Bhandicap|<Bhcp)\s*(?:([12])|([^\d+\-−–@\n]{0,30}?))\s*\(?\s*([+\-−–]\s?\d+[.,]5)`);
 const P12 = re(String.raw`<B(п|w|p)\s?([12])(?![${L}]|[.,]\d)`);
+// «1 карта», «1-ая карта», «на 2карту», «Карта 2:», «карте #2», «map 2» — a bet on one map, not the series
+const MAP = re(String.raw`(?<![\d.,])[1-5]\s*-?(?:[ая]{1,2}|ша|га|тя|я|й)?\s*карт(?:а|у|е|і)(?![${L}])|<Bкарт(?:а|е|і|ы)\s*(?:#|№)?\s*[1-5](?![\d.,])|<Bmap\s*(?:#|№)?\s*[1-5](?![\d.,])`);
+// other sports in the same channels (football screenshots): not ours
+const NOT_ESPORTS = re(String.raw`<Bуефа|<Bфутбол|<Bfootball|<Bsoccer|<Bnba|<Bnhl|<Bтайм|<Bполовин|<Bhalf\s?time|<Btotal in time period|<Bтеніс|<Bтеннис|<Bхокей|<Bхоккей|<Bбаскетбол|<B(фк|fc)B>`);
 const WIN = re(String.raw`перемо[гж]|побед|<BwinB>|виграє|выиграет|забира|візьм|возьм|ставка на|ставлю на|<BберуB>`);
 
 /** Lowercase, emoji and punctuation out, spaces kept — for whole-word team lookups. */
@@ -52,17 +56,28 @@ export function parseTgPost(text: string, postedAt: string, cands: TgCandidate[]
 
   // the match: both teams of a feed match in the post, the start no earlier than a day before the post
   const at = Date.parse(postedAt);
-  let match: TgCandidate | undefined, p1: number[] = [], p2: number[] = [], half: TgCandidate | undefined;
+  let match: TgCandidate | undefined, p1: number[] = [], p2: number[] = [];
+  const halves: { c: TgCandidate; side: 1 | 2; pos: number[] }[] = [];
   for (const c of cands) {
     const st = Date.parse(c.start);
     if (Number.isFinite(st) && Number.isFinite(at) && (st < at - 6 * 3600_000 || st > at + 4 * 86_400_000)) continue;
     const i1 = teamAt(t, [c.team1, ...(c.aliases1 || [])]), i2 = teamAt(t, [c.team2, ...(c.aliases2 || [])]);
     if (i1.length && i2.length) { if (!match || Math.abs(st - at) < Math.abs(Date.parse(match.start) - at)) { match = c; p1 = i1; p2 = i2; } }
-    else if ((i1.length || i2.length) && !half) half = c;
+    else if (i1.length || i2.length) halves.push({ c, side: i1.length ? 1 : 2, pos: i1.length ? i1 : i2 });
   }
+  // one team only (a screenshot of a single pick): its match around the time of the post, if there is exactly one
+  if (!match && halves.length) {
+    const near = halves.filter((h) => { const st = Date.parse(h.c.start); return !Number.isFinite(st) || !Number.isFinite(at) || (st >= at - 5 * 3600_000 && st <= at + 18 * 3600_000); });
+    const ids = new Set(near.map((h) => h.c.id));
+    if (ids.size === 1) { const h = near[0]; match = h.c; if (h.side === 1) p1 = h.pos; else p2 = h.pos; }
+  }
+  const half = halves[0]?.c;
   if (!betLike) return { kind: 'other' };
+  if (!match && NOT_ESPORTS.test(t)) return { kind: 'other' };
   if (EXPRESS.test(t)) return { kind: 'unknown', reason: 'Експреси поки не рахуємо', match, odds };
   if (INDIVIDUAL.test(t)) return { kind: 'unknown', reason: 'Індивідуальні тотали поки не рахуємо', match, odds };
+  const tot0 = TOTAL.test(t);
+  if (!tot0 && MAP.test(t)) return { kind: 'unknown', reason: 'Ставки на окрему карту поки не рахуємо', match: match || half, odds };
   if (!match) return { kind: 'unknown', reason: half ? 'Матч не знайдено — немає суперника' : 'Матч не знайдено', match: half, odds };
 
   const tot = TOTAL.exec(t);
@@ -102,7 +117,7 @@ export function parseTgPost(text: string, postedAt: string, cands: TgCandidate[]
 }
 
 /** Text of a t.me/s/<handle> page: channel info and its last ~20 posts (newest last). */
-export interface TgPage { title: string | null; subscribers: number | null; posts: { id: number; at: string; text: string }[]; isPublic: boolean }
+export interface TgPage { title: string | null; subscribers: number | null; posts: { id: number; at: string; text: string; photos: string[] }[]; isPublic: boolean }
 const ENT: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", nbsp: ' ' };
 export function htmlText(h: string): string {
   return h.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '').replace(/&(#\d+|#x[0-9a-f]+|\w+);/gi, (m, e: string) =>
@@ -121,7 +136,10 @@ export function parseTgPage(html: string): TgPage {
     const tm = /<div class="tgme_widget_message_text[^"]*"[^>]*>([\s\S]*?)<\/div>/.exec(block);
     const dt = /<time[^>]+datetime="([^"]+)"/.exec(block);
     if (!dt) continue;
-    posts.push({ id: Number(m[1]), at: new Date(dt[1]).toISOString(), text: tm ? htmlText(tm[1]) : '' });
+    // photos (single or an album): <a class="tgme_widget_message_photo_wrap …" style="…background-image:url('…')">
+    const photos: string[] = [];
+    for (const ph of block.matchAll(/class="tgme_widget_message_photo_wrap[^"]*"[^>]*?style="[^"]*background-image:url\('([^']+)'\)/g)) if (!photos.includes(ph[1])) photos.push(ph[1]);
+    posts.push({ id: Number(m[1]), at: new Date(dt[1]).toISOString(), text: tm ? htmlText(tm[1]) : '', photos: photos.slice(0, 4) });
   }
   return { title: title ? htmlText(title) : null, subscribers, posts, isPublic: /tgme_channel_info|tgme_widget_message/.test(html) };
 }

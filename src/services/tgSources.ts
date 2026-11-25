@@ -11,6 +11,7 @@ import { parseTgPage, parseTgPost, type TgCandidate, type TgParsed, type TgRules
 import { resultFor } from './betHints';
 import { teamKey } from './matchFeed';
 import { isNight } from './nightMode';
+import { closeOcr, ocrImage } from './tgOcr';
 
 export const TG_EVERY_MS = 10 * 60_000, TG_NIGHT_MS = 60 * 60_000;
 const GAP_MS = 1500;
@@ -59,13 +60,35 @@ export async function tgCandidates(): Promise<TgCandidate[]> {
 
 const gameOk = (chGame: string, p: TgParsed) => chGame === 'both' || !('match' in p) || !p.match || p.match.game === chGame;
 
-async function savePost(handle: string, post: { id: number; at: string; text: string }, p: TgParsed): Promise<void> {
+type PagePost = { id: number; at: string; text: string; photos: string[] };
+
+/** The caption + what OCR read on its screenshots (up to 2) — what the parser sees. */
+async function readPost(post: PagePost): Promise<{ ocr: string; full: string }> {
+  const parts: string[] = [];
+  for (const url of post.photos.slice(0, 2)) { const t = await ocrImage(url); if (t) parts.push(t); }
+  const ocr = parts.join('\n\n');
+  return { ocr, full: [post.text, ocr].filter(Boolean).join('\n') };
+}
+
+/** New post → insert; a post saved before we read screenshots (photos IS NULL) → photos + OCR, re-parsed unless an admin sorted it. */
+async function savePost(handle: string, post: PagePost, ocr: string, p: TgParsed, backfill = false): Promise<void> {
   const m = 'match' in p ? p.match : undefined;
+  const vals = [handle, post.id, post.at, post.text.slice(0, 4000), p.kind, p.kind === 'unknown' ? p.reason : null, m?.game ?? null, m?.id ?? null, m?.team1 ?? null, m?.team2 ?? null,
+    p.kind === 'bet' ? p.market : null, p.kind === 'bet' ? p.pick : null, p.kind === 'other' ? null : (p.odds ?? null), post.photos, ocr || null];
   await pool.query(
-    `INSERT INTO tg_posts(handle, post_id, posted_at, text, kind, reason, game, match_id, team1, team2, market, pick, odds)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (handle, post_id) DO NOTHING`,
-    [handle, post.id, post.at, post.text.slice(0, 4000), p.kind, p.kind === 'unknown' ? p.reason : null, m?.game ?? null, m?.id ?? null, m?.team1 ?? null, m?.team2 ?? null,
-      p.kind === 'bet' ? p.market : null, p.kind === 'bet' ? p.pick : null, p.kind === 'other' ? null : (p.odds ?? null)],
+    `INSERT INTO tg_posts(handle, post_id, posted_at, text, kind, reason, game, match_id, team1, team2, market, pick, odds, photos, ocr)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+     ON CONFLICT (handle, post_id) DO ${backfill ? `UPDATE SET photos = EXCLUDED.photos, ocr = EXCLUDED.ocr,
+       kind = CASE WHEN tg_posts.fixed_by IS NULL THEN EXCLUDED.kind ELSE tg_posts.kind END,
+       reason = CASE WHEN tg_posts.fixed_by IS NULL THEN EXCLUDED.reason ELSE tg_posts.reason END,
+       game = CASE WHEN tg_posts.fixed_by IS NULL THEN EXCLUDED.game ELSE tg_posts.game END,
+       match_id = CASE WHEN tg_posts.fixed_by IS NULL THEN EXCLUDED.match_id ELSE tg_posts.match_id END,
+       team1 = CASE WHEN tg_posts.fixed_by IS NULL THEN EXCLUDED.team1 ELSE tg_posts.team1 END,
+       team2 = CASE WHEN tg_posts.fixed_by IS NULL THEN EXCLUDED.team2 ELSE tg_posts.team2 END,
+       market = CASE WHEN tg_posts.fixed_by IS NULL THEN EXCLUDED.market ELSE tg_posts.market END,
+       pick = CASE WHEN tg_posts.fixed_by IS NULL THEN EXCLUDED.pick ELSE tg_posts.pick END,
+       odds = CASE WHEN tg_posts.fixed_by IS NULL THEN EXCLUDED.odds ELSE tg_posts.odds END` : 'NOTHING'}`,
+    vals,
   );
 }
 
@@ -80,11 +103,14 @@ export async function collectChannel(handle: string, cands?: TgCandidate[]): Pro
   }
   if (!page.isPublic) { await pool.query(`UPDATE tg_channels SET checked_at = now(), error = 'Канал не знайдено або він приватний' WHERE handle = $1`, [handle]); return 0; }
   const list = cands || await tgCandidates();
-  const fresh = page.posts.filter((p) => p.id > ch.last_post_id && p.text);
-  for (const post of fresh) {
-    let parsed = parseTgPost(post.text, post.at, list, ch.rules || {});
+  const fresh = page.posts.filter((p) => p.id > ch.last_post_id && (p.text || p.photos.length));
+  const older = page.posts.filter((p) => p.id <= ch.last_post_id && p.photos.length);
+  const unread = older.length ? new Set((await pool.query<{ post_id: number }>('SELECT post_id FROM tg_posts WHERE handle = $1 AND photos IS NULL AND post_id = ANY($2::int[])', [handle, older.map((p) => p.id)])).rows.map((r) => r.post_id)) : new Set<number>();
+  for (const post of [...fresh, ...older.filter((p) => unread.has(p.id))]) {
+    const { ocr, full } = await readPost(post);
+    let parsed = parseTgPost(full, post.at, list, ch.rules || {});
     if (!gameOk(ch.game, parsed)) parsed = { kind: 'other' };
-    await savePost(handle, post, parsed);
+    await savePost(handle, post, ocr, parsed, post.id <= ch.last_post_id);
   }
   const last = page.posts.reduce((a, p) => (p.id > a.id ? p : a), { id: ch.last_post_id, at: '' } as { id: number; at: string });
   await pool.query(
@@ -136,7 +162,7 @@ export async function tgCycle(): Promise<void> {
     const cands = rows.length ? await tgCandidates() : [];
     for (const r of rows) { await collectChannel(r.handle, cands).catch((e) => console.warn(`[tg] ${r.handle}:`, (e as Error).message)); await new Promise((ok) => setTimeout(ok, GAP_MS)); }
     await settleTgTips().catch(() => {});
-  } finally { running = false; }
+  } finally { running = false; await closeOcr(); }
 }
 
 let timer: ReturnType<typeof setTimeout> | null = null;
@@ -155,7 +181,14 @@ export async function previewChannel(link: string) {
   try { page = await fetchChannelPage(handle); } catch (e) { return { ok: false as const, error: (e as Error).message }; }
   if (!page.isPublic) return { ok: false as const, error: 'Канал не знайдено або він приватний' };
   const cands = await tgCandidates();
-  const parsed = page.posts.filter((p) => p.text).map((p) => parseTgPost(p.text, p.at, cands));
+  // screenshots of the last 5 posts are read too (OCR ~1 s each), the rest by caption only
+  const parsed: TgParsed[] = [];
+  const recent = new Set(page.posts.slice(-5).map((p) => p.id));
+  for (const p of page.posts) {
+    if (!p.text && !p.photos.length) continue;
+    parsed.push(parseTgPost(recent.has(p.id) && p.photos.length ? (await readPost(p)).full : p.text, p.at, cands));
+  }
+  await closeOcr();
   const exists = (await pool.query('SELECT 1 FROM tg_channels WHERE handle = $1', [handle])).rowCount! > 0;
   return { ok: true as const, handle, title: page.title, subscribers: page.subscribers, posts: page.posts.length, tipLike: parsed.filter((p) => p.kind !== 'other').length, recognized: parsed.filter((p) => p.kind === 'bet').length, exists };
 }
