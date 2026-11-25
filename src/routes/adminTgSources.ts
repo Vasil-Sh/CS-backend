@@ -16,13 +16,23 @@ const kyivDay = (t: number) => new Intl.DateTimeFormat('sv-SE', { timeZone: 'Eur
 
 /** GET /api/admin/tg-sources — channels with their week, totals, invites users added (not readable yet). */
 tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
-  const [chs, posts, groups] = await Promise.all([
+  const [chs, posts, groups, all] = await Promise.all([
     pool.query(`SELECT handle, title, subscribers, game, is_test AS "isTest", paused, added_by AS "addedBy", last_post_at AS "lastPostAt", checked_at AS "checkedAt", error, created_at AS "createdAt" FROM tg_channels ORDER BY created_at`),
     pool.query<{ handle: string; posted_at: string; kind: string; result: string | null; odds: string | null }>(
       `SELECT handle, posted_at, kind, result, odds FROM tg_posts WHERE posted_at > now() - interval '30 days'`),
     pool.query<{ name: string; link: string; status: string; username: string | null }>(
       `SELECT g.name, g.link, g.moderation_status AS status, u.username FROM telegram_groups g LEFT JOIN users u ON u.id = g.user_id WHERE g.link <> ''`),
+    // all time: what the channel posted and how its tips went (a tip = 100 on the odds; repeats are not counted)
+    pool.query<{ handle: string; total: string; tips: string; unknown: string; other: string; repeats: string; won: string; lost: string; pending: string; profit: string | null; priced: string; first_at: string | null }>(
+      `SELECT handle, count(*) AS total, count(*) FILTER (WHERE kind = 'bet') AS tips, count(*) FILTER (WHERE kind = 'unknown') AS unknown,
+              count(*) FILTER (WHERE kind = 'other' AND reason IS DISTINCT FROM 'Повтор') AS other, count(*) FILTER (WHERE reason = 'Повтор') AS repeats,
+              count(*) FILTER (WHERE kind = 'bet' AND result = 'Win') AS won, count(*) FILTER (WHERE kind = 'bet' AND result = 'Loss') AS lost,
+              count(*) FILTER (WHERE kind = 'bet' AND result IS NULL) AS pending,
+              sum(CASE WHEN kind = 'bet' AND result = 'Win' AND odds IS NOT NULL THEN (odds - 1) * 100 WHEN kind = 'bet' AND result = 'Loss' AND odds IS NOT NULL THEN -100 END) AS profit,
+              count(*) FILTER (WHERE kind = 'bet' AND result IS NOT NULL AND odds IS NOT NULL) AS priced, min(posted_at) AS first_at
+         FROM tg_posts GROUP BY handle`),
   ]);
+  const agg = new Map(all.rows.map((r) => [r.handle, r]));
   const now = Date.now(), days = Array.from({ length: 7 }, (_, i) => kyivDay(now - (6 - i) * DAY));
   const who = new Map<string, Set<string>>(), blocked = new Set<string>();
   const invites: { name: string; link: string; who: string[] }[] = [];
@@ -41,12 +51,18 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
     const priced = settled.filter((p) => p.odds != null);
     const profit = priced.reduce((a, p) => a + (p.result === 'Win' ? Number(p.odds) - 1 : -1), 0);
     const users = [...(who.get(ch.handle) || [])];
+    const a = agg.get(ch.handle), n = (x?: string | null) => Number(x || 0);
+    const tipsAll = n(a?.tips), unkAll = n(a?.unknown), wonAll = n(a?.won), lostAll = n(a?.lost), pricedAll = n(a?.priced), profitAll = Math.round(n(a?.profit));
     return {
       ...ch, status: blocked.has(ch.handle) ? 'block' : ch.paused ? 'stop' : ch.error ? 'err' : 'run',
       posts7d: wk.length, tips7d: tips, unknown7d: unk, recognized: tips + unk ? Math.round((tips / (tips + unk)) * 100) : null,
       settled: settled.length, wins, winrate: settled.length ? Math.round((wins / settled.length) * 100) : null,
       roi: priced.length ? Math.round((profit / priced.length) * 100) : null, pending: ps.filter((p) => p.kind === 'bet' && !p.result).length,
-      users, days: days.map((d) => wk.filter((p) => kyivDay(Date.parse(p.posted_at)) === d).length),
+      users,
+      all: { posts: n(a?.total), tips: tipsAll, unknown: unkAll, other: n(a?.other), repeats: n(a?.repeats), won: wonAll, lost: lostAll, pending: n(a?.pending),
+        recognized: tipsAll + unkAll ? Math.round((tipsAll / (tipsAll + unkAll)) * 100) : null, winrate: wonAll + lostAll ? Math.round((wonAll / (wonAll + lostAll)) * 100) : null,
+        profit: pricedAll ? profitAll : null, roi: pricedAll ? Math.round(profitAll / pricedAll) : null, firstAt: a?.first_at ?? null },
+      days: days.map((d) => wk.filter((p) => kyivDay(Date.parse(p.posted_at)) === d).length),
     };
   });
   const p24 = posts.rows.filter((p) => now - Date.parse(p.posted_at) < DAY);
@@ -56,7 +72,7 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
   return c.json({
     channels, invites, days,
     totals: { channels: channels.length, running: channels.filter((x) => x.status === 'run').length, posts24h: p24.length, tips24h: p24.filter((p) => p.kind === 'bet').length,
-      recognized: tips7 + unk7 ? Math.round((tips7 / (tips7 + unk7)) * 100) : null, unknown7d: unk7, settled30d: settled.length,
+      recognized: tips7 + unk7 ? Math.round((tips7 / (tips7 + unk7)) * 100) : null, unknown7d: unk7, queue: all.rows.reduce((x, r) => x + Number(r.unknown || 0), 0), settled30d: settled.length,
       winrate30d: settled.length ? Math.round((settled.filter((p) => p.result === 'Win').length / settled.length) * 100) : null, pending: posts.rows.filter((p) => p.kind === 'bet' && !p.result).length },
     night: isNight(), nextAt: tgNextAt.at ? new Date(tgNextAt.at).toISOString() : null,
   });
@@ -70,11 +86,11 @@ tg.get('/admin/tg-sources/:handle/posts', requireAuth, requireAdmin, async (c) =
   return c.json({ posts: rows });
 });
 
-/** GET /api/admin/tg-posts/unrecognized — posts that look like tips but were not understood (7 days). */
+/** GET /api/admin/tg-posts/unrecognized — posts that look like tips but were not understood (not sorted yet, newest 100). */
 tg.get('/admin/tg-posts/unrecognized', requireAuth, requireAdmin, async (c) => {
   const { rows } = await pool.query(
     `SELECT ${postCols.replace(/handle,/, 'p.handle,')}, ch.title FROM tg_posts p LEFT JOIN tg_channels ch ON ch.handle = p.handle
-     WHERE p.kind = 'unknown' AND p.posted_at > now() - interval '7 days' ORDER BY p.posted_at DESC LIMIT 100`);
+     WHERE p.kind = 'unknown' AND p.fixed_by IS NULL ORDER BY p.posted_at DESC LIMIT 100`);
   return c.json({ posts: rows });
 });
 

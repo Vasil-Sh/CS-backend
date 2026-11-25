@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { parseTgPost, parseTgPage, type TgCandidate } from './tgPostParser';
-import { cleanOcr } from './tgOcr';
+import { cleanOcr, mergeOcr } from './tgOcr';
 
 // What tesseract read on real bet screenshots (25.11), + the caption
 const at = '2026-11-25T08:13:00Z';
@@ -38,7 +38,13 @@ describe('screenshots (OCR text)', () => {
     const html = `<div class="tgme_widget_message" data-post="ch/7"><a class="tgme_widget_message_photo_wrap 1 2" href="x" style="width:800px;background-image:url('https://cdn4.telesco.pe/file/a.jpg')"></a><div class="tgme_widget_message_text js-message_text" dir="auto">Камбек</div><time datetime="2026-09-03T10:13:00+00:00"></time></div>`;
     expect(parseTgPage(html).posts[0]).toMatchObject({ id: 7, text: 'Камбек', photos: ['https://cdn4.telesco.pe/file/a.jpg'] });
   });
+  it('page: a reply keeps its own text, not the quote', () => {
+    const html = `<div class="tgme_widget_message" data-post="ch/204"><a class="tgme_widget_message_reply" href="https://t.me/ch/203"><div class="tgme_widget_message_text js-message_reply_text" dir="auto">Ще таку спробую взяти</div></a><div class="tgme_widget_message_text js-message_text before_footer" dir="auto">гг) там тіпи 2 в 5 програли</div><time datetime="2026-09-03T10:01:38+00:00"></time></div>
+<div class="tgme_widget_message" data-post="ch/209"><a class="tgme_widget_message_reply" href="https://t.me/ch/206"><div class="tgme_widget_message_text js-message_reply_text" dir="auto">Камбек</div></a><a class="tgme_widget_message_photo_wrap" style="width:380px;background-image:url('https://cdn4.telesco.pe/file/b.jpg')"></a><time datetime="2026-09-03T10:18:20+00:00"></time></div>`;
+    expect(parseTgPage(html).posts).toMatchObject([{ id: 204, text: 'гг) там тіпи 2 в 5 програли', photos: [] }, { id: 209, text: '', photos: ['https://cdn4.telesco.pe/file/b.jpg'] }]);
+  });
   it('OCR noise lines are dropped', () => {
     expect(cleanOcr('  Liquid \n\n| ~ \n x 2.418 = = ')).toBe('Liquid\nx 2.418 = =');
+    expect(mergeOcr('NODWIN CLUTCH\n$100 — $190.00', 'NODWIN CLUTCH\n3DMAX\n1.90')).toBe('NODWIN CLUTCH\n$100 — $190.00\n3DMAX 1.90');
   });
 });

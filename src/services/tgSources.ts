@@ -31,7 +31,8 @@ export async function fetchChannelPage(handle: string) {
 }
 
 /** Matches a post can be about: the feed caches (today and on) + finished ones of the last 3 days, with team aliases. */
-export async function tgCandidates(): Promise<TgCandidate[]> {
+/** Matches a post can be about: the feeds + the history (last 3 days, or from `since` when re-reading older posts). */
+export async function tgCandidates(since?: string): Promise<TgCandidate[]> {
   const al = await pool.query<{ game: string; canonical: string; alias: string }>('SELECT game, canonical, alias FROM team_aliases').catch(() => ({ rows: [] as { game: string; canonical: string; alias: string }[] }));
   const byKey = new Map<string, string[]>();
   for (const r of al.rows) { const k = `${r.game}:${teamKey(r.canonical)}`; (byKey.get(k) || byKey.set(k, []).get(k)!).push(r.alias); }
@@ -49,7 +50,7 @@ export async function tgCandidates(): Promise<TgCandidate[]> {
     } catch { /* a broken cache is skipped */ }
   }
   const hist = await pool.query<{ id: string; game: string; team1: string; team2: string; date: string }>(
-    `SELECT match_id AS id, game, team1, team2, to_char(date, 'YYYY-MM-DD') AS date FROM matches_history WHERE date >= CURRENT_DATE - 3`).catch(() => ({ rows: [] as { id: string; game: string; team1: string; team2: string; date: string }[] }));
+    `SELECT match_id AS id, game, team1, team2, to_char(date, 'YYYY-MM-DD') AS date FROM matches_history WHERE date >= LEAST(CURRENT_DATE - 3, COALESCE($1::date - 1, CURRENT_DATE - 3))`, [since ? since.slice(0, 10) : null]).catch(() => ({ rows: [] as { id: string; game: string; team1: string; team2: string; date: string }[] }));
   for (const m of hist.rows) {
     if (out.has(m.id)) continue;
     const game = m.game === 'dota2' ? 'dota2' : 'cs2';
@@ -70,15 +71,30 @@ async function readPost(post: PagePost): Promise<{ ocr: string; full: string }> 
   return { ocr, full: [post.text, ocr].filter(Boolean).join('\n') };
 }
 
+const norm = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+/** A channel often posts the same tip twice (a repost, a reply with the same ticket): the later one is «Повтор», so stats count it once. */
+async function repeatOf(handle: string, post: PagePost, p: TgParsed): Promise<TgParsed> {
+  const prev = await pool.query<{ post_id: number; text: string; kind: string; match_id: string | null; market: string | null; pick: string | null; reason: string | null }>(
+    `SELECT post_id, text, kind, match_id, market, pick, reason FROM tg_posts WHERE handle = $1 AND post_id < $2 AND posted_at > $3::timestamptz - interval '2 days' AND (reason IS DISTINCT FROM 'Повтор') ORDER BY post_id DESC LIMIT 30`,
+    [handle, post.id, post.at]);
+  const t = norm(post.text);
+  const same = prev.rows.find((r) => {
+    if (p.kind === 'bet') return r.kind === 'bet' && r.match_id === p.match.id && r.market === p.market && r.pick === p.pick;
+    if (p.kind === 'unknown' && p.match) return r.kind === 'unknown' && r.match_id === p.match.id && r.reason === p.reason;
+    return t.length >= 12 && norm(r.text) === t;
+  });
+  return same ? { kind: 'other', reason: 'Повтор', repeatOf: same.post_id } : p;
+}
+
 /** New post → insert; a post saved before we read screenshots (photos IS NULL) → photos + OCR, re-parsed unless an admin sorted it. */
 async function savePost(handle: string, post: PagePost, ocr: string, p: TgParsed, backfill = false): Promise<void> {
   const m = 'match' in p ? p.match : undefined;
-  const vals = [handle, post.id, post.at, post.text.slice(0, 4000), p.kind, p.kind === 'unknown' ? p.reason : null, m?.game ?? null, m?.id ?? null, m?.team1 ?? null, m?.team2 ?? null,
+  const vals = [handle, post.id, post.at, post.text.slice(0, 4000), p.kind, 'reason' in p ? p.reason ?? null : null, m?.game ?? null, m?.id ?? null, m?.team1 ?? null, m?.team2 ?? null,
     p.kind === 'bet' ? p.market : null, p.kind === 'bet' ? p.pick : null, p.kind === 'other' ? null : (p.odds ?? null), post.photos, ocr || null];
   await pool.query(
     `INSERT INTO tg_posts(handle, post_id, posted_at, text, kind, reason, game, match_id, team1, team2, market, pick, odds, photos, ocr)
      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-     ON CONFLICT (handle, post_id) DO ${backfill ? `UPDATE SET photos = EXCLUDED.photos, ocr = EXCLUDED.ocr,
+     ON CONFLICT (handle, post_id) DO ${backfill ? `UPDATE SET photos = EXCLUDED.photos, ocr = EXCLUDED.ocr, text = EXCLUDED.text,
        kind = CASE WHEN tg_posts.fixed_by IS NULL THEN EXCLUDED.kind ELSE tg_posts.kind END,
        reason = CASE WHEN tg_posts.fixed_by IS NULL THEN EXCLUDED.reason ELSE tg_posts.reason END,
        game = CASE WHEN tg_posts.fixed_by IS NULL THEN EXCLUDED.game ELSE tg_posts.game END,
@@ -102,14 +118,18 @@ export async function collectChannel(handle: string, cands?: TgCandidate[]): Pro
     return 0;
   }
   if (!page.isPublic) { await pool.query(`UPDATE tg_channels SET checked_at = now(), error = 'Канал не знайдено або він приватний' WHERE handle = $1`, [handle]); return 0; }
-  const list = cands || await tgCandidates();
   const fresh = page.posts.filter((p) => p.id > ch.last_post_id && (p.text || p.photos.length));
-  const older = page.posts.filter((p) => p.id <= ch.last_post_id && p.photos.length);
+  // posts saved by an older reader (photos IS NULL): read again — own text (not a reply's quote), screenshots
+  const older = page.posts.filter((p) => p.id <= ch.last_post_id);
   const unread = older.length ? new Set((await pool.query<{ post_id: number }>('SELECT post_id FROM tg_posts WHERE handle = $1 AND photos IS NULL AND post_id = ANY($2::int[])', [handle, older.map((p) => p.id)])).rows.map((r) => r.post_id)) : new Set<number>();
-  for (const post of [...fresh, ...older.filter((p) => unread.has(p.id))]) {
+  const todo = [...fresh, ...older.filter((p) => unread.has(p.id))].sort((a, b) => a.id - b.id);
+  const oldest = todo.reduce((a, p) => (a && a < p.at ? a : p.at), '');
+  const list = cands && !unread.size ? cands : await tgCandidates(oldest || undefined);
+  for (const post of todo) {
     const { ocr, full } = await readPost(post);
     let parsed = parseTgPost(full, post.at, list, ch.rules || {});
     if (!gameOk(ch.game, parsed)) parsed = { kind: 'other' };
+    parsed = await repeatOf(handle, post, parsed);
     await savePost(handle, post, ocr, parsed, post.id <= ch.last_post_id);
   }
   const last = page.posts.reduce((a, p) => (p.id > a.id ? p : a), { id: ch.last_post_id, at: '' } as { id: number; at: string });

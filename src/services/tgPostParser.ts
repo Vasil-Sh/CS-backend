@@ -8,7 +8,7 @@ import { normalizeTeam } from '../utils/matchUtils';
 export interface TgCandidate { id: string; game: 'cs2' | 'dota2'; team1: string; team2: string; start: string; aliases1?: string[]; aliases2?: string[] }
 export interface TgRules { oddsOnly?: 'p1' | 'p2' }
 export type TgParsed =
-  | { kind: 'other' }
+  | { kind: 'other'; reason?: string; repeatOf?: number }
   | { kind: 'unknown'; reason: string; match?: TgCandidate; odds?: number | null }
   | { kind: 'bet'; match: TgCandidate; market: string; pick: string; odds: number | null };
 
@@ -49,7 +49,7 @@ export function parseTgPost(text: string, postedAt: string, cands: TgCandidate[]
   const t = text.replace(/\u00a0/g, ' ');
   const oddsM = ODDS.exec(t) || null;
   let odds = oddsM ? num(oddsM[1]) : null;
-  const marketWords = TOTAL.test(t) || HCP.test(t) || P12.test(t) || WIN.test(t) || EXPRESS.test(t);
+  const marketWords = TOTAL.test(t) || HCP.test(t) || P12.test(t) || WIN.test(t) || EXPRESS.test(t) || MAP.test(t);
   if (odds == null && marketWords) { const b = BARE_ODDS.exec(t); if (b) odds = num(b[1]); }
   if (odds != null && (odds < 1.01 || odds > 50)) odds = null;
   const betLike = odds != null || marketWords;
@@ -133,7 +133,7 @@ export function parseTgPage(html: string): TgPage {
   let m: RegExpExecArray | null;
   while ((m = re.exec(html))) {
     const block = m[0];
-    const tm = /<div class="tgme_widget_message_text[^"]*"[^>]*>([\s\S]*?)<\/div>/.exec(block);
+    const tm = /<div class="tgme_widget_message_text[^"]*\bjs-message_text\b[^"]*"[^>]*>([\s\S]*?)<\/div>/.exec(block); // not the quote of a reply (js-message_reply_text)
     const dt = /<time[^>]+datetime="([^"]+)"/.exec(block);
     if (!dt) continue;
     // photos (single or an album): <a class="tgme_widget_message_photo_wrap …" style="…background-image:url('…')">
