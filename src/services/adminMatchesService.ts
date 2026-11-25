@@ -6,6 +6,7 @@
 import { randomUUID } from 'node:crypto';
 import { pool } from '../db/client';
 import type { TipsGgMatch } from './matchTypes';
+import { upsertMatchHistory } from './matchHistoryService';
 
 export type Game = 'cs2' | 'dota2';
 /** 'hidden' — «Видалити матч» for a feed match: it is dropped from the schedule (undo = delete the override). */
@@ -167,6 +168,21 @@ function rowToParserEvent(r: any): ParserEvent {
     message: r.message || '',
     createdAt: r.created_at ? new Date(r.created_at).toISOString() : '',
   };
+}
+
+/** The source has a final result of its own: finished with a score (a finished 0:0 is «no score yet»). */
+const hasResult = (m: TipsGgMatch) => m.status === 'finished' && m.score1 != null && m.score2 != null && (m.score1 > 0 || m.score2 > 0);
+/** Manual results already written to the history (id|score) — the overlay runs on every read. */
+const manualPersisted = new Set<string>();
+function persistManualResult(game: Game, m: TipsGgMatch): void {
+  const key = `${m.id}|${m.score1}:${m.score2}`;
+  if (manualPersisted.has(key)) return;
+  manualPersisted.add(key);
+  void upsertMatchHistory({
+    id: m.id, game, team1: String(m.nameTeam1), team2: String(m.nameTeam2), date: m.date,
+    score1: m.score1, score2: m.score2, status: 'finished', tournament: m.tournament || m.stage || '', matchType: m.type,
+    logoTeam1: m.logoTeam1, logoTeam2: m.logoTeam2,
+  }).catch(() => manualPersisted.delete(key));
 }
 
 export const adminMatchesService = {
@@ -446,11 +462,14 @@ export const adminMatchesService = {
         const o = overrideMap.get(matches[i].id);
         if (!o) continue;
         const m = { ...matches[i] };
-        if (o.status) (m as { status: string }).status = o.status;
-        if (o.score1 != null) m.score1 = o.score1;
-        if (o.score2 != null) m.score2 = o.score2;
+        // The admin's score is temporary: it stands while the source has no result, the source's own score replaces it
+        const sourceResult = hasResult(matches[i]);
+        if (o.status && !sourceResult) (m as { status: string }).status = o.status;
+        if (!sourceResult && o.score1 != null && o.score2 != null) { m.score1 = o.score1; m.score2 = o.score2; }
         if (o.startDate) { m.startDate = o.startDate; m.date = o.startDate.slice(0, 10); }
         matches[i] = m;
+        // a finished match closed by hand goes to the history too: bet hints and «Останні матчі» read it from there
+        if (!sourceResult && m.status === 'finished' && m.score1 != null && m.score2 != null && (m.score1 || m.score2)) persistManualResult(game, m);
       }
       // «Видалити матч»: hidden by an admin — out of the schedule (in place: callers keep their array)
       for (let i = matches.length - 1; i >= 0; i--) if (overrideMap.get(matches[i].id)?.status === 'hidden') matches.splice(i, 1);

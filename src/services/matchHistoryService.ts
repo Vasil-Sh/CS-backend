@@ -7,6 +7,8 @@ import { eq, and, gte, desc } from 'drizzle-orm';
  * Uses ON CONFLICT (match_id) to avoid duplicates.
  */
 export async function upsertMatchHistory(match: NewMatchHistory): Promise<void> {
+  // A finished 0:0 is «no score yet»: it never wipes a score already known (an admin's temporary result included)
+  const noScore = !match.score1 && !match.score2;
   try {
     await db
       .insert(matchesHistory)
@@ -14,8 +16,7 @@ export async function upsertMatchHistory(match: NewMatchHistory): Promise<void> 
       .onConflictDoUpdate({
         target: matchesHistory.id,
         set: {
-          score1: match.score1 ?? 0,
-          score2: match.score2 ?? 0,
+          ...(noScore ? {} : { score1: match.score1 ?? 0, score2: match.score2 ?? 0 }),
           status: match.status ?? 'finished',
           tournament: match.tournament ?? '',
           matchType: match.matchType ?? '',
