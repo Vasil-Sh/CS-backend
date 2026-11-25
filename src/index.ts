@@ -46,6 +46,8 @@ import adminOperationsRoutes from './routes/adminOperations';
 import adminParsersRoutes from './routes/adminParsers';
 import adminAdsRoutes from './routes/adminAds';
 import adminTelegramGroupsRoutes from './routes/adminTelegramGroups';
+import adminTgSourcesRoutes from './routes/adminTgSources';
+import { startTgSources } from './services/tgSources';
 import adminSupportRoutes from './routes/adminSupport';
 import adminSubscriptionsRoutes from './routes/adminSubscriptions';
 import adminMatchesRoutes from './routes/adminMatches';
@@ -234,6 +236,7 @@ v1.route('', adminOperationsRoutes);
 v1.route('', adminParsersRoutes);
 v1.route('', adminAdsRoutes);
 v1.route('', adminTelegramGroupsRoutes);
+v1.route('', adminTgSourcesRoutes);
 v1.route('', adminSupportRoutes);
 v1.route('', adminSubscriptionsRoutes);
 v1.route('', adminMatchesRoutes);
@@ -673,6 +676,9 @@ setTimeout(() => {
     startIncrementalRefresh('cs2', join(process.cwd(), '.cache', 'cs2_matches.json'), 'cs2');
   }, 5_000);
 }, 5_000);
+
+// «Telegram-джерела»: public channels read every 10 min (hourly at night)
+startTgSources();
 
 // ── Periodic full refresh: re-scrape 8-day window every hour ──
 // Catches new matches for future days that the 120s incremental refresh

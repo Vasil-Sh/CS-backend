@@ -1,0 +1,161 @@
+/**
+ * «Telegram-джерела»: public t.me channels we read without an account (t.me/s/<handle> — the web preview, ~20 newest posts),
+ * every post parsed into a tip against our own match feed, tips settled by the series score from matches_history.
+ * Channels: the public links users added to «Telegram-групи» + the ones an admin adds for a test. Invites (t.me/+…) are skipped.
+ */
+import { readFileSync, existsSync } from 'fs';
+import { join } from 'path';
+import { pool } from '../db/client';
+import { cleanHandle, validHandle } from './telegramAvatar';
+import { parseTgPage, parseTgPost, type TgCandidate, type TgParsed, type TgRules } from './tgPostParser';
+import { resultFor } from './betHints';
+import { teamKey } from './matchFeed';
+import { isNight } from './nightMode';
+
+export const TG_EVERY_MS = 10 * 60_000, TG_NIGHT_MS = 60 * 60_000;
+const GAP_MS = 1500;
+
+/** «t.me/kiberprognoz_ua», «@kiberprognoz_ua» → handle; invites and junk → null. */
+export function publicHandle(link: string | null | undefined): string | null {
+  const raw = String(link || '').trim();
+  if (!raw || /t\.me\/(\+|joinchat)/i.test(raw) || raw.startsWith('+')) return null;
+  const h = cleanHandle(raw.replace(/^(https?:\/\/)?(www\.)?(t|telegram)\.me\/(s\/)?/i, '')).toLowerCase();
+  return validHandle(h) ? h : null;
+}
+
+export async function fetchChannelPage(handle: string) {
+  const res = await fetch(`https://t.me/s/${handle}`, { headers: { 'user-agent': 'Mozilla/5.0 (compatible; MatchIQ/1.0)', 'accept-language': 'en' }, signal: AbortSignal.timeout(10_000), redirect: 'follow' });
+  if (!res.ok) throw new Error(`t.me відповів ${res.status}`);
+  return parseTgPage(await res.text());
+}
+
+/** Matches a post can be about: the feed caches (today and on) + finished ones of the last 3 days, with team aliases. */
+export async function tgCandidates(): Promise<TgCandidate[]> {
+  const al = await pool.query<{ game: string; canonical: string; alias: string }>('SELECT game, canonical, alias FROM team_aliases').catch(() => ({ rows: [] as { game: string; canonical: string; alias: string }[] }));
+  const byKey = new Map<string, string[]>();
+  for (const r of al.rows) { const k = `${r.game}:${teamKey(r.canonical)}`; (byKey.get(k) || byKey.set(k, []).get(k)!).push(r.alias); }
+  const aliases = (g: string, n: string) => byKey.get(`${g}:${teamKey(n)}`) || [];
+  const out = new Map<string, TgCandidate>();
+  for (const game of ['cs2', 'dota2'] as const) {
+    const f = join(process.cwd(), '.cache', `${game}_matches.json`);
+    try {
+      if (!existsSync(f)) continue;
+      const data = JSON.parse(readFileSync(f, 'utf8')).data as { id: string; nameTeam1: string; nameTeam2: string; startDate?: string | null; date: string }[];
+      for (const m of data || []) {
+        if (!m?.id || !m.nameTeam1 || !m.nameTeam2) continue;
+        out.set(m.id, { id: String(m.id), game, team1: String(m.nameTeam1), team2: String(m.nameTeam2), start: m.startDate || `${m.date}T12:00:00Z`, aliases1: aliases(game, String(m.nameTeam1)), aliases2: aliases(game, String(m.nameTeam2)) });
+      }
+    } catch { /* a broken cache is skipped */ }
+  }
+  const hist = await pool.query<{ id: string; game: string; team1: string; team2: string; date: string }>(
+    `SELECT match_id AS id, game, team1, team2, to_char(date, 'YYYY-MM-DD') AS date FROM matches_history WHERE date >= CURRENT_DATE - 3`).catch(() => ({ rows: [] as { id: string; game: string; team1: string; team2: string; date: string }[] }));
+  for (const m of hist.rows) {
+    if (out.has(m.id)) continue;
+    const game = m.game === 'dota2' ? 'dota2' : 'cs2';
+    out.set(m.id, { id: m.id, game, team1: m.team1, team2: m.team2, start: `${m.date}T12:00:00Z`, aliases1: aliases(game, m.team1), aliases2: aliases(game, m.team2) });
+  }
+  return [...out.values()];
+}
+
+const gameOk = (chGame: string, p: TgParsed) => chGame === 'both' || !('match' in p) || !p.match || p.match.game === chGame;
+
+async function savePost(handle: string, post: { id: number; at: string; text: string }, p: TgParsed): Promise<void> {
+  const m = 'match' in p ? p.match : undefined;
+  await pool.query(
+    `INSERT INTO tg_posts(handle, post_id, posted_at, text, kind, reason, game, match_id, team1, team2, market, pick, odds)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (handle, post_id) DO NOTHING`,
+    [handle, post.id, post.at, post.text.slice(0, 4000), p.kind, p.kind === 'unknown' ? p.reason : null, m?.game ?? null, m?.id ?? null, m?.team1 ?? null, m?.team2 ?? null,
+      p.kind === 'bet' ? p.market : null, p.kind === 'bet' ? p.pick : null, p.kind === 'other' ? null : (p.odds ?? null)],
+  );
+}
+
+/** Read one channel now: new posts → parsed → saved. Returns how many posts were new. */
+export async function collectChannel(handle: string, cands?: TgCandidate[]): Promise<number> {
+  const ch = (await pool.query<{ last_post_id: number; game: string; rules: TgRules }>('SELECT last_post_id, game, rules FROM tg_channels WHERE handle = $1', [handle])).rows[0];
+  if (!ch) return 0;
+  let page;
+  try { page = await fetchChannelPage(handle); } catch (e) {
+    await pool.query('UPDATE tg_channels SET checked_at = now(), error = $2 WHERE handle = $1', [handle, (e as Error).message.slice(0, 300)]);
+    return 0;
+  }
+  if (!page.isPublic) { await pool.query(`UPDATE tg_channels SET checked_at = now(), error = 'Канал не знайдено або він приватний' WHERE handle = $1`, [handle]); return 0; }
+  const list = cands || await tgCandidates();
+  const fresh = page.posts.filter((p) => p.id > ch.last_post_id && p.text);
+  for (const post of fresh) {
+    let parsed = parseTgPost(post.text, post.at, list, ch.rules || {});
+    if (!gameOk(ch.game, parsed)) parsed = { kind: 'other' };
+    await savePost(handle, post, parsed);
+  }
+  const last = page.posts.reduce((a, p) => (p.id > a.id ? p : a), { id: ch.last_post_id, at: '' } as { id: number; at: string });
+  await pool.query(
+    `UPDATE tg_channels SET title = COALESCE($2, title), subscribers = COALESCE($3, subscribers), checked_at = now(), error = NULL,
+       last_post_id = GREATEST(last_post_id, $4), last_post_at = COALESCE($5::timestamptz, last_post_at) WHERE handle = $1`,
+    [handle, page.title, page.subscribers, last.id, last.at || null],
+  );
+  return fresh.length;
+}
+
+/** Public links users added to «Telegram-групи» become channels (not blocked ones). */
+export async function syncUserChannels(): Promise<void> {
+  const { rows } = await pool.query<{ link: string; game: string | null; username: string | null }>(
+    `SELECT g.link, g.game, u.username FROM telegram_groups g LEFT JOIN users u ON u.id = g.user_id WHERE g.moderation_status <> 'rejected' AND g.link <> ''`);
+  for (const r of rows) {
+    const h = publicHandle(r.link);
+    if (!h) continue;
+    await pool.query(`INSERT INTO tg_channels(handle, game, added_by) VALUES($1, 'both', $2) ON CONFLICT (handle) DO NOTHING`, [h, r.username ? `@${r.username}` : null]);
+  }
+}
+
+/** Pending tips whose match has a series score in the history → Win / Loss. */
+export async function settleTgTips(): Promise<number> {
+  const { rows } = await pool.query<{ handle: string; post_id: number; match_id: string; market: string; pick: string | null; team1: string; team2: string; game: string; posted_at: string;
+    s1: number | null; s2: number | null; h1: string; h2: string; hdate: string }>(
+    `SELECT p.handle, p.post_id, p.match_id, p.market, p.pick, p.team1, p.team2, p.game, p.posted_at, h.score1 AS s1, h.score2 AS s2, h.team1 AS h1, h.team2 AS h2, to_char(h.date, 'YYYY-MM-DD') AS hdate
+     FROM tg_posts p JOIN matches_history h ON h.match_id = p.match_id
+     WHERE p.kind = 'bet' AND p.result IS NULL AND h.status = 'finished'`);
+  let n = 0;
+  for (const r of rows) {
+    const res = resultFor({ id: '', team1: r.team1, team2: r.team2, selection: r.pick, betType: r.market, game: r.game, date: r.hdate }, { team1: r.h1, team2: r.h2, score1: r.s1, score2: r.s2, date: r.hdate, game: r.game });
+    if (!res) continue;
+    await pool.query('UPDATE tg_posts SET result = $3, score = $4 WHERE handle = $1 AND post_id = $2', [r.handle, r.post_id, res, `${r.s1}:${r.s2}`]);
+    n++;
+  }
+  return n;
+}
+
+let running = false;
+/** One pass: sync users' channels, read every channel that is not paused or blocked, settle tips. */
+export async function tgCycle(): Promise<void> {
+  if (running) return;
+  running = true;
+  try {
+    await syncUserChannels().catch(() => {});
+    const { rows } = await pool.query<{ handle: string }>(
+      `SELECT c.handle FROM tg_channels c WHERE NOT c.paused AND NOT EXISTS (
+         SELECT 1 FROM telegram_groups g WHERE g.moderation_status = 'rejected' AND lower(g.link) LIKE '%' || c.handle || '%') ORDER BY c.checked_at NULLS FIRST`);
+    const cands = rows.length ? await tgCandidates() : [];
+    for (const r of rows) { await collectChannel(r.handle, cands).catch((e) => console.warn(`[tg] ${r.handle}:`, (e as Error).message)); await new Promise((ok) => setTimeout(ok, GAP_MS)); }
+    await settleTgTips().catch(() => {});
+  } finally { running = false; }
+}
+
+let timer: ReturnType<typeof setTimeout> | null = null;
+export const tgNextAt = { at: 0 };
+export function startTgSources(): void {
+  const next = () => { const ms = isNight() ? TG_NIGHT_MS : TG_EVERY_MS; tgNextAt.at = Date.now() + ms; timer = setTimeout(run, ms); };
+  const run = () => { void tgCycle().catch((e) => console.warn('[tg] cycle:', (e as Error).message)).finally(next); };
+  if (!timer) { tgNextAt.at = Date.now() + 90_000; timer = setTimeout(run, 90_000); }
+}
+
+/** «Додати канал»: what the channel looks like before we start reading it. */
+export async function previewChannel(link: string) {
+  const handle = publicHandle(link);
+  if (!handle) return { ok: false as const, error: /\+|joinchat/.test(link) ? 'Це запрошення в приватну групу — поки збираємо лише публічні канали' : 'Не схоже на посилання t.me/… або @нікнейм' };
+  let page;
+  try { page = await fetchChannelPage(handle); } catch (e) { return { ok: false as const, error: (e as Error).message }; }
+  if (!page.isPublic) return { ok: false as const, error: 'Канал не знайдено або він приватний' };
+  const cands = await tgCandidates();
+  const parsed = page.posts.filter((p) => p.text).map((p) => parseTgPost(p.text, p.at, cands));
+  const exists = (await pool.query('SELECT 1 FROM tg_channels WHERE handle = $1', [handle])).rowCount! > 0;
+  return { ok: true as const, handle, title: page.title, subscribers: page.subscribers, posts: page.posts.length, tipLike: parsed.filter((p) => p.kind !== 'other').length, recognized: parsed.filter((p) => p.kind === 'bet').length, exists };
+}
