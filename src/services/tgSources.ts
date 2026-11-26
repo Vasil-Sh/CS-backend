@@ -179,6 +179,21 @@ async function repeatOf(handle: string, post: PagePost, p: TgParsed, slip?: Slip
   return { kind: 'other', reason: 'Повтор', repeatOf: same.post_id };
 }
 
+/** Tips read before OCR took the money (or by a reader that missed it): the stake from the OCR text already saved — no new read. */
+export async function moneyFromOcr(): Promise<number> {
+  const { rows } = await pool.query<{ handle: string; post_id: number; ocr: string }>(
+    `SELECT handle, post_id, ocr FROM tg_posts WHERE kind = 'bet' AND stake IS NULL AND ocr IS NOT NULL AND ocr ~* '(сумм?а ставки|ставка|stake)'
+      AND posted_at > now() - interval '14 days' LIMIT 50`);
+  let n = 0;
+  for (const r of rows) {
+    const s0 = slipFromOcr(r.ocr);
+    if (!s0 || !s0.currency) continue;
+    await applySlip(r.handle, r.post_id, { status: s0.status, stake: s0.stake, currency: s0.currency, payout: s0.status === 'pending' ? null : s0.payout }, true);
+    n++;
+  }
+  return n;
+}
+
 /** A settled slip without a tip in it: the channel's tip (≤ 3 days before) on the same teams or at the same odds gets its result and money. */
 async function resultSlip(handle: string, post: PagePost, tip: AiTip, slip: Slip, text = ''): Promise<TgParsed | null> {
   const { rows } = await pool.query<{ post_id: number; team1: string | null; team2: string | null; pick: string | null; odds: string | null }>(
@@ -453,6 +468,7 @@ export async function tgCycle(): Promise<void> {
     await syncUserChannels().catch(() => {});
     await pauseSilent().catch(() => 0);
     await loadReaderAccuracy();
+    await moneyFromOcr().catch(() => 0);
     // posts read by OCR while every reader rested (3 days back): read again by the AI now that one is back
     if (readerReady()) await pool.query(`UPDATE tg_posts SET photos = NULL WHERE (handle, post_id) IN (SELECT handle, post_id FROM tg_posts
         WHERE read_by = 'ocr' AND fixed_by IS NULL AND photos IS NOT NULL AND posted_at > now() - interval '3 days'
