@@ -15,7 +15,8 @@ import { feedMatches, placedLive, sameName, verifyTips, type FeedMatch, type Leg
 import { recordServerError } from './serverErrors';
 import { abbreviations } from '../utils/teamAbbrev';
 import { aiLine, aiReadBatch, aiReadPost, currencyCode, loadImages, readerReady, type AiRead, type AiTip } from './tgAi';
-import { channelExamples, countTemplate, fullTip, loadReaderAccuracy, sameTip, surelyNotTip, templateTrusted, type Template } from './tgLearn';
+import { slipBet } from './tgSlip';
+import { channelExamples, countTemplate, marketToAi, fullTip, loadReaderAccuracy, sameTip, surelyNotTip, templateTrusted, type Template } from './tgLearn';
 import { normalizeTeam } from '../utils/matchUtils';
 import { accountEnabled, fetchPrivatePage, inviteHash, inviteInfo, privateHandle, privateId } from './tgAccount';
 
@@ -77,7 +78,7 @@ type PagePost = { id: number; at: string; text: string; photos: string[]; poll?:
 export interface Slip { status: NonNullable<AiTip['status']>; stake: number | null; currency: string | null; payout: number | null }
 const STATUS_UA: Record<string, string> = { won: 'виграш', lost: 'програш', pending: 'очікується', cashout: 'продано', void: 'повернення' };
 
-type Read = { ocr: string; full: string; ai?: boolean; slip?: Slip | null; tip?: AiRead; readBy: 'ai' | 'rules' | 'template' | 'cache' | 'ocr'; hash?: string | null };
+type Read = { ocr: string; full: string; ai?: boolean; slip?: Slip | null; tip?: AiRead; readBy: 'ai' | 'rules' | 'template' | 'cache' | 'ocr' | 'slip' | 'caption'; hash?: string | null; parsed?: TgParsed };
 /** What one post says, the cheapest way that is still right:
  *  surely not a tip by plain rules → no request; a channel whose text template the parser knows → no request;
  *  the same screenshot read before → its answer; else the reader (with the channel's corrected examples) — or OCR when no reader answers. */
@@ -89,13 +90,33 @@ async function readPost(ctx: Ctx, post: PagePost): Promise<Read> {
     if (templateTrusted(ctx.ch.template) && fullTip(cap)) { saved.template++; return { ocr: 'Шаблон каналу: прочитано без ШІ', full: post.text, readBy: 'template' }; }
   }
   let hash: string | null = null, ai: AiRead | null = ctx.pre.get(post.id) ?? null, readBy: Read['readBy'] = 'ai';
+  let ocrText: string | null = null;
+  const ocrAll = async () => { if (ocrText == null) { const parts: string[] = []; for (const url of post.photos.slice(0, 2)) { const t = await ocrImage(url); if (t) parts.push(t); } ocrText = parts.join('\n\n'); } return ocrText; };
+  const ocrSlip = (t: string): Slip | null => { const s0 = slipFromOcr(t); return s0 ? { status: s0.status, stake: s0.stake, currency: s0.currency, payout: s0.status === 'pending' ? null : s0.payout } : null; };
   if (!ai) {
     const { imgs, hash: h } = post.photos.length ? await loadImages(post.photos) : { imgs: [], hash: null };
     hash = h;
     if (hash) {
       // the same slip posted again (here or in another channel): its answer, not a new request — unless the admin found it wrong
-      const hit = (await pool.query<{ ai_raw: AiTip }>(`SELECT ai_raw FROM tg_posts WHERE img_hash = $1 AND ai_raw IS NOT NULL AND NOT ai_wrong AND read_by = 'ai' ORDER BY posted_at DESC LIMIT 1`, [hash])).rows[0];
+      const hit = (await pool.query<{ ai_raw: AiTip }>(`SELECT ai_raw FROM tg_posts WHERE img_hash = $1 AND ai_raw IS NOT NULL AND NOT ai_wrong AND read_by IN ('ai', 'slip') ORDER BY posted_at DESC LIMIT 1`, [hash])).rows[0];
       if (hit) { ai = { ...hit.ai_raw, by: 'вже читали цей скрін' }; readBy = 'cache'; saved.cache++; }
+    }
+    if (!ai && post.photos.length) {
+      // the tip written in the caption, the screenshot only for the money: the caption parsed, the money by OCR — no request
+      const cap = parseTgPost(post.text, post.at, ctx.list, ctx.ch.rules || {});
+      if (fullTip(cap)) {
+        const t = await ocrAll(), slip = ocrSlip(t);
+        saved.caption++;
+        return { ocr: `Прогноз з підпису, гроші з OCR${slip?.stake ? `: ставка ${slip.stake}${slip.currency ? ` ${slip.currency}` : ''}` : ''}\n${t}`, full: post.text, slip, readBy: 'caption', hash };
+      }
+      // a bookmaker's slip OCR reads in full (teams, market, pick, odds): no request
+      const t = await ocrAll(), sb = slipBet(t, post.at, ctx.list);
+      if (sb) {
+        const slip = ocrSlip(t);
+        saved.slip++;
+        const tip: AiRead = { ...marketToAi(sb.market, sb.pick || null, sb.odds), team1: sb.match.team1, team2: sb.match.team2, status: slip?.status ?? null, stake: slip?.stake ?? null, currency: slip?.currency ?? null, payout: slip?.payout ?? null };
+        return { ocr: `Квиток прочитано OCR без ШІ: ${sb.market}${sb.pick ? ` · ${sb.pick}` : ''} @${sb.odds}${slip?.stake ? ` · ставка ${slip.stake}${slip.currency ? ` ${slip.currency}` : ''}` : ''}\n${t}`, full: '', slip, tip, readBy: 'slip', hash, parsed: sb };
+      }
     }
     if (!ai) ai = await aiReadPost(post.text, post.photos, hint, { imgs, examples: ctx.examples });
   }
@@ -107,16 +128,13 @@ async function readPost(ctx: Ctx, post: PagePost): Promise<Read> {
     const who = ai.by ? ` (${ai.by})` : '', doubt = ai.doubt ? ` · РОЗБІЖНІСТЬ: ${ai.doubt}` : '';
     return { ocr: `ШІ${who}: ${line ? line.replace(/\n/g, ' · ') : 'не прогноз'}${legsTxt}${money}${doubt}`, full: line, ai: true, slip, tip: ai, readBy, hash };
   }
-  const parts: string[] = [];
-  for (const url of post.photos.slice(0, 2)) { const t = await ocrImage(url); if (t) parts.push(t); }
-  const ocr = parts.join('\n\n');
-  // no reader answered: the slip's money as OCR read it (the AI reads it again when a reader is back)
-  const s0 = slipFromOcr(ocr);
-  const slip: Slip | null = s0 ? { status: s0.status, stake: s0.stake, currency: s0.currency, payout: s0.status === 'pending' ? null : s0.payout } : null;
+  // no reader answered: what OCR read, with the slip's money (the AI reads it again when a reader is back — readerReady in the cycle)
+  const ocr = await ocrAll();
+  const slip = ocrSlip(ocr);
   return { ocr, full: [post.text, ocr].filter(Boolean).join('\n'), readBy: 'ocr', hash, slip };
 }
 /** Requests not spent since the start: posts sorted by rules, by a channel's template, slips read before (shown in the admin). */
-export const saved = { rules: 0, template: 0, cache: 0, since: new Date().toISOString() };
+export const saved = { rules: 0, template: 0, cache: 0, slip: 0, caption: 0, since: new Date().toISOString() };
 
 /** Text-only posts the reader has to read: up to 5 in one request (photos are read one by one). */
 async function prereadTexts(ctx: Ctx, posts: PagePost[]): Promise<void> {
@@ -275,7 +293,7 @@ async function handlePost(ctx: Ctx, post: PagePost, backfill: boolean): Promise<
   if (post.poll && !post.photos.length) { await savePost(handle, post, '', { kind: 'other', reason: 'Опитування' }, backfill); return; }
   const rd = await readPost(ctx, post);
   const { ocr, full, ai, slip, tip } = rd;
-  let parsed: TgParsed = ai && !full ? { kind: 'other' } : parseTgPost(full, post.at, list, ch.rules || {});
+  let parsed: TgParsed = rd.parsed ?? (ai && !full ? { kind: 'other' } : parseTgPost(full, post.at, list, ch.rules || {}));
   // a text tip the reader read: did the parser alone read the caption the same? (a channel whose template it knows skips the reader later)
   if (rd.readBy === 'ai' && !post.photos.length && tip) {
     const cap = parseTgPost(post.text, post.at, list, ch.rules || {});
@@ -437,7 +455,8 @@ export async function tgCycle(): Promise<void> {
     await loadReaderAccuracy();
     // posts read by OCR while every reader rested (3 days back): read again by the AI now that one is back
     if (readerReady()) await pool.query(`UPDATE tg_posts SET photos = NULL WHERE (handle, post_id) IN (SELECT handle, post_id FROM tg_posts
-        WHERE read_by = 'ocr' AND fixed_by IS NULL AND photos IS NOT NULL AND posted_at > now() - interval '3 days' ORDER BY posted_at DESC LIMIT 15)`).catch(() => {});
+        WHERE read_by = 'ocr' AND fixed_by IS NULL AND photos IS NOT NULL AND posted_at > now() - interval '3 days'
+        ORDER BY (kind IN ('bet', 'unknown') OR stake IS NOT NULL) DESC, posted_at DESC LIMIT 15)`).catch(() => {});
     const { rows } = await pool.query<{ handle: string }>(
       `SELECT c.handle FROM tg_channels c WHERE NOT c.paused AND NOT EXISTS (
          SELECT 1 FROM telegram_groups g WHERE g.moderation_status = 'rejected' AND lower(g.link) LIKE '%' || c.handle || '%') ORDER BY c.checked_at NULLS FIRST`);

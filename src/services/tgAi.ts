@@ -229,6 +229,7 @@ export type AiRead = AiTip & { by?: string; byId?: string; doubt?: string };
  *  `imgs` — screenshots already loaded (loadImages); `examples` — earlier posts of the channel the admin corrected. */
 export async function aiReadPost(caption: string, photos: string[], hint = '', opts: { imgs?: Img[]; examples?: string } = {}): Promise<AiRead | null> {
   if (!PROVIDERS.some((p) => p.key())) return null;
+  if (!readerReady()) { aiStats.lastError = 'усі читачі на ліміті — пост прочитає OCR, а ШІ перечитає пізніше'; return null; } // no 6 s wait for nothing
   await pace();
   try {
     const prompt = buildPrompt(caption, hint, opts.examples || '');
