@@ -7,7 +7,7 @@
 import { pool } from '../db/client';
 
 const MODEL = () => process.env.GEMINI_MODEL || 'gemini-flash-latest'; // Flash reads slips better than Flash-Lite; Lite is the fallback
-export const aiEnabled = () => !!process.env.GEMINI_API_KEY;
+export const aiEnabled = () => ['GEMINI_API_KEY', 'GROQ_API_KEY', 'MISTRAL_API_KEY', 'OPENROUTER_API_KEY', 'GITHUB_MODELS_TOKEN'].some((k) => !!process.env[k]);
 export const aiStats = { calls: 0, failed: 0, lastError: null as string | null, lastAt: null as string | null, model: '' };
 
 // ── the free tier's daily quota (Google resets it at midnight Pacific): requests per model today, kept across restarts ──
@@ -63,6 +63,12 @@ Football, basketball and other non-esports bets: isTip=false. A tip written only
 A poll («хто виграє?») is not a tip. A summary of results («вчора 5/6 ✅», «за тиждень +12 юнітів») is not a tip: set "report" with won / total and the period.
 "bookmaker": the bookmaker of the slip when it is shown (BC.GAME, 1win, Stake, Roobet, Pinnacle…). Answer JSON only.`;
 
+const FIELDS = `Answer with ONE JSON object: {"isTip": boolean, "game": "cs2"|"dota2"|"other"|null, "team1": string|null, "team2": string|null,
+"market": "match_winner"|"map_winner"|"total_maps"|"handicap"|"map_total"|"map_handicap"|"express"|"other"|null, "map": number|null, "pick": string|null,
+"line": number|null, "over": boolean|null, "odds": number|null, "status": "won"|"lost"|"pending"|"void"|"cashout"|null, "stake": number|null, "currency": string|null,
+"payout": number|null, "bookmaker": string|null, "report": {"won": number|null, "total": number|null, "period": string|null}|null,
+"legs": [{"team1","team2","market","map","pick","line","over","odds"}]|null}. No other text.`;
+
 const SCHEMA = {
   type: 'OBJECT',
   properties: {
@@ -85,68 +91,131 @@ const SCHEMA = {
 };
 
 /** The post read by the model, or null (no key, quota, network) — then OCR + rules take over. */
-export async function aiReadPost(caption: string, photos: string[], hint = ''): Promise<AiTip | null> {
-  const key = process.env.GEMINI_API_KEY;
-  if (!key) return null;
+// ── the readers, in order: Gemini Flash → Groq → Mistral → OpenRouter → GitHub Models → Gemini Flash-Lite (each on its own key) ──
+type Img = { mime: string; b64: string };
+interface Provider { id: string; label: string; key: () => string | undefined; keyName: string; model: () => string; call: (prompt: string, imgs: Img[], model: string, key: string) => Promise<Response> }
+const openAi = (url: string, json = true) => (prompt: string, imgs: Img[], model: string, key: string) => fetch(url, {
+  method: 'POST', signal: AbortSignal.timeout(90_000),
+  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+  body: JSON.stringify({ model, temperature: 0, max_tokens: 1200, ...(json ? { response_format: { type: 'json_object' } } : {}),
+    messages: [{ role: 'user', content: [{ type: 'text', text: prompt }, ...imgs.map((i) => ({ type: 'image_url', image_url: { url: `data:${i.mime};base64,${i.b64}` } }))] }] }),
+});
+const gemini = (prompt: string, imgs: Img[], model: string, key: string) => fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+  method: 'POST', signal: AbortSignal.timeout(90_000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+  body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }, ...imgs.map((i) => ({ inline_data: { mime_type: i.mime, data: i.b64 } }))] }], generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: SCHEMA } }),
+});
+export const PROVIDERS: Provider[] = [
+  { id: 'gemini', label: 'Gemini Flash', keyName: 'GEMINI_API_KEY', key: () => process.env.GEMINI_API_KEY, model: () => MODEL(), call: gemini },
+  { id: 'groq', label: 'Groq', keyName: 'GROQ_API_KEY', key: () => process.env.GROQ_API_KEY, model: () => process.env.GROQ_VISION_MODEL || 'qwen/qwen3.6-27b', call: openAi('https://api.groq.com/openai/v1/chat/completions') },
+  { id: 'mistral', label: 'Mistral', keyName: 'MISTRAL_API_KEY', key: () => process.env.MISTRAL_API_KEY, model: () => process.env.MISTRAL_VISION_MODEL || 'mistral-small-latest', call: openAi('https://api.mistral.ai/v1/chat/completions') },
+  { id: 'openrouter', label: 'OpenRouter', keyName: 'OPENROUTER_API_KEY', key: () => process.env.OPENROUTER_API_KEY, model: () => process.env.OPENROUTER_VISION_MODEL || 'openrouter/free', call: openAi('https://openrouter.ai/api/v1/chat/completions', false) },
+  { id: 'github', label: 'GitHub Models', keyName: 'GITHUB_MODELS_TOKEN', key: () => process.env.GITHUB_MODELS_TOKEN, model: () => process.env.GITHUB_VISION_MODEL || 'openai/gpt-4o-mini', call: openAi('https://models.github.ai/inference/chat/completions') },
+  { id: 'gemini-lite', label: 'Gemini Flash-Lite', keyName: 'GEMINI_API_KEY', key: () => process.env.GEMINI_API_KEY, model: () => 'gemini-flash-lite-latest', call: gemini },
+];
+/** Per reader: today's requests, its last error, and until when it rests (a daily quota → the next Pacific day, a minute limit / overload → a few minutes). */
+export const readerState: Record<string, { ok: number; failed: number; lastError: string | null; restUntil: number }> = {};
+const st = (id: string) => (readerState[id] ||= { ok: 0, failed: 0, lastError: null, restUntil: 0 });
+const nextPacificMidnight = () => { const d = new Date(Date.now() - 8 * 3_600_000); d.setUTCHours(24, 0, 0, 0); return d.getTime() + 8 * 3_600_000; };
+
+/** The text of an answer (Gemini or OpenAI-style), its JSON object only. */
+function answerText(body: unknown): string {
+  const b = body as Resp & { choices?: { message?: { content?: string } }[] };
+  const t = b.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || b.choices?.[0]?.message?.content || '';
+  const m = /\{[\s\S]*\}/.exec(t.replace(/<think>[\s\S]*?<\/think>/g, ''));
+  return m ? m[0] : t;
+}
+
+/** One reader on one post: the parsed answer, or why not. */
+async function ask(p: Provider, prompt: string, imgs: Img[]): Promise<{ tip?: AiTip; why?: string }> {
+  const key = p.key(), s = st(p.id), model = p.model();
+  if (!key) return { why: 'немає ключа' };
+  if (Date.now() < s.restUntil) return { why: 'відпочиває' };
+  if (p.id === 'gemini' && aiQuota().used >= aiQuota().limit * 0.9) return { why: 'денний ліміт майже вичерпано' };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt) await new Promise((ok) => setTimeout(ok, 5_000));
+    let res: Response;
+    try { res = await p.call(prompt, imgs, model, key); } catch (e) {
+      s.failed++; s.lastError = (e as Error).name === 'TimeoutError' ? 'не відповів за 90 с' : (e as Error).message.slice(0, 120); return { why: s.lastError };
+    }
+    aiStats.calls++; aiStats.lastAt = new Date().toISOString(); count(p.id === 'gemini' || p.id === 'gemini-lite' ? model : p.id);
+    if (res.ok) {
+      const txt = answerText(await res.json());
+      const why = answerProblem({ candidates: [{ content: { parts: [{ text: txt }] } }] });
+      if (why) { s.failed++; s.lastError = why; return { why }; }
+      s.ok++; aiStats.model = `${p.label}`;
+      return { tip: JSON.parse(txt) as AiTip };
+    }
+    const raw = await res.text();
+    let msg = raw;
+    try { const j = JSON.parse(raw) as { error?: { message?: string } | string; message?: string }; msg = (typeof j.error === 'string' ? j.error : j.error?.message) || j.message || raw; } catch { /* not JSON */ }
+    s.failed++; s.lastError = `${res.status}: ${msg.replace(/\s+/g, ' ').slice(0, 140)}`;
+    if (res.status === 429) { s.restUntil = /day|daily|per.?day|quota/i.test(msg) ? nextPacificMidnight() : Date.now() + 10 * 60_000; return { why: s.lastError }; }
+    if (res.status === 401 || res.status === 403) { s.restUntil = Date.now() + 6 * 3_600_000; return { why: s.lastError }; }
+    if (![500, 502, 503, 504].includes(res.status)) return { why: s.lastError };
+  }
+  s.restUntil = Date.now() + 5 * 60_000; // overloaded twice: let it rest
+  return { why: s.lastError || 'перевантажений' };
+}
+
+/** Two readings of a slip with money on it disagree: market, map, pick or odds. */
+export function disagree(a: AiTip, b: AiTip): boolean {
+  if (a.isTip !== b.isTip) return true;
+  if (!a.isTip) return false;
+  const n = (x?: string | null) => (x || '').toLowerCase().replace(/[^a-z0-9а-яіїєґё]/g, '');
+  const pickSame = !a.pick || !b.pick || n(a.pick).includes(n(b.pick)) || n(b.pick).includes(n(a.pick));
+  return a.market !== b.market || (a.map ?? null) !== (b.map ?? null) || !pickSame || (a.odds != null && b.odds != null && Math.abs(a.odds - b.odds) > 0.02);
+}
+
+/** The post read by the first reader that answers well; a slip with money is read by a second one too — they must agree. */
+export async function aiReadPost(caption: string, photos: string[], hint = ''): Promise<(AiTip & { by?: string; doubt?: string }) | null> {
+  if (!PROVIDERS.some((p) => p.key())) return null;
   const wait = nextAt - Date.now();
   if (wait > 0) await new Promise((ok) => setTimeout(ok, wait));
   nextAt = Date.now() + 6_000;
+  await loadUsage();
   try {
-    const parts: unknown[] = [{ text: `${PROMPT}${hint ? `\n\nAbout this channel: ${hint}` : ''}\n\nCaption:\n${caption || '(no caption)'}` }];
+    const prompt = `${PROMPT}${hint ? `\n\nAbout this channel: ${hint}` : ''}\n\n${FIELDS}\n\nCaption:\n${caption || '(no caption)'}`;
+    const imgs: Img[] = [];
     for (const url of photos.slice(0, 4)) { // an album: up to 4 screenshots
-      const r = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-      if (!r.ok) continue;
+      const r = await fetch(url, { signal: AbortSignal.timeout(15_000) }).catch(() => null);
+      if (!r?.ok) continue;
       const buf = Buffer.from(await r.arrayBuffer());
-      if (buf.length > 4 * 1024 * 1024) continue;
-      parts.push({ inline_data: { mime_type: r.headers.get('content-type') || 'image/jpeg', data: buf.toString('base64') } });
+      if (buf.length <= 4 * 1024 * 1024) imgs.push({ mime: r.headers.get('content-type') || 'image/jpeg', b64: buf.toString('base64') });
     }
-    // «high demand» (503) / quota (429) are usually short: wait and retry, then the other Flash model
-    await loadUsage();
-    const q = aiQuota();
-    let models = [...new Set([MODEL(), 'gemini-flash-latest', 'gemini-flash-lite-latest'])];
-    if (q.used >= q.limit * 0.9) models = models.filter((m) => m !== MODEL()).concat(MODEL()); // the main model's quota is nearly spent
-    let body = null as Resp | null, lastErr = '';
-    for (const model of models) {
-      for (let attempt = 0; attempt < 3 && !body; attempt++) {
-        if (attempt) await new Promise((ok) => setTimeout(ok, attempt * 5_000));
-        let res: Response;
-        try {
-          // Flash «thinks» before answering — up to ~1.5 min on a busy day
-          res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-            method: 'POST', signal: AbortSignal.timeout(90_000),
-            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-            body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: SCHEMA } }),
-          });
-        } catch (e) {
-          // a timeout / dropped connection: not a quota — the next model answers faster
-          aiStats.calls++; lastErr = `Gemini ${model}: ${(e as Error).name === 'TimeoutError' ? 'не відповів за 90 с' : (e as Error).message.slice(0, 120)}`;
-          break;
-        }
-        aiStats.calls++; aiStats.lastAt = new Date().toISOString(); aiStats.model = model; count(model);
-        if (res.ok) {
-          // a broken answer (text stuffed into a team name, a tip without its market) is not used — the next model reads the post
-          const got = await res.json() as Resp;
-          const why = answerProblem(got);
-          if (!why) { body = got; break; }
-          lastErr = `Gemini ${model}: ${why}`; aiStats.failed++;
-          break;
-        }
-        const raw = await res.text();
-        let msg = raw;
-        try { msg = (JSON.parse(raw) as { error?: { message?: string } }).error?.message || raw; } catch { /* not JSON */ }
-        lastErr = `Gemini ${res.status}: ${msg.replace(/\s+/g, ' ').slice(0, 140)}`;
-        if (![429, 500, 503].includes(res.status)) throw new Error(lastErr);
+    let first: { tip: AiTip; p: Provider } | null = null;
+    const whys: string[] = [];
+    for (const p of PROVIDERS) {
+      const r = await ask(p, prompt, imgs);
+      if (!r.tip) { if (r.why !== 'немає ключа') whys.push(`${p.label}: ${r.why}`); continue; }
+      if (!first) {
+        first = { tip: r.tip, p };
+        // a slip with money on it: one more reader must read the same
+        if (!(r.tip.isTip && r.tip.stake)) break;
+        continue;
       }
-      if (body) break;
+      if (disagree(first.tip, r.tip)) {
+        const show = (t: AiTip) => t.isTip ? `${t.market}${t.map ? ` ${t.map}` : ''} · ${t.pick || '—'} @${t.odds ?? '—'}` : 'не прогноз';
+        return { ...first.tip, by: first.p.label, doubt: `${first.p.label}: ${show(first.tip)} | ${p.label}: ${show(r.tip)}` };
+      }
+      return { ...first.tip, by: `${first.p.label} + ${p.label}` };
     }
-    if (!body) throw new Error(lastErr || 'Gemini: no answer');
-    const txt = (body as Resp).candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
-    return JSON.parse(txt) as AiTip;
+    if (first) return { ...first.tip, by: first.p.label };
+    throw new Error(whys.join(' · ') || 'жоден читач не відповів');
   } catch (e) {
-    aiStats.failed++; aiStats.lastError = (e as Error).message.slice(0, 200);
+    aiStats.failed++; aiStats.lastError = (e as Error).message.slice(0, 300);
     console.warn('[tg] ai:', aiStats.lastError);
     return null;
   }
+}
+
+/** Every reader for the admin: key present, today's requests, resting until, last error. */
+export function readersInfo() {
+  const by = aiQuota().byModel;
+  return PROVIDERS.map((p) => {
+    const s = st(p.id), today = p.id === 'gemini' || p.id === 'gemini-lite' ? by[p.model()] || 0 : by[p.id] || 0;
+    return { id: p.id, label: p.label, model: p.model(), hasKey: !!p.key(), keyName: p.keyName, today, ok: s.ok, failed: s.failed,
+      restUntil: s.restUntil > Date.now() ? new Date(s.restUntil).toISOString() : null, lastError: s.lastError };
+  });
 }
 
 /** What is wrong with an answer, or '' when it can be used. */

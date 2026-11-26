@@ -4,7 +4,7 @@ import { pool } from '../db/client';
 import { collectArchive, collectChannel, fetchChannelPage, rereadChannel, firstRead, progress, previewChannel, publicHandle, settleTgTips, tgCandidates, tgCycle, tgNextAt } from '../services/tgSources';
 import { isNight } from '../services/nightMode';
 import { ocrStats } from '../services/tgOcr';
-import { aiEnabled, aiQuota, aiStats } from '../services/tgAi';
+import { aiEnabled, aiQuota, aiStats, readersInfo } from '../services/tgAi';
 import { diag, explainTip, feedMatches, verifyErrors, verifyTips } from '../services/tgVerify';
 
 /** «Telegram-джерела» in the admin: channels we read, their posts, the queue of posts we did not understand. */
@@ -119,7 +119,7 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
     // the channel of the week: the best ROI (ours where we checked) of the last 7 days, at least 3 settled tips
     best: (() => { const c = channels.filter((x: any) => x.all.week.won + x.all.week.lost >= 3 && x.all.week.roi != null).sort((x: any, y: any) => y.all.week.roi - x.all.week.roi)[0]; return c ? { handle: c.handle, title: c.title, roi: c.all.week.roi, won: c.all.week.won, lost: c.all.week.lost } : null; })(),
     alerts: { unknown: all.rows.reduce((x, r) => x + Number(r.unknown || 0), 0), mismatches: all.rows.reduce((x, r) => x + Number(r.mismatches || 0), 0) },
-    reader: { ai: aiEnabled(), model: aiStats.model || null, quota: aiQuota(), aiCalls: aiStats.calls, aiFailed: aiStats.failed, aiError: aiStats.lastError,
+    reader: { ai: aiEnabled(), model: aiStats.model || null, quota: aiQuota(), readers: readersInfo(), aiCalls: aiStats.calls, aiFailed: aiStats.failed, aiError: aiStats.lastError,
       ocrImages: ocrStats.images, ocrFailed: ocrStats.failed, ocrAvgMs: ocrStats.images ? Math.round(ocrStats.ms / ocrStats.images) : null, ocrError: ocrStats.lastError },
     night: isNight(), nextAt: tgNextAt.at ? new Date(tgNextAt.at).toISOString() : null,
   });

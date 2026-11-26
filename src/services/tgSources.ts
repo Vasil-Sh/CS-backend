@@ -73,7 +73,7 @@ type PagePost = { id: number; at: string; text: string; photos: string[]; poll?:
 export interface Slip { status: NonNullable<AiTip['status']>; stake: number | null; currency: string | null; payout: number | null }
 const STATUS_UA: Record<string, string> = { won: 'виграш', lost: 'програш', pending: 'очікується', cashout: 'продано', void: 'повернення' };
 
-async function readPost(post: PagePost, hint = ''): Promise<{ ocr: string; full: string; ai?: boolean; slip?: Slip | null; tip?: AiTip }> {
+async function readPost(post: PagePost, hint = ''): Promise<{ ocr: string; full: string; ai?: boolean; slip?: Slip | null; tip?: AiTip & { doubt?: string } }> {
   // the model first (when GEMINI_API_KEY is set): it tells a tip from news and reads the slip; its answer becomes a plain tip line
   const ai = await aiReadPost(post.text, post.photos, hint);
   if (ai) {
@@ -81,7 +81,8 @@ async function readPost(post: PagePost, hint = ''): Promise<{ ocr: string; full:
     const slip: Slip | null = ai.isTip && ai.status ? { status: ai.status, stake: ai.stake && ai.stake > 0 ? ai.stake : null, currency: currencyCode(ai.currency), payout: ai.payout && ai.payout > 0 ? ai.payout : null } : null;
     const money = slip ? ` · квиток: ${STATUS_UA[slip.status]}${slip.stake ? `, ставка ${slip.stake}${slip.currency ? ` ${slip.currency}` : ''}` : ''}${slip.payout ? `, виплата ${slip.payout}` : ''}` : '';
     const legsTxt = ai.market === 'express' && ai.legs?.length ? ` · ${ai.legs.map((l) => `${l.team1} — ${l.team2}: ${l.pick || ''}${l.odds ? ` @${l.odds}` : ''}`).join('; ')}` : '';
-    return { ocr: `ШІ: ${line ? line.replace(/\n/g, ' · ') : 'не прогноз'}${legsTxt}${money}`, full: line, ai: true, slip, tip: ai };
+    const who = ai.by ? ` (${ai.by})` : '', doubt = ai.doubt ? ` · РОЗБІЖНІСТЬ: ${ai.doubt}` : '';
+    return { ocr: `ШІ${who}: ${line ? line.replace(/\n/g, ' · ') : 'не прогноз'}${legsTxt}${money}${doubt}`, full: line, ai: true, slip, tip: ai };
   }
   const parts: string[] = [];
   for (const url of post.photos.slice(0, 2)) { const t = await ocrImage(url); if (t) parts.push(t); }
@@ -238,6 +239,8 @@ async function handlePost(ctx: Ctx, post: PagePost, backfill: boolean): Promise<
     else legs = null;
   }
   if (!gameOk(ch.game, parsed)) parsed = { kind: 'other' };
+  // two readers read a slip with money on it differently: the admin decides
+  if (tip?.doubt && (parsed.kind === 'bet' || tip.isTip)) parsed = { kind: 'unknown', reason: 'Моделі прочитали квиток по-різному', match: 'match' in parsed ? parsed.match : undefined, odds: 'odds' in parsed ? parsed.odds : undefined };
   parsed = await repeatOf(handle, post, parsed, slip);
   await savePost(handle, post, ocr, parsed, backfill);
   if (tip?.report && parsed.kind === 'other' && parsed.reason === 'Підсумок') await pool.query('UPDATE tg_posts SET claim = $3 WHERE handle = $1 AND post_id = $2', [handle, post.id, JSON.stringify(tip.report)]);
