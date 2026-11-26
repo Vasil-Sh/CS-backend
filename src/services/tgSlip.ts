@@ -3,7 +3,7 @@
  * Bookmakers print the bet in a fixed form: «Карта 2. Победитель, NiP 1.52», «Победитель матча: Spirit», «Фора, MOUZ -1.5»,
  * «Тотал карт больше 2.5», «Map 1 Winner — Vitality», «Handicap NAVI -1.5». Only a full, unambiguous reading is returned:
  * the match of our feed (both teams in the text), a market we settle, the pick one of its teams, the odds (printed, or payout ÷ stake).
- * Rounds / kills on a map, individual totals and expresses are left to the AI.
+ * Rounds on a map (handicap, total) are read too; individual totals and expresses are left to the AI.
  */
 import { normalizeTeam } from '../utils/matchUtils';
 import { slipFromOcr } from './tgOcr';
@@ -49,13 +49,16 @@ export function slipBet(ocr: string, postedAt: string, cands: TgCandidate[]): Ex
     return one === two ? 0 : one ? 1 : 2;
   };
   if (b.kind === 'total') {
-    if (b.map) return null; // rounds on a map
+    if (b.map) return { kind: 'bet', match, market: `Map ${b.map} Total ${b.over ? 'Over' : 'Under'} ${b.line}`, pick: '', odds }; // rounds on a map
     return { kind: 'bet', match, market: `Total Maps ${b.over ? 'Over' : 'Under'} ${b.line}`, pick: '', odds };
   }
   const s = side(b.rest.replace(/^(?:п|w|p)\s?([12])$/i, (_x, d: string) => (d === '1' ? match.team1 : match.team2)));
   if (!s) return null;
   const pick = s === 1 ? match.team1 : match.team2;
   if (b.kind === 'win') return { kind: 'bet', match, market: b.map ? `Map ${b.map} Winner` : 'Match Winner', pick, odds };
-  if (b.map || b.line == null || Math.abs(b.line) > 2.5) return null; // a rounds handicap on a map (4.5, 6.5 …)
+  if (b.line == null) return null;
+  // on a map — rounds («Карта 3. Фора, Chinggis Warriors 4.5»: printed without «+»)
+  if (b.map) return { kind: 'bet', match, market: `Map ${b.map} Handicap ${b.line < 0 ? '-' : '+'}${Math.abs(b.line)}`, pick, odds };
+  if (Math.abs(b.line) > 2.5) return null;
   return { kind: 'bet', match, market: `Handicap ${b.line > 0 ? '+' : ''}${b.line}`, pick, odds };
 }

@@ -56,3 +56,17 @@ describe('parseTgPage', () => {
     expect(p.posts).toEqual([{ id: 101, at: '2026-11-25T15:10:00.000Z', text: 'NAVI vs G2\nП1 @1.72', photos: [] }, { id: 102, at: '2026-11-25T16:00:00.000Z', text: '', photos: [] }]);
   });
 });
+
+describe('rounds on one map', () => {
+  const c = [{ id: 'wc', game: 'cs2' as const, team1: 'Wildcard', team2: 'Chinggis Warriors', start: '2026-11-26T13:30:00Z' }];
+  const at = '2026-11-26T14:08:00Z';
+  it('a slip: «Карта 3. Фора, Chinggis Warriors 4.5 1.57»', () => {
+    expect(parseTgPost('Wildcard 13 1\nChinggis Warriors 7 13\nКарта 3. Фора, Chinggis Warriors 4.5 1.57', at, c)).toMatchObject({ kind: 'bet', market: 'Map 3 Handicap +4.5', pick: 'Chinggis Warriors', odds: 1.57 });
+  });
+  it('a caption: «фора Chinggis +4.5 3map»', () => {
+    expect(parseTgPost('Wildcard - Chinggis Warriors\nПрогноз: фора Chinggis Warriors +4.5 3map', at, c)).toMatchObject({ market: 'Map 3 Handicap +4.5', pick: 'Chinggis Warriors' });
+  });
+  it('rounds total on a map', () => {
+    expect(parseTgPost('Wildcard vs Chinggis Warriors\n2 карта тотал больше 26.5 @1.85', at, c)).toMatchObject({ market: 'Map 2 Total Over 26.5', odds: 1.85 });
+  });
+});

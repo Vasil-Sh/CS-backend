@@ -1,11 +1,12 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { pool } from '../db/client';
-import { moneyFromOcr, collectArchive, collectChannel, fetchChannelPage, rereadChannel, firstRead, progress, previewChannel, publicHandle, saved, settleTgTips, tgCandidates, tgCycle, tgNextAt } from '../services/tgSources';
+import { rereadPost, moneyFromOcr, collectArchive, collectChannel, fetchChannelPage, rereadChannel, firstRead, progress, previewChannel, publicHandle, saved, settleTgTips, tgCandidates, tgCycle, tgNextAt } from '../services/tgSources';
 import { isNight } from '../services/nightMode';
 import { ocrStats } from '../services/tgOcr';
 import { aiEnabled, aiQuota, aiStats, batchStats, readersInfo } from '../services/tgAi';
 import { accountEnabled, accountMedia, accountStats, inviteHash, joinInvite, mediaLink, mediaSig, privateHandle } from '../services/tgAccount';
+import { toUsd } from '../services/fxRates';
 import { goldenRun, lastGolden, learnFromFix, runGolden } from '../services/tgLearn';
 import { diag, explainTip, feedMatches, verifyErrors, verifyTips } from '../services/tgVerify';
 
@@ -70,7 +71,8 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
   const rereading = new Map(again.rows.map((r) => [r.handle, Number(r.n)]));
   const r2 = (x: string | null) => Math.round(Number(x || 0) * 100) / 100;
   const moneyOf = (h: string) => money.rows.filter((r) => r.handle === h && (Number(r.n) > 0 || Number(r.open_n) > 0))
-    .map((r) => ({ currency: r.currency, profit: r2(r.profit), staked: r2(r.staked), bets: Number(r.n), won: r2(r.won), lost: r2(r.lost), wins: Number(r.wins), losses: Number(r.losses), open: r2(r.open), openBets: Number(r.open_n) }))
+    .map((r) => ({ currency: r.currency, profit: r2(r.profit), staked: r2(r.staked), bets: Number(r.n), won: r2(r.won), lost: r2(r.lost), wins: Number(r.wins), losses: Number(r.losses), open: r2(r.open), openBets: Number(r.open_n),
+      profitUsd: toUsd(r2(r.profit), r.currency), stakedUsd: toUsd(r2(r.staked), r.currency) }))
     .sort((a, b) => Math.abs(b.profit) - Math.abs(a.profit));
   const dayOf = (h: string, d: string) => {
     const rs = byDay.rows.filter((r) => r.handle === h && r.day === d), cnt = (f: (r: typeof rs[number]) => boolean) => rs.filter(f).reduce((x, r) => x + Number(r.n), 0);
@@ -132,7 +134,7 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
   });
 });
 
-const postCols = `handle, post_id AS "postId", posted_at AS "postedAt", text, kind, reason, game, match_id AS "matchId", team1, team2, market, pick, odds::float AS odds, result, score, fixed_by AS "fixedBy", COALESCE(photos, '{}') AS photos, ocr, slip, stake::float AS stake, currency, payout::float AS payout, our_odds::float AS "ourOdds", odds_high AS "oddsHigh", claim, our_result AS "ourResult", settled_by AS "settledBy", mismatch, is_live AS "isLive", deleted_at AS "deletedAt", edited_at AS "editedAt", legs`;
+const postCols = `handle, post_id AS "postId", posted_at AS "postedAt", text, kind, reason, game, match_id AS "matchId", team1, team2, market, pick, odds::float AS odds, result, score, fixed_by AS "fixedBy", COALESCE(photos, '{}') AS photos, ocr, slip, stake::float AS stake, currency, payout::float AS payout, our_odds::float AS "ourOdds", odds_high AS "oddsHigh", claim, our_result AS "ourResult", settled_by AS "settledBy", mismatch, is_live AS "isLive", deleted_at AS "deletedAt", edited_at AS "editedAt", legs, read_by AS "readBy"`;
 /** A tip on a match of our feed that is on now / ahead: its live state and score. */
 /** Screenshots of private channels («tgacc://…») as signed links to /api/tg-media (the admin's browser opens them). */
 const media = (c: { req: { url: string; header: (k: string) => string | undefined } }) => {
@@ -171,8 +173,11 @@ tg.get('/admin/tg-sources/:handle/slips', requireAuth, requireAdmin, async (c) =
 
 /** GET /api/admin/tg-sources/:handle/posts — the channel's newest posts with what we made of them. */
 tg.get('/admin/tg-sources/:handle/posts', requireAuth, requireAdmin, async (c) => {
-  const { rows } = await pool.query(`SELECT ${postCols} FROM tg_posts WHERE handle = $1 ORDER BY posted_at DESC LIMIT 30`, [c.req.param('handle')]);
-  return c.json({ posts: withLive(rows.map(media(c))) });
+  // ?filter=tips|slips|unknown and ?before=<posted_at> for «Показати ще»
+  const f = c.req.query('filter'), before = c.req.query('before') || null, limit = 30;
+  const cond = f === 'tips' ? `AND kind = 'bet'` : f === 'slips' ? `AND stake IS NOT NULL` : f === 'unknown' ? `AND kind = 'unknown'` : '';
+  const { rows } = await pool.query(`SELECT ${postCols} FROM tg_posts WHERE handle = $1 ${cond} AND ($2::timestamptz IS NULL OR posted_at < $2::timestamptz) ORDER BY posted_at DESC LIMIT ${limit + 1}`, [c.req.param('handle'), before]);
+  return c.json({ posts: withLive(rows.slice(0, limit).map(media(c))), more: rows.length > limit });
 });
 
 /** GET /api/admin/tg-posts/unrecognized — posts that look like tips but were not understood (not sorted yet, newest 100). */
@@ -196,6 +201,30 @@ tg.get('/admin/tg-posts/matches', requireAuth, requireAdmin, async (c) => {
 });
 
 /** POST /api/admin/tg-posts/:handle/:postId — the admin's decision: «Не прогноз» or the tip (match, market, pick, odds); «remember» adds a channel rule. */
+/** POST /api/admin/tg-posts/bulk {items: [{handle, postId}], reason?} — several posts at once made «Інфо» (or a repeat, a poll…). */
+tg.post('/admin/tg-posts/bulk', requireAuth, requireAdmin, async (c) => {
+  const actor = c.get('user');
+  const b = await c.req.json().catch(() => null) as { items?: { handle: string; postId: number }[]; reason?: string | null } | null;
+  const items = (b?.items || []).filter((x) => x && typeof x.handle === 'string' && Number(x.postId) > 0).slice(0, 200);
+  if (!items.length) return c.json({ error: 'Немає постів' }, 400);
+  const reason = ['Повтор', 'Опитування', 'Підсумок'].includes(String(b?.reason)) ? String(b!.reason) : null;
+  for (const x of items) {
+    await pool.query(`UPDATE tg_posts SET kind = 'other', reason = $4, result = NULL, our_result = NULL, mismatch = false, settled_by = NULL, fixed_by = $3 WHERE handle = $1 AND post_id = $2`, [x.handle, Number(x.postId), actor.username, reason]);
+    await learnFromFix(x.handle, Number(x.postId), { kind: 'other' }, actor.username).catch(() => {});
+  }
+  audit(actor, 'POST', '/admin/tg-posts/bulk', { n: items.length, reason });
+  return c.json({ ok: true, n: items.length });
+});
+
+/** POST /api/admin/tg-posts/:handle/:postId/reread — this post read again (the admin's sorting of it dropped). */
+tg.post('/admin/tg-posts/:handle/:postId/reread', requireAuth, requireAdmin, async (c) => {
+  const handle = c.req.param('handle') || '', postId = Number(c.req.param('postId'));
+  const ok = await rereadPost(handle, postId).catch((e: Error) => { console.warn('[tg] reread post:', e.message); return false; });
+  if (!ok) return c.json({ error: 'Не вдалося перечитати пост' }, 400);
+  audit(c.get('user'), 'POST', `/admin/tg-posts/${handle}/${postId}/reread`, {});
+  return c.json({ ok: true });
+});
+
 tg.post('/admin/tg-posts/:handle/:postId', requireAuth, requireAdmin, async (c) => {
   const actor = c.get('user');
   const handle = c.req.param('handle') || '', postId = Number(c.req.param('postId'));
@@ -219,9 +248,12 @@ tg.post('/admin/tg-posts/:handle/:postId', requireAuth, requireAdmin, async (c) 
   const mk = b.market || 'Match Winner';
   const ln = Math.abs(Number(b.line) || 1.5), mapN = Math.min(5, Math.max(1, Math.round(Number(b.map) || 1)));
   const market = mk === 'Match Winner' ? 'Match Winner' : mk === 'Total' ? `Total Maps ${b.over === false ? 'Under' : 'Over'} ${Number(b.line || 2.5)}`
-    : mk === 'Handicap' ? `Handicap ${Number(b.line) > 0 ? '+' : '-'}${ln}` : mk === 'Map' ? `Map ${mapN} Winner` : '';
+    : mk === 'Handicap' ? `Handicap ${Number(b.line) > 0 ? '+' : '-'}${ln}` : mk === 'Map' ? `Map ${mapN} Winner`
+    // rounds on one map
+    : mk === 'MapHandicap' ? `Map ${mapN} Handicap ${Number(b.line) < 0 ? '-' : '+'}${Math.abs(Number(b.line) || 1.5)}`
+    : mk === 'MapTotal' ? `Map ${mapN} Total ${b.over === false ? 'Under' : 'Over'} ${Math.abs(Number(b.line) || 26.5)}` : '';
   if (!market) return c.json({ error: 'Невідомий ринок' }, 400);
-  const pick = mk === 'Total' ? '' : b.side === 2 ? m.team2 : m.team1;
+  const pick = mk === 'Total' || mk === 'MapTotal' ? '' : b.side === 2 ? m.team2 : m.team1;
   const odds = b.odds != null && Number(b.odds) > 1 ? Number(b.odds) : null;
   await pool.query(
     `UPDATE tg_posts SET kind = 'bet', reason = NULL, game = $3, match_id = $4, team1 = $5, team2 = $6, market = $7, pick = $8, odds = $9,
@@ -369,7 +401,15 @@ tg.get('/admin/tg-sources/:handle/stats', requireAuth, requireAdmin, async (c) =
     const ours = rows.filter((r) => r.day === day || r.day === cl.posted_at.slice(0, 10)).map((r) => r.our_result ?? r.result).filter((x) => x === 'Win' || x === 'Loss');
     summaries.push({ at: cl.posted_at, period: cl.claim.period || null, claimed: { won: cl.claim.won ?? null, total: cl.claim.total ?? null }, ours: { won: ours.filter((x) => x === 'Win').length, total: ours.length } });
   }
-  return c.json({ chart, byGame: group((r) => (r.game === 'dota2' ? 'Dota 2' : 'CS2')), byMarket: group((r) => kindOf(r.market)), streaks: { best, worst, current: cur }, summaries });
+  // the channel's money slip by slip (its main currency): the balance after each settled slip
+  const mrows = (await pool.query<{ at: string; currency: string; result: string; stake: number; payout: number | null; odds: number | null }>(
+    `SELECT posted_at AS at, currency, result, stake::float AS stake, payout::float AS payout, odds::float AS odds FROM tg_posts
+      WHERE handle = $1 AND kind = 'bet' AND stake IS NOT NULL AND currency IS NOT NULL AND result IN ('Win', 'Loss', 'Void') ORDER BY posted_at`, [handle])).rows;
+  const cnt = new Map<string, number>(); for (const r of mrows) cnt.set(r.currency, (cnt.get(r.currency) || 0) + 1);
+  const mainCur = [...cnt.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+  let bal = 0;
+  const money = mainCur ? { currency: mainCur, points: mrows.filter((r) => r.currency === mainCur).map((r) => ({ at: r.at, balance: Math.round((bal += r.result === 'Win' ? (r.payout ?? r.stake * (r.odds ?? 1)) - r.stake : r.result === 'Loss' ? -r.stake : 0) * 100) / 100 })) } : null;
+  return c.json({ money, chart, byGame: group((r) => (r.game === 'dota2' ? 'Dota 2' : 'CS2')), byMarket: group((r) => kindOf(r.market)), streaks: { best, worst, current: cur }, summaries });
 });
 
 /** POST /api/admin/tg-sources/verify — run our check now; returns how many tips it closed and its last errors / notes. */

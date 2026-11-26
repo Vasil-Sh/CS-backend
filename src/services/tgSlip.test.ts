@@ -20,8 +20,11 @@ describe('a bookmaker slip read by OCR', () => {
     expect(slipBet(slip(['Natus Vincere', 'Team Spirit', 'Фора, Natus Vincere -1.5 1.52']), at, cands)).toMatchObject({ market: 'Handicap -1.5', pick: 'Natus Vincere' });
     expect(slipBet(slip(['Natus Vincere', 'Team Spirit', 'Тотал карт больше 2.5 1.52']), at, cands)).toMatchObject({ market: 'Total Maps Over 2.5', pick: '' });
   });
-  it('a rounds handicap on a map, odds that disagree, an unknown match — left to the AI', () => {
-    expect(slipBet(slip(['Wildcard 13 11 1', 'Chinggis Warriors 7 13 1', 'Карта 3. Фора, Chinggis Warriors 4.5 1.57']), at, cands)).toBe(null);
+  it('rounds on a map', () => {
+    const s2 = (l: string[]) => slip(l).replace('2 35,60', '2 43,35');
+    expect(slipBet(s2(['Wildcard 13 11 1', 'Chinggis Warriors 7 13 1', 'Карта 3. Фора, Chinggis Warriors 4.5 1.57']), at, cands)).toMatchObject({ market: 'Map 3 Handicap +4.5', pick: 'Chinggis Warriors', odds: 1.57 });
+  });
+  it('odds that disagree, an express, an unknown match — left to the AI', () => {
     expect(slipBet(slip(['Natus Vincere', 'Team Spirit', 'Победитель, Team Spirit 2.40']), at, cands)).toBe(null);
     expect(slipBet(slip(['Экспресс', 'Natus Vincere', 'Team Spirit', 'Победитель, Team Spirit 1.52']), at, cands)).toBe(null);
     expect(slipBet(slip(['Vitality', 'MOUZ', 'Победитель, MOUZ 1.52']), at, cands)).toBe(null);

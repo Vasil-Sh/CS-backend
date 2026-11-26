@@ -23,7 +23,9 @@ const TOTAL = re(String.raw`(?:<B(тб|тм|tb|tm)B>|<Bтотал\s*(больш�
 const HCP = re(String.raw`(?:<Bф(?:ора)?|<Bhandicap|<Bhcp)\s*(?:([12])|([^\d+\-−–@\n]{0,30}?))\s*\(?\s*([+\-−–]\s?\d+[.,]5)`);
 const P12 = re(String.raw`<B(п|w|p)\s?([12])(?![${L}]|[.,]\d)`);
 // «1 карта», «1-ая карта», «на 2карту», «Карта 2:», «карте #2», «map 2» — a bet on one map, not the series
-const MAP = re(String.raw`(?:перш|перв|друг|втор|трет|четв|п.?ят)\S*\s+карт|(?<![\d.,])[1-5]\s*-?(?:[ая]{1,2}|ша|га|тя|я|й)?\s*карт(?:а|у|е|і)(?![${L}])|<Bкарт(?:а|е|і|ы)\s*(?:#|№)?\s*[1-5](?![\d.,])|<Bmap\s*(?:#|№)?\s*[1-5](?![\d.,])`);
+const MAP = re(String.raw`(?:перш|перв|друг|втор|трет|четв|п.?ят)\S*\s+карт|(?<![\d.,])[1-5]\s*-?(?:[ая]{1,2}|ша|га|тя|я|й)?\s*карт(?:а|у|е|і)(?![${L}])|<Bкарт(?:а|е|і|ы)\s*(?:#|№)?\s*[1-5](?!\d|[.,]\d)|<Bmap\s*(?:#|№)?\s*[1-5](?!\d|[.,]\d)|(?<![\d.,])[1-5]\s*-?\s*map(?![${L}])`);
+// a handicap on one map is in rounds; bookmakers print it without «+» («Карта 3. Фора, Chinggis Warriors 4.5»)
+const MAP_HCP = re(String.raw`(?:<Bф(?:ора)?|<Bhandicap|<Bhcp)\s*[,:]?\s*(?:([12])(?![\d.,])|([^\d+\-−–@\n]{0,40}?))\s*\(?\s*([+\-−–]?\s?\d{1,2}[.,]5)`);
 // other sports in the same channels (football screenshots): not ours
 const NOT_ESPORTS = re(String.raw`<Bуефа|<Bфутбол|<Bfootball|<Bsoccer|<Bnba|<Bnhl|<Bтайм|<Bполовин|<Bhalf\s?time|<Btotal in time period|<Bтеніс|<Bтеннис|<Bхокей|<Bхоккей|<Bбаскетбол|<B(фк|fc)B>`);
 const WIN = re(String.raw`перемо[гж]|побед|<BwinB>|<Bwinner|виграє|выиграет|забира|візьм|возьм|ставка на|ставлю на|<BберуB>`);
@@ -130,7 +132,32 @@ export function parseTgPost(text: string, postedAt: string, cands: TgCandidate[]
   }
   if (EXPRESS.test(t)) return { kind: 'unknown', reason: 'Експреси поки не рахуємо', match, odds };
   if (INDIVIDUAL.test(t)) return { kind: 'unknown', reason: 'Індивідуальні тотали поки не рахуємо', match, odds };
-  const tot0 = TOTAL.test(t);
+  const tot0 = TOTAL.exec(t);
+  const roundsTotal = !!tot0 && num(tot0[4]) >= 6; // «тотал больше 26.5» on a map: rounds, not maps
+  if (MAP.test(t) && (roundsTotal || MAP_HCP.test(t))) {
+    // rounds on one map: «Карта 3. Фора, Chinggis Warriors 4.5», «фора +4.5 3map», «2 карта ТБ 26.5» — settled by the map's round score
+    if (!match) return { kind: 'unknown', reason: half ? 'Матч не знайдено — немає суперника' : 'Матч не знайдено', match: half, odds };
+    const mn = /(?<![\d.,])([1-5])\s*-?(?:[ая]{1,2}|ша|га|тя|я|й)?\s*карт|карт(?:а|е|і|ы)\s*(?:#|№)?\s*([1-5])|map\s*(?:#|№)?\s*([1-5])|(?<![\d.,])([1-5])\s*-?\s*map/i.exec(t);
+    const n = mn ? Number(mn[1] || mn[2] || mn[3] || mn[4]) : 0;
+    if (!n) return { kind: 'unknown', reason: 'Не вказано, яка карта', match, odds };
+    if (roundsTotal) {
+      const w = (tot0![1] || tot0![2] || tot0![3] || '').toLowerCase();
+      return { kind: 'bet', match, market: `Map ${n} Total ${/тб|tb|больше|більше|over/.test(w) ? 'Over' : 'Under'} ${num(tot0![4])}`, pick: '', odds };
+    }
+    const h = MAP_HCP.exec(t)!;
+    const raw = h[3].replace(/\s/g, ''), line = Math.abs(num(raw)) * (/^[-−–]/.test(raw) ? -1 : 1);
+    let side = h[1] ? Number(h[1]) : 0;
+    if (!side && h[2]?.trim()) side = teamAt(h[2], [match.team1, ...(match.aliases1 || [])]).length ? 1 : teamAt(h[2], [match.team2, ...(match.aliases2 || [])]).length ? 2 : 0;
+    if (!side) { const pos = words(t).indexOf(words(h[0]).trim()); const nr = (ps: number[]) => Math.min(...ps.map((x) => Math.abs(pos - x))); const d1 = nr(p1), d2 = nr(p2); side = pos >= 0 && d1 !== d2 ? (d1 < d2 ? 1 : 2) : 0; }
+    if (!side) return { kind: 'unknown', reason: 'Фора без команди', match, odds };
+    // the odds: not the line itself («4.5» read as odds)
+    let o = odds;
+    if (o != null && Math.abs(o - Math.abs(line)) < 0.001) {
+      o = null;
+      for (const m of t.matchAll(/(?:^|\s|@)([1-9][.,]\d{2,3})(?=\s|$|[^\d])/g)) { const v = num(m[1]); if (Math.abs(v - Math.abs(line)) > 0.001 && v >= 1.01 && v <= 50) { o = v; break; } }
+    }
+    return { kind: 'bet', match, market: `Map ${n} Handicap ${line > 0 ? '+' : '-'}${Math.abs(line)}`, pick: side === 1 ? match.team1 : match.team2, odds: o };
+  }
   if (!tot0 && MAP.test(t)) {
     // «Карта 2 — переможець NiP»: a tip on one map (settled by the slip's result or the map scores)
     if (!match) return { kind: 'unknown', reason: half ? 'Матч не знайдено — немає суперника' : 'Матч не знайдено', match: half, odds };

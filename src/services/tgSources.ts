@@ -198,6 +198,18 @@ export async function moneyFromOcr(): Promise<number> {
   return n;
 }
 
+/** One post read again from what is saved (its text and screenshots), the admin's sorting dropped. */
+export async function rereadPost(handle: string, postId: number): Promise<boolean> {
+  const r = (await pool.query<{ posted_at: string; text: string | null; photos: string[] | null }>('SELECT posted_at, text, photos FROM tg_posts WHERE handle = $1 AND post_id = $2', [handle, postId])).rows[0];
+  if (!r) return false;
+  const ctx = await channelCtx(handle, undefined);
+  if (!ctx) return false;
+  await pool.query(`UPDATE tg_posts SET fixed_by = NULL, ai_wrong = false, photos = NULL WHERE handle = $1 AND post_id = $2`, [handle, postId]);
+  await handlePost(ctx, { id: postId, at: new Date(r.posted_at).toISOString(), text: r.text || '', photos: r.photos || [] }, true);
+  await settleTgTips().catch(() => 0);
+  return true;
+}
+
 /** A settled slip without a tip in it: the channel's tip (≤ 3 days before) on the same teams or at the same odds gets its result and money. */
 async function resultSlip(handle: string, post: PagePost, tip: AiTip, slip: Slip, text = ''): Promise<TgParsed | null> {
   const { rows } = await pool.query<{ post_id: number; team1: string | null; team2: string | null; pick: string | null; odds: string | null }>(
