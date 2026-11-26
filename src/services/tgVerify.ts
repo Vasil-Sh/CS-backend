@@ -119,15 +119,27 @@ const mapsAsked = new Map<string, number>();
 async function loadMapsOnce(game: string, matchId: string, date: string): Promise<void> {
   if (game !== 'cs2' || Date.now() - (mapsAsked.get(matchId) || 0) < 3_600_000) return;
   const m = feedMatches().find((x) => x.id === matchId);
-  if (!m?.matchPage) return;
+  if (!m?.matchPage) { note(`${matchId}: ${m ? 'у стрічці немає сторінки матчу' : 'матчу немає в стрічці'}`); mapsAsked.set(matchId, Date.now()); return; }
   mapsAsked.set(matchId, Date.now());
   const { fetchMatchMaps } = await import('./liquipediaFeed');
   const maps = await fetchMatchMaps(m.matchPage).catch(() => []);
   const w = winnersFromScores(maps, true);
   if (w.length) await recordMaps(game, date, m.team1, m.team2, w, 'liquipedia', maps.slice(0, w.length).map((x) => [x.score1 ?? 0, x.score2 ?? 0] as [number, number]));
-  diag.push(`${matchId}: сторінка матчу → ${w.length ? `карти ${w.join(',')}` : 'карт не знайдено'}`); if (diag.length > 30) diag.shift();
+  note(`${matchId}: сторінка матчу → ${w.length ? `карти ${w.join(',')}` : 'карт не знайдено'}`);
 }
 export const diag: string[] = [];
+const note = (x: string) => { diag.push(x); if (diag.length > 30) diag.shift(); };
+
+/** Why a tip is still open — for the admin's check. */
+export async function explainTip(r: { match_id: string | null; team1: string; team2: string; market: string; game: string | null; day: string }): Promise<string> {
+  const f = await findFinished(r.match_id, r.team1, r.team2, r.day);
+  if (!f) return 'матч не завершений або не знайдений у стрічці / історії';
+  const fm = feedMatches().find((x) => x.id === f.h.match_id);
+  const mm = /^Map (\d)/.exec(r.market);
+  if (!mm) return `матч ${f.h.score1}:${f.h.score2} — ринок не розраховується`;
+  const w = await mapWinner(r.game || 'cs2', f.h.date, r.team1, r.team2, Number(mm[1]), null);
+  return `матч ${f.h.match_id} ${f.h.score1}:${f.h.score2}; сторінка матчу: ${fm?.matchPage || 'немає'}; карти в стрічці: ${fm?.maps?.length ? JSON.stringify(fm.maps) : 'немає'}; переможець карти ${mm[1]}: ${w ?? 'невідомо'}`;
+}
 
 async function betResult(game: string, day: string, b: { matchId: string | null; team1: string; team2: string; market: string; pick: string | null }): Promise<{ res: Res; score: string; matchId: string } | null> {
   const f = await findFinished(b.matchId, b.team1, b.team2, day);

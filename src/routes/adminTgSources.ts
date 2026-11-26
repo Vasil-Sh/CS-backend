@@ -5,7 +5,7 @@ import { collectArchive, collectChannel, fetchChannelPage, rereadChannel, firstR
 import { isNight } from '../services/nightMode';
 import { ocrStats } from '../services/tgOcr';
 import { aiEnabled, aiQuota, aiStats } from '../services/tgAi';
-import { diag, feedMatches, verifyErrors, verifyTips } from '../services/tgVerify';
+import { diag, explainTip, feedMatches, verifyErrors, verifyTips } from '../services/tgVerify';
 
 /** «Telegram-джерела» in the admin: channels we read, their posts, the queue of posts we did not understand. */
 const tg = new Hono();
@@ -316,7 +316,13 @@ tg.get('/admin/tg-sources/:handle/stats', requireAuth, requireAdmin, async (c) =
 tg.post('/admin/tg-sources/verify', requireAuth, requireAdmin, async (c) => {
   const n = await verifyTips().catch((e) => { verifyErrors.push(`verify: ${(e as Error).message}`); return 0; });
   const maps = (await pool.query(`SELECT game, to_char(date, 'YYYY-MM-DD') AS date, team1, team2, winners, source FROM match_maps ORDER BY updated_at DESC LIMIT 15`).catch(() => ({ rows: [] }))).rows;
-  return c.json({ checked: n, errors: verifyErrors.slice(-10), notes: diag.slice(-15), maps });
+  // the tips still open: why
+  const open = (await pool.query<{ handle: string; post_id: number; match_id: string | null; team1: string; team2: string; market: string; game: string | null; day: string }>(
+    `SELECT handle, post_id, match_id, team1, team2, market, game, to_char(posted_at AT TIME ZONE 'Europe/Kyiv', 'YYYY-MM-DD') AS day FROM tg_posts
+      WHERE kind = 'bet' AND our_result IS NULL AND team1 IS NOT NULL AND posted_at > now() - interval '14 days' ORDER BY posted_at DESC LIMIT 15`)).rows;
+  const why = [];
+  for (const r of open) why.push(`${r.handle}/${r.post_id} ${r.team1} — ${r.team2} · ${r.market}: ${await explainTip(r).catch((e) => (e as Error).message)}`);
+  return c.json({ checked: n, errors: verifyErrors.slice(-10), notes: diag.slice(-15), open: why, maps });
 });
 
 export default tg;
