@@ -11,7 +11,8 @@ import { parseTgPage, parseTgPost, type TgCandidate, type TgParsed, type TgRules
 import { teamKey } from './matchFeed';
 import { isNight } from './nightMode';
 import { closeOcr, ocrImage } from './tgOcr';
-import { feedMatches, placedLive, verifyTips, type Leg } from './tgVerify';
+import { feedMatches, placedLive, sameName, verifyTips, type FeedMatch, type Leg } from './tgVerify';
+import { recordServerError } from './serverErrors';
 import { abbreviations } from '../utils/teamAbbrev';
 import { aiLine, aiReadPost, currencyCode, type AiTip } from './tgAi';
 import { normalizeTeam } from '../utils/matchUtils';
@@ -27,8 +28,9 @@ export function publicHandle(link: string | null | undefined): string | null {
   return validHandle(h) ? h : null;
 }
 
-export async function fetchChannelPage(handle: string) {
-  const res = await fetch(`https://t.me/s/${handle}`, { headers: { 'user-agent': 'Mozilla/5.0 (compatible; MatchIQ/1.0)', 'accept-language': 'en' }, signal: AbortSignal.timeout(10_000), redirect: 'follow' });
+/** The channel's page: its last ~20 posts, or the ~20 before post `before` (the archive). */
+export async function fetchChannelPage(handle: string, before?: number) {
+  const res = await fetch(`https://t.me/s/${handle}${before ? `?before=${before}` : ''}`, { headers: { 'user-agent': 'Mozilla/5.0 (compatible; MatchIQ/1.0)', 'accept-language': 'en' }, signal: AbortSignal.timeout(10_000), redirect: 'follow' });
   if (!res.ok) throw new Error(`t.me відповів ${res.status}`);
   return parseTgPage(await res.text());
 }
@@ -64,16 +66,16 @@ export async function tgCandidates(since?: string): Promise<TgCandidate[]> {
 
 const gameOk = (chGame: string, p: TgParsed) => chGame === 'both' || !('match' in p) || !p.match || p.match.game === chGame;
 
-type PagePost = { id: number; at: string; text: string; photos: string[] };
+type PagePost = { id: number; at: string; text: string; photos: string[]; poll?: boolean };
 
 /** The caption + what OCR read on its screenshots (up to 2) — what the parser sees. */
 /** What a bet slip on the screenshot shows: its state and money. */
 export interface Slip { status: NonNullable<AiTip['status']>; stake: number | null; currency: string | null; payout: number | null }
 const STATUS_UA: Record<string, string> = { won: 'виграш', lost: 'програш', pending: 'очікується', cashout: 'продано', void: 'повернення' };
 
-async function readPost(post: PagePost): Promise<{ ocr: string; full: string; ai?: boolean; slip?: Slip | null; tip?: AiTip }> {
+async function readPost(post: PagePost, hint = ''): Promise<{ ocr: string; full: string; ai?: boolean; slip?: Slip | null; tip?: AiTip }> {
   // the model first (when GEMINI_API_KEY is set): it tells a tip from news and reads the slip; its answer becomes a plain tip line
-  const ai = await aiReadPost(post.text, post.photos);
+  const ai = await aiReadPost(post.text, post.photos, hint);
   if (ai) {
     const line = aiLine(ai);
     const slip: Slip | null = ai.isTip && ai.status ? { status: ai.status, stake: ai.stake && ai.stake > 0 ? ai.stake : null, currency: currencyCode(ai.currency), payout: ai.payout && ai.payout > 0 ? ai.payout : null } : null;
@@ -166,7 +168,7 @@ async function markEditedAndDeleted(handle: string, posts: PagePost[], lastId: n
 /** Read one channel now: new posts → parsed → saved. Returns how many posts were new. */
 const busy = new Set<string>();
 /** A running «Перечитати» / first read of a new channel: posts to read and read so far (progress in the admin). */
-export const progress = new Map<string, { total: number; done: number; kind: 'reread' | 'add' | 'collect' }>();
+export const progress = new Map<string, { total: number; done: number; kind: 'reread' | 'add' | 'collect' | 'archive' }>();
 
 /** Reads the channel until every saved post is re-read (8 a pass), not waiting for the next 10-minute pass. */
 export async function rereadChannel(handle: string, total: number): Promise<void> {
@@ -199,19 +201,88 @@ export async function collectChannel(handle: string, cands?: TgCandidate[]): Pro
   busy.add(handle);
   try { return await collectChannel1(handle, cands); } finally { busy.delete(handle); }
 }
-async function collectChannel1(handle: string, cands?: TgCandidate[]): Promise<number> {
-  const ch = (await pool.query<{ last_post_id: number; game: string; rules: TgRules }>('SELECT last_post_id, game, rules FROM tg_channels WHERE handle = $1', [handle])).rows[0];
-  if (!ch) return 0;
-  let page;
-  try { page = await fetchChannelPage(handle); } catch (e) {
-    await pool.query('UPDATE tg_channels SET checked_at = now(), error = $2 WHERE handle = $1', [handle, (e as Error).message.slice(0, 300)]);
-    return 0;
+interface Ctx { handle: string; ch: { last_post_id: number; game: string; rules: TgRules; profile: Profile }; list: TgCandidate[]; feed: FeedMatch[] }
+type Profile = { bookmakers?: Record<string, number>; markets?: Record<string, number> };
+
+/** What the channel usually posts, for the reader: «slips of BC.GAME; mostly map winners». */
+function profileHint(p: Profile): string {
+  const top = (o?: Record<string, number>) => Object.entries(o || {}).sort((x, y) => y[1] - x[1]).slice(0, 3).map(([k]) => k);
+  const b = top(p.bookmakers), m = top(p.markets);
+  return [b.length ? `its slips are usually from ${b.join(', ')}` : '', m.length ? `its usual markets: ${m.join(', ')}` : ''].filter(Boolean).join('; ');
+}
+
+/** One post: read (AI / OCR), parsed, saved; its tip checked against our feed (live, odds) and its slip applied. */
+async function handlePost(ctx: Ctx, post: PagePost, backfill: boolean): Promise<void> {
+  const { handle, ch, list, feed } = ctx;
+  if (post.poll && !post.photos.length) { await savePost(handle, post, '', { kind: 'other', reason: 'Опитування' }, backfill); return; }
+  const { ocr, full, ai, slip, tip } = await readPost(post, profileHint(ch.profile));
+  let parsed: TgParsed = ai && !full ? { kind: 'other' } : parseTgPost(full, post.at, list, ch.rules || {});
+  // a results summary («вчора 5/6»): kept as the channel's claim, compared with our results in the sheet
+  if (tip?.report && (tip.report.won != null || tip.report.total != null) && !tip.isTip) parsed = { kind: 'other', reason: 'Підсумок' };
+  // map totals / handicaps in rounds: the match from the parser, the market from the answer
+  if (tip?.isTip && (tip.market === 'map_total' || tip.market === 'map_handicap') && parsed.kind === 'bet' && tip.line != null) {
+    const n = tip.map || 1;
+    parsed = tip.market === 'map_total'
+      ? { ...parsed, market: `Map ${n} Total ${tip.over === false ? 'Under' : 'Over'} ${Math.abs(tip.line)}`, pick: '' }
+      : { ...parsed, market: `Map ${n} Handicap ${tip.line > 0 ? '+' : '-'}${Math.abs(tip.line)}` };
   }
-  if (!page.isPublic) { await pool.query(`UPDATE tg_channels SET checked_at = now(), error = 'Канал не знайдено або він приватний' WHERE handle = $1`, [handle]); return 0; }
-  const fresh = page.posts.filter((p) => p.id > ch.last_post_id && (p.text || p.photos.length));
-  await markEditedAndDeleted(handle, page.posts, ch.last_post_id);
+  // an express: every leg is read like a single, the bet is won when all legs are
+  let legs: Leg[] | null = null;
+  if (tip?.isTip && tip.market === 'express' && tip.legs?.length) {
+    legs = tip.legs.map((l) => {
+      const p1 = parseTgPost(aiLine({ ...l, isTip: true, game: tip.game }), post.at, list, ch.rules || {});
+      const m = 'match' in p1 ? p1.match : undefined;
+      return { team1: m?.team1 || l.team1 || '', team2: m?.team2 || l.team2 || '', market: p1.kind === 'bet' ? p1.market : 'Match Winner', pick: p1.kind === 'bet' ? p1.pick : l.pick || null, odds: l.odds ?? null, matchId: m?.id ?? null };
+    }).filter((l) => l.team1 && l.team2);
+    if (legs.length >= 2) parsed = { kind: 'bet', match: { id: `tg:express:${handle}:${post.id}`, game: tip.game === 'dota2' ? 'dota2' : 'cs2', team1: 'Експрес', team2: `${legs.length} ${legs.length < 5 ? 'події' : 'подій'}`, start: post.at }, market: 'Express', pick: '', odds: tip.odds ?? null };
+    else legs = null;
+  }
+  if (!gameOk(ch.game, parsed)) parsed = { kind: 'other' };
+  parsed = await repeatOf(handle, post, parsed, slip);
+  await savePost(handle, post, ocr, parsed, backfill);
+  if (tip?.report && parsed.kind === 'other' && parsed.reason === 'Підсумок') await pool.query('UPDATE tg_posts SET claim = $3 WHERE handle = $1 AND post_id = $2', [handle, post.id, JSON.stringify(tip.report)]);
+  if (parsed.kind === 'bet') {
+    // our odds for the pick when the match is in the feed: a tip far above them (≥ 15 %) is marked
+    const fm = feed.find((x) => x.id === parsed.match.id);
+    const ourOdds = fm && parsed.market === 'Match Winner' && parsed.pick ? (sameName(parsed.pick, fm.team1) ? fm.coeff1 : sameName(parsed.pick, fm.team2) ? fm.coeff2 : null) : null;
+    const high = !!(ourOdds && parsed.odds && parsed.odds > ourOdds * 1.15);
+    await pool.query('UPDATE tg_posts SET legs = $3, is_live = $4, our_odds = $5, odds_high = $6, our_result = NULL, mismatch = false, settled_by = NULL WHERE handle = $1 AND post_id = $2 AND fixed_by IS NULL',
+      [handle, post.id, legs ? JSON.stringify(legs) : null, placedLive(parsed.match.id, post.at, feed), ourOdds ?? null, high]);
+    // what the channel posts, for the next reads
+    const mk = parsed.market.replace(/\d+(\.\d+)?/g, 'N').replace(/[+-]/g, '');
+    await pool.query(`UPDATE tg_channels SET profile = jsonb_set(jsonb_set(profile, '{markets}', COALESCE(profile->'markets', '{}'::jsonb) || jsonb_build_object($2::text, COALESCE((profile->'markets'->>$2)::int, 0) + 1)),
+        '{bookmakers}', COALESCE(profile->'bookmakers', '{}'::jsonb) || CASE WHEN $3::text IS NULL THEN '{}'::jsonb ELSE jsonb_build_object($3::text, COALESCE((profile->'bookmakers'->>$3)::int, 0) + 1) END) WHERE handle = $1`,
+      [handle, mk, tip?.bookmaker ? tip.bookmaker.trim().slice(0, 30) : null]).catch(() => {});
+  }
+  if (slip && parsed.kind === 'bet') await applySlip(handle, post.id, slip);
+  // «Результат»: the post shows its own slip (won / lost), the tip and its money stay counted once — on the first post
+  else if (slip && parsed.kind === 'other' && parsed.reason === 'Результат') await pool.query('UPDATE tg_posts SET slip = $3, stake = $4, currency = $5, payout = $6 WHERE handle = $1 AND post_id = $2', [handle, post.id, slip.status, slip.stake, slip.currency, slip.payout]);
+  const pr = progress.get(handle);
+  if (pr) pr.done = Math.min(pr.total, pr.done + 1);
+}
+
+async function channelCtx(handle: string, cands: TgCandidate[] | undefined, since?: string): Promise<Ctx | null> {
+  const ch = (await pool.query<Ctx['ch']>('SELECT last_post_id, game, rules, profile FROM tg_channels WHERE handle = $1', [handle])).rows[0];
+  if (!ch) return null;
+  return { handle, ch, list: cands && !since ? cands : await tgCandidates(since), feed: feedMatches() };
+}
+
+/** A read of the channel page failed: counted; the 3rd failure in a row goes to «Помилки сервера». */
+async function readFailed(handle: string, msg: string): Promise<void> {
+  const r = (await pool.query<{ fails: number }>('UPDATE tg_channels SET checked_at = now(), error = $2, fails = fails + 1 WHERE handle = $1 RETURNING fails', [handle, msg.slice(0, 300)])).rows[0];
+  if (r && r.fails === 3) recordServerError('process', `[tg] @${handle} не читається 3 рази поспіль: ${msg}`, '', `/telegram/${handle}`);
+}
+
+async function collectChannel1(handle: string, cands?: TgCandidate[]): Promise<number> {
+  const ch0 = (await pool.query<{ last_post_id: number }>('SELECT last_post_id FROM tg_channels WHERE handle = $1', [handle])).rows[0];
+  if (!ch0) return 0;
+  let page;
+  try { page = await fetchChannelPage(handle); } catch (e) { await readFailed(handle, (e as Error).message); return 0; }
+  if (!page.isPublic) { await readFailed(handle, 'Канал не знайдено або він приватний'); return 0; }
+  const fresh = page.posts.filter((p) => p.id > ch0.last_post_id && (p.text || p.photos.length));
+  await markEditedAndDeleted(handle, page.posts, ch0.last_post_id);
   // posts saved by an older reader (photos IS NULL): read again — own text (not a reply's quote), screenshots
-  const older = page.posts.filter((p) => p.id <= ch.last_post_id);
+  const older = page.posts.filter((p) => p.id <= ch0.last_post_id);
   const unread = older.length ? new Set((await pool.query<{ post_id: number }>('SELECT post_id FROM tg_posts WHERE handle = $1 AND photos IS NULL AND post_id = ANY($2::int[])', [handle, older.map((p) => p.id)])).rows.map((r) => r.post_id)) : new Set<number>();
   // re-reading is spread over passes (8 posts a pass, newest first) so a pass stays short
   const again = older.filter((p) => unread.has(p.id)).sort((a, b) => b.id - a.id).slice(0, 8);
@@ -220,44 +291,49 @@ async function collectChannel1(handle: string, cands?: TgCandidate[]): Promise<n
   const own = !progress.has(handle) && todo.length > 0;
   if (own) progress.set(handle, { total: todo.length, done: 0, kind: 'collect' });
   try {
-  const oldest = todo.reduce((a, p) => (a && a < p.at ? a : p.at), '');
-  const list = cands && !unread.size ? cands : await tgCandidates(oldest || undefined);
-  const feed = feedMatches();
-  for (const post of todo) {
-    const { ocr, full, ai, slip, tip } = await readPost(post);
-    let parsed = ai && !full ? { kind: 'other' as const } : parseTgPost(full, post.at, list, ch.rules || {});
-    // an express: every leg is read like a single, the bet is won when all legs are
-    let legs: Leg[] | null = null;
-    if (tip?.isTip && tip.market === 'express' && tip.legs?.length) {
-      legs = tip.legs.map((l) => {
-        const p1 = parseTgPost(aiLine({ ...l, isTip: true, game: tip.game }), post.at, list, ch.rules || {});
-        const m = 'match' in p1 ? p1.match : undefined;
-        return { team1: m?.team1 || l.team1 || '', team2: m?.team2 || l.team2 || '', market: p1.kind === 'bet' ? p1.market : 'Match Winner', pick: p1.kind === 'bet' ? p1.pick : l.pick || null, odds: l.odds ?? null, matchId: m?.id ?? null };
-      }).filter((l) => l.team1 && l.team2);
-      if (legs.length >= 2) parsed = { kind: 'bet', match: { id: `tg:express:${handle}:${post.id}`, game: tip.game === 'dota2' ? 'dota2' : 'cs2', team1: 'Експрес', team2: `${legs.length} ${legs.length < 5 ? 'події' : 'подій'}`, start: post.at }, market: 'Express', pick: '', odds: tip.odds ?? null };
-      else legs = null;
-    }
-    if (!gameOk(ch.game, parsed)) parsed = { kind: 'other' };
-    parsed = await repeatOf(handle, post, parsed, slip);
-    await savePost(handle, post, ocr, parsed, post.id <= ch.last_post_id);
-    if (parsed.kind === 'bet') {
-      await pool.query('UPDATE tg_posts SET legs = $3, is_live = $4, our_result = NULL, mismatch = false, settled_by = NULL WHERE handle = $1 AND post_id = $2 AND fixed_by IS NULL',
-        [handle, post.id, legs ? JSON.stringify(legs) : null, placedLive(parsed.match.id, post.at, feed)]);
-    }
-    if (slip && parsed.kind === 'bet') await applySlip(handle, post.id, slip);
-    // «Результат»: the post shows its own slip (won / lost), the tip and its money stay counted once — on the first post
-    else if (slip && parsed.kind === 'other' && parsed.reason === 'Результат') await pool.query('UPDATE tg_posts SET slip = $3, stake = $4, currency = $5, payout = $6 WHERE handle = $1 AND post_id = $2', [handle, post.id, slip.status, slip.stake, slip.currency, slip.payout]);
-    const pr = progress.get(handle);
-    if (pr) pr.done = Math.min(pr.total, pr.done + 1);
-  }
+    const oldest = todo.reduce((a, p) => (a && a < p.at ? a : p.at), '');
+    const ctx = await channelCtx(handle, cands, unread.size ? oldest || undefined : undefined);
+    if (ctx) for (const post of todo) await handlePost(ctx, post, post.id <= ch0.last_post_id);
   } finally { if (own) progress.delete(handle); }
-  const last = page.posts.reduce((a, p) => (p.id > a.id ? p : a), { id: ch.last_post_id, at: '' } as { id: number; at: string });
+  const last = page.posts.reduce((a, p) => (p.id > a.id ? p : a), { id: ch0.last_post_id, at: '' } as { id: number; at: string });
   await pool.query(
-    `UPDATE tg_channels SET title = COALESCE($2, title), subscribers = COALESCE($3, subscribers), checked_at = now(), error = NULL,
+    `UPDATE tg_channels SET title = COALESCE($2, title), subscribers = COALESCE($3, subscribers), checked_at = now(), error = NULL, fails = 0,
        last_post_id = GREATEST(last_post_id, $4), last_post_at = COALESCE($5::timestamptz, last_post_at) WHERE handle = $1`,
     [handle, page.title, page.subscribers, last.id, last.at || null],
   );
   return fresh.length;
+}
+
+/** «Підтягнути архів»: the pages before the oldest post we have (t.me/s/…?before=…), up to `pages` × ~20 posts, each read like a new one. */
+export async function collectArchive(handle: string, pages = 5): Promise<number> {
+  const min = Number((await pool.query<{ m: number | null }>('SELECT min(post_id) AS m FROM tg_posts WHERE handle = $1', [handle])).rows[0]?.m || 0);
+  if (!min) return 0;
+  const posts: PagePost[] = [];
+  let before = min;
+  for (let i = 0; i < pages && before > 1; i++) {
+    const page = await fetchChannelPage(handle, before).catch(() => null);
+    const got = (page?.posts || []).filter((p) => p.id < before && (p.text || p.photos.length || p.poll));
+    if (!got.length) break;
+    posts.push(...got);
+    before = Math.min(...got.map((p) => p.id));
+    await new Promise((ok) => setTimeout(ok, 1_500));
+  }
+  if (!posts.length) return 0;
+  const sorted = posts.sort((a, b) => a.id - b.id);
+  progress.set(handle, { total: sorted.length, done: 0, kind: 'archive' });
+  try {
+    const ctx = await channelCtx(handle, undefined, sorted[0].at);
+    if (ctx) for (const post of sorted) await handlePost(ctx, post, false);
+    await settleTgTips().catch(() => 0);
+  } finally { progress.delete(handle); }
+  return sorted.length;
+}
+
+/** A channel with no posts for 14 days is paused (not a test one the admin added): the reads would cost for nothing. */
+export async function pauseSilent(): Promise<number> {
+  const { rowCount } = await pool.query(
+    `UPDATE tg_channels SET paused = true, auto_paused = 'Без нових постів 14 днів' WHERE NOT paused AND last_post_at < now() - interval '14 days' AND created_at < now() - interval '1 day'`);
+  return rowCount || 0;
 }
 
 /** Public links users added to «Telegram-групи» become channels (not blocked ones). */
@@ -284,6 +360,7 @@ export async function tgCycle(): Promise<void> {
   running = true;
   try {
     await syncUserChannels().catch(() => {});
+    await pauseSilent().catch(() => 0);
     const { rows } = await pool.query<{ handle: string }>(
       `SELECT c.handle FROM tg_channels c WHERE NOT c.paused AND NOT EXISTS (
          SELECT 1 FROM telegram_groups g WHERE g.moderation_status = 'rejected' AND lower(g.link) LIKE '%' || c.handle || '%') ORDER BY c.checked_at NULLS FIRST`);

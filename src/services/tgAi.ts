@@ -37,12 +37,16 @@ let nextAt = 0; // free tier: ~10–15 requests a minute — one call per 6 s
 
 export interface AiTip {
   isTip: boolean; game?: 'cs2' | 'dota2' | 'other' | null; team1?: string | null; team2?: string | null;
-  market?: 'match_winner' | 'map_winner' | 'total_maps' | 'handicap' | 'express' | 'other' | null;
+  market?: 'match_winner' | 'map_winner' | 'total_maps' | 'handicap' | 'map_total' | 'map_handicap' | 'express' | 'other' | null;
   map?: number | null; pick?: string | null; line?: number | null; over?: boolean | null; odds?: number | null;
   /** What the slip itself shows: its state and the money on it (in the slip's currency). */
   status?: 'won' | 'lost' | 'pending' | 'void' | 'cashout' | null; stake?: number | null; currency?: string | null; payout?: number | null;
   /** An express: its legs (each a single bet), odds = the total odds. */
   legs?: AiTip[] | null;
+  /** The bookmaker of the slip (BC.GAME, 1win…) — what the channel usually posts. */
+  bookmaker?: string | null;
+  /** A results summary the channel posted («вчора 5/6 ✅»): its claim, checked against ours. */
+  report?: { won?: number | null; total?: number | null; period?: string | null } | null;
 }
 
 const PROMPT = `You read posts of a Telegram channel about esports betting (CS2, Dota 2). A post has a caption and maybe a screenshot of a bet slip or of an app.
@@ -53,15 +57,20 @@ For a tip, read: game, the two teams exactly as written, the market, the side pi
 "pick" is the team name only (no numbers, no brackets). For a handicap give the signed line of the picked team (+1.5 or -1.5).
 From the slip also read: status — read the words on the slip and its button/badge first: won (Виграш, Виграно, Выигрыш, Выиграна, Won, «Профіт +…» shown as gained, a green ticket whose button says the bet won), lost (Програш, Проигрыш, Lost, red), pending (Очікується, Ожидается, Открыта, Pending, "possible win" only), cashout (sold / Продано / cash out), void (returned / refund); null when there is no slip;
 stake — the amount staked, currency — its code or sign as written (₴, UAH, ₽, RUB, $, USD, USDT, €), payout — the total paid or to be paid (stake × odds), all as plain numbers.
-Markets: match_winner (the series winner), map_winner (winner of map N — set "map"), total_maps (over/under N.5 maps — set "line" and "over"), handicap (map handicap — set "pick" and "line" like -1.5), express (several matches in one bet — then list every match in "legs" with its own market, pick and odds, and give the total odds in "odds"), other.
-Football, basketball and other non-esports bets: isTip=false. Answer JSON only.`;
+Markets: match_winner (the series winner), map_winner (winner of map N — set "map"), total_maps (over/under N.5 maps — set "line" and "over"), handicap (map handicap — set "pick" and "line" like -1.5),
+map_total (rounds / kills total on map N — set "map", "line", "over"), map_handicap (rounds handicap on map N — set "map", "pick", "line"), express (several matches in one bet — then list every match in "legs" with its own market, pick and odds, and give the total odds in "odds"), other.
+Football, basketball and other non-esports bets: isTip=false. A tip written only in text («беру NAVI П1 за 1.85», «ставлю на Spirit 1.7») is a tip too.
+A poll («хто виграє?») is not a tip. A summary of results («вчора 5/6 ✅», «за тиждень +12 юнітів») is not a tip: set "report" with won / total and the period.
+"bookmaker": the bookmaker of the slip when it is shown (BC.GAME, 1win, Stake, Roobet, Pinnacle…). Answer JSON only.`;
 
 const SCHEMA = {
   type: 'OBJECT',
   properties: {
     isTip: { type: 'BOOLEAN' }, game: { type: 'STRING', nullable: true, enum: ['cs2', 'dota2', 'other'] },
     team1: { type: 'STRING', nullable: true }, team2: { type: 'STRING', nullable: true },
-    market: { type: 'STRING', nullable: true, enum: ['match_winner', 'map_winner', 'total_maps', 'handicap', 'express', 'other'] },
+    market: { type: 'STRING', nullable: true, enum: ['match_winner', 'map_winner', 'total_maps', 'handicap', 'map_total', 'map_handicap', 'express', 'other'] },
+    bookmaker: { type: 'STRING', nullable: true },
+    report: { type: 'OBJECT', nullable: true, properties: { won: { type: 'INTEGER', nullable: true }, total: { type: 'INTEGER', nullable: true }, period: { type: 'STRING', nullable: true } } },
     map: { type: 'INTEGER', nullable: true }, pick: { type: 'STRING', nullable: true }, line: { type: 'NUMBER', nullable: true },
     over: { type: 'BOOLEAN', nullable: true }, odds: { type: 'NUMBER', nullable: true },
     status: { type: 'STRING', nullable: true, enum: ['won', 'lost', 'pending', 'void', 'cashout'] },
@@ -76,15 +85,15 @@ const SCHEMA = {
 };
 
 /** The post read by the model, or null (no key, quota, network) — then OCR + rules take over. */
-export async function aiReadPost(caption: string, photos: string[]): Promise<AiTip | null> {
+export async function aiReadPost(caption: string, photos: string[], hint = ''): Promise<AiTip | null> {
   const key = process.env.GEMINI_API_KEY;
   if (!key) return null;
   const wait = nextAt - Date.now();
   if (wait > 0) await new Promise((ok) => setTimeout(ok, wait));
   nextAt = Date.now() + 6_000;
   try {
-    const parts: unknown[] = [{ text: `${PROMPT}\n\nCaption:\n${caption || '(no caption)'}` }];
-    for (const url of photos.slice(0, 2)) {
+    const parts: unknown[] = [{ text: `${PROMPT}${hint ? `\n\nAbout this channel: ${hint}` : ''}\n\nCaption:\n${caption || '(no caption)'}` }];
+    for (const url of photos.slice(0, 4)) { // an album: up to 4 screenshots
       const r = await fetch(url, { signal: AbortSignal.timeout(15_000) });
       if (!r.ok) continue;
       const buf = Buffer.from(await r.arrayBuffer());
@@ -158,7 +167,7 @@ export function aiLine(a: AiTip): string {
   const game = a.game === 'dota2' ? 'Dota 2' : a.game === 'cs2' ? 'CS2' : '';
   let bet = '';
   if (a.market === 'express') bet = 'Експрес';
-  else if (a.market === 'map_winner') bet = `Карта ${a.map || 1} переможець ${a.pick || ''}`;
+  else if (a.market === 'map_winner' || a.market === 'map_total' || a.market === 'map_handicap') bet = `Карта ${a.map || 1} переможець ${a.pick || a.team1 || ''}`; // the market itself is set from the answer
   else if (a.market === 'total_maps' && a.line) bet = `${a.over === false ? 'ТМ' : 'ТБ'} ${n2(a.line)}`;
   else if (a.market === 'handicap' && a.line != null) bet = `Фора ${a.pick || ''} ${a.line > 0 ? '+' : ''}${n2(a.line)}`;
   else if (a.pick) bet = `Перемога ${a.pick}`;

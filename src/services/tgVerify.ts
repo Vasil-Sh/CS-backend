@@ -10,7 +10,7 @@ import { normalizeTeam } from '../utils/matchUtils';
 import { shortFor } from '../utils/teamAbbrev';
 
 type Res = 'Win' | 'Loss';
-export interface FeedMatch { id: string; game: 'cs2' | 'dota2'; team1: string; team2: string; start: string; status: string; score1: number | null; score2: number | null; maps?: { score1: number | null; score2: number | null }[] }
+export interface FeedMatch { id: string; game: 'cs2' | 'dota2'; team1: string; team2: string; start: string; status: string; score1: number | null; score2: number | null; maps?: { score1: number | null; score2: number | null }[]; coeff1?: number | null; coeff2?: number | null }
 
 /** Today's / tomorrow's / live matches of our feed (the caches the matches screen reads). */
 export function feedMatches(): FeedMatch[] {
@@ -19,8 +19,8 @@ export function feedMatches(): FeedMatch[] {
     const f = join(process.cwd(), '.cache', `${game}_matches.json`);
     try {
       if (!existsSync(f)) continue;
-      const data = JSON.parse(readFileSync(f, 'utf8')).data as { id: string; nameTeam1: string; nameTeam2: string; startDate?: string | null; date: string; status?: string; score1?: number | null; score2?: number | null; maps?: FeedMatch['maps'] }[];
-      for (const m of data || []) if (m?.id && m.nameTeam1 && m.nameTeam2) out.push({ id: String(m.id), game, team1: m.nameTeam1, team2: m.nameTeam2, start: m.startDate || `${m.date}T12:00:00Z`, status: m.status || 'upcoming', score1: m.score1 ?? null, score2: m.score2 ?? null, maps: m.maps });
+      const data = JSON.parse(readFileSync(f, 'utf8')).data as { id: string; nameTeam1: string; nameTeam2: string; startDate?: string | null; date: string; status?: string; score1?: number | null; score2?: number | null; maps?: FeedMatch['maps']; coeff1?: number | null; coeff2?: number | null }[];
+      for (const m of data || []) if (m?.id && m.nameTeam1 && m.nameTeam2) out.push({ id: String(m.id), game, team1: m.nameTeam1, team2: m.nameTeam2, start: m.startDate || `${m.date}T12:00:00Z`, status: m.status || 'upcoming', score1: m.score1 ?? null, score2: m.score2 ?? null, maps: m.maps, coeff1: m.coeff1 ?? null, coeff2: m.coeff2 ?? null });
     } catch { /* skipped */ }
   }
   return out;
@@ -37,12 +37,29 @@ const pairOf = (t1: string, t2: string, m1: string, m2: string): 0 | 1 | -1 => (
 // ── map winners ──
 const keyOf = (game: string, date: string, a: string, b: string) => `${game}|${date}|${[normalizeTeam(a), normalizeTeam(b)].join('|')}`;
 /** Who won each map (1 = team1, 2 = team2) — from PandaScore games or Liquipedia map scores. */
-export async function recordMaps(game: string, date: string, team1: string, team2: string, winners: (1 | 2)[], source: string): Promise<void> {
+export async function recordMaps(game: string, date: string, team1: string, team2: string, winners: (1 | 2)[], source: string, scores?: [number, number][]): Promise<void> {
   if (!winners.length || !team1 || !team2) return;
   await pool.query(
-    `INSERT INTO match_maps(key, game, date, team1, team2, winners, source) VALUES($1,$2,$3,$4,$5,$6,$7)
-     ON CONFLICT (key) DO UPDATE SET winners = CASE WHEN jsonb_array_length(EXCLUDED.winners) >= jsonb_array_length(match_maps.winners) THEN EXCLUDED.winners ELSE match_maps.winners END, updated_at = now()`,
-    [keyOf(game, date, team1, team2), game, date, team1, team2, JSON.stringify(winners), source]).catch(() => {});
+    `INSERT INTO match_maps(key, game, date, team1, team2, winners, source, scores) VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+     ON CONFLICT (key) DO UPDATE SET winners = CASE WHEN jsonb_array_length(EXCLUDED.winners) >= jsonb_array_length(match_maps.winners) THEN EXCLUDED.winners ELSE match_maps.winners END,
+       scores = COALESCE(EXCLUDED.scores, match_maps.scores), updated_at = now()`,
+    [keyOf(game, date, team1, team2), game, date, team1, team2, JSON.stringify(winners), source, scores ? JSON.stringify(scores) : null]).catch(() => {});
+}
+
+/** Round score of map n (team1 of the tip first), from the stored map scores or the feed's; null when unknown. */
+async function mapScore(game: string, day: string, t1: string, t2: string, n: number): Promise<[number, number] | null> {
+  const rows = (await pool.query<{ team1: string; team2: string; scores: [number, number][] | null; winners: (1 | 2)[] }>(
+    `SELECT team1, team2, scores, winners FROM match_maps WHERE date BETWEEN $1::date - 1 AND $1::date + 3 AND scores IS NOT NULL`, [day]).catch(() => ({ rows: [] }))).rows;
+  for (const r of rows) {
+    const o = pairOf(t1, t2, r.team1, r.team2), sc = r.scores?.[n - 1];
+    if (o && sc && r.winners[n - 1]) return o === 1 ? sc : [sc[1], sc[0]];
+  }
+  for (const m of feedMatches()) {
+    const o = pairOf(t1, t2, m.team1, m.team2), sc = m.maps?.[n - 1];
+    if (!o || !sc || sc.score1 == null || sc.score2 == null || !winnersFromScores(m.maps!, m.status === 'finished')[n - 1]) continue;
+    return o === 1 ? [sc.score1, sc.score2] : [sc.score2, sc.score1];
+  }
+  return null;
 }
 /** Map scores as winners: a map counts once one side has won it (13+ with a 2-round lead, or any map before the last one). */
 export function winnersFromScores(maps: { score1: number | null; score2: number | null }[], finished: boolean): (1 | 2)[] {
@@ -95,8 +112,14 @@ async function betResult(game: string, day: string, b: { matchId: string | null;
   if (!f || !(f.h.score1 || f.h.score2)) return null;
   const s1 = f.flip ? f.h.score2! : f.h.score1!, s2 = f.flip ? f.h.score1! : f.h.score2!;
   const mm = /^Map (\d) Winner$/.exec(b.market);
+  const mt = /^Map (\d) Total (Over|Under) ([\d.]+)$/.exec(b.market), mh = /^Map (\d) Handicap ([+-][\d.]+)$/.exec(b.market);
   let res: Res | null;
-  if (mm) {
+  if (mt || mh) {
+    const sc = await mapScore(game, f.h.date, b.team1, b.team2, Number((mt || mh)![1]));
+    if (!sc) res = null;
+    else if (mt) { const t = sc[0] + sc[1], line = Number(mt[3]); res = t === line ? null : (mt[2] === 'Over' ? t > line : t < line) ? 'Win' : 'Loss'; }
+    else { const mine = b.pick && sameName(b.pick, b.team2) ? sc[1] - sc[0] : sc[0] - sc[1], v = mine + Number(mh![2]); res = v === 0 ? null : v > 0 ? 'Win' : 'Loss'; }
+  } else if (mm) {
     const w = await mapWinner(game, f.h.date, b.team1, b.team2, Number(mm[1]), { s1, s2 });
     res = w == null || !b.pick ? null : (w === 1 ? sameName(b.pick, b.team1) : sameName(b.pick, b.team2)) ? 'Win' : 'Loss';
   } else {

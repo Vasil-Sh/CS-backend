@@ -182,7 +182,7 @@ export function parseTgPost(text: string, postedAt: string, cands: TgCandidate[]
 }
 
 /** Text of a t.me/s/<handle> page: channel info and its last ~20 posts (newest last). */
-export interface TgPage { title: string | null; subscribers: number | null; posts: { id: number; at: string; text: string; photos: string[] }[]; isPublic: boolean }
+export interface TgPage { title: string | null; subscribers: number | null; posts: { id: number; at: string; text: string; photos: string[]; poll?: boolean }[]; isPublic: boolean }
 const ENT: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", nbsp: ' ' };
 export function htmlText(h: string): string {
   return h.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '').replace(/&(#\d+|#x[0-9a-f]+|\w+);/gi, (m, e: string) =>
@@ -204,7 +204,9 @@ export function parseTgPage(html: string): TgPage {
     // photos (single or an album): <a class="tgme_widget_message_photo_wrap …" style="…background-image:url('…')">
     const photos: string[] = [];
     for (const ph of block.matchAll(/class="tgme_widget_message_photo_wrap[^"]*"[^>]*?style="[^"]*background-image:url\('([^']+)'\)/g)) if (!photos.includes(ph[1])) photos.push(ph[1]);
-    posts.push({ id: Number(m[1]), at: new Date(dt[1]).toISOString(), text: tm ? htmlText(tm[1]) : '', photos: photos.slice(0, 4) });
+    const poll = /class="tgme_widget_message_poll/.test(block);
+    const pollQ = poll ? (/class="tgme_widget_message_poll_question"[^>]*>([\s\S]*?)<\/div>/.exec(block) || [])[1] : undefined;
+    posts.push({ id: Number(m[1]), at: new Date(dt[1]).toISOString(), text: tm ? htmlText(tm[1]) : pollQ ? htmlText(pollQ) : '', photos: photos.slice(0, 6), ...(poll ? { poll: true } : {}) });
   }
   return { title: title ? htmlText(title) : null, subscribers, posts, isPublic: /tgme_channel_info|tgme_widget_message/.test(html) };
 }

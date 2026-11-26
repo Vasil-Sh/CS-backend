@@ -59,5 +59,8 @@ describe('screenshots (OCR text)', () => {
     expect(teamsFromText('Team OG vs Aurora Gaming 0:0 и!')).toEqual(['Team OG', 'Aurora Gaming']);
     expect(teamsFromText('просто текст без матчу')).toBeNull();
   });
+  it('page: a poll is marked', () => {
+    const html = `<div class="tgme_widget_message" data-post="ch/9"><div class="tgme_widget_message_poll js-poll"><div class="tgme_widget_message_poll_question">Хто виграє?</div></div><time datetime="2026-11-26T10:00:00+00:00"></time></div>`;
+    expect(parseTgPage(html).posts[0]).toMatchObject({ id: 9, poll: true, text: 'Хто виграє?' });
+  });
 });
-

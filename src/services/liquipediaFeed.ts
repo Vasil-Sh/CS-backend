@@ -641,7 +641,8 @@ async function refreshMaps(game: 'cs2' | 'dota2'): Promise<void> {
     if (maps.length) {
       m.maps = maps; got++;
       const w = winnersFromScores(maps, m.status === 'finished');
-      if (w.length) void recordMaps(game, (m.startDate || m.date || '').slice(0, 10), m.nameTeam1, m.nameTeam2, w, 'liquipedia');
+      const sc = maps.slice(0, w.length).map((x) => [x.score1 ?? 0, x.score2 ?? 0] as [number, number]);
+      if (w.length) void recordMaps(game, (m.startDate || m.date || '').slice(0, 10), m.nameTeam1, m.nameTeam2, w, 'liquipedia', sc);
     }
   }
   if (got) persist(game, data, mem[game]?.at);
