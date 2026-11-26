@@ -47,7 +47,7 @@ function saveUsage(): void {
 /** Requests left today for the main model; near the end of it the reader moves to Flash-Lite (its own, larger quota). */
 export function aiQuota(): { used: number; limit: number; day: string; byModel: Record<string, number> } {
   const day = pacificDay(), by = aiUsage.day === day ? aiUsage.byModel : {};
-  return { used: by[MODEL()] || 0, limit: DAILY(), day, byModel: by };
+  return { used: by[MODEL()] || 0, limit: readerLimit('gemini').limit ?? DAILY(), day, byModel: by };
 }
 let nextAt = 0; // free tier: ~10–15 requests a minute — one call per 6 s
 
