@@ -64,6 +64,14 @@ async function mapWinner(game: string, day: string, t1: string, t2: string, n: n
     const w = r.winners[n - 1];
     return o === 1 ? w : w === 1 ? 2 : 1;
   }
+  // the map scores our feed holds for the match (Liquipedia's match page)
+  for (const m of feedMatches()) {
+    if (!m.maps?.length) continue;
+    const o = pairOf(t1, t2, m.team1, m.team2);
+    if (!o) continue;
+    const w = winnersFromScores(m.maps, m.status === 'finished')[n - 1];
+    if (w) return o === 1 ? w : w === 1 ? 2 : 1;
+  }
   if (series && (series.s1 === 0 || series.s2 === 0) && Math.max(series.s1, series.s2) >= n) return series.s1 > series.s2 ? 1 : 2;
   return null;
 }
@@ -97,8 +105,36 @@ async function betResult(game: string, day: string, b: { matchId: string | null;
   return res ? { res, score: `${s1}:${s2}`, matchId: f.h.match_id } : null;
 }
 
+/** One tip posted twice (a share card and the bookmaker's slip, a repost): the same team at the same odds within two days.
+ *  The later post becomes «Результат» (its slip shows the result) or «Повтор»; a result it shows goes to the first one. */
+export async function dedupeTips(): Promise<number> {
+  const { rows } = await pool.query<{ handle: string; post_id: number; posted_at: string; pick: string | null; odds: string | null; slip: string | null; result: string | null; stake: string | null; currency: string | null; payout: string | null; team1: string | null; team2: string | null; match_id: string | null }>(
+    `SELECT handle, post_id, posted_at, pick, odds, slip, result, stake, currency, payout, team1, team2, match_id FROM tg_posts
+      WHERE kind = 'bet' AND fixed_by IS NULL AND pick IS NOT NULL AND pick <> '' AND odds IS NOT NULL AND posted_at > now() - interval '120 days' ORDER BY handle, post_id`);
+  let n = 0;
+  const kept: typeof rows = [];
+  for (const r of rows) {
+    const first = kept.find((k) => k.handle === r.handle && Math.abs(Number(k.odds) - Number(r.odds)) < 0.015 && sameName(k.pick!, r.pick!)
+      && Date.parse(r.posted_at) - Date.parse(k.posted_at) < 2 * 86_400_000
+      // and the same match, when both slips name it (two different matches of one team at the same odds are two tips)
+      && (k.match_id === r.match_id || !k.team1 || !k.team2 || !r.team1 || !r.team2 || pairOf(k.team1, k.team2, r.team1, r.team2) !== 0));
+    if (!first) { kept.push(r); continue; }
+    const final = r.slip === 'won' || r.slip === 'lost' || r.slip === 'cashout' || r.slip === 'void';
+    await pool.query(`UPDATE tg_posts SET kind = 'other', reason = $3 WHERE handle = $1 AND post_id = $2`, [r.handle, r.post_id, final ? 'Результат' : 'Повтор']);
+    if (final && !first.result) {
+      const res = r.slip === 'won' ? 'Win' : r.slip === 'lost' ? 'Loss' : 'Void';
+      await pool.query(`UPDATE tg_posts SET result = $3, settled_by = 'slip', stake = COALESCE(stake, $4), currency = COALESCE(currency, $5), payout = COALESCE(payout, $6) WHERE handle = $1 AND post_id = $2`,
+        [first.handle, first.post_id, res, r.stake, r.currency, r.payout]);
+      first.result = res;
+    }
+    n++;
+  }
+  return n;
+}
+
 /** Every tip not checked yet: our result, the score; the channel's result where it gave none; a mismatch where it differs. */
 export async function verifyTips(): Promise<number> {
+  await dedupeTips().catch((e) => console.warn('[tg] dedupe:', (e as Error).message));
   const { rows } = await pool.query<{ handle: string; post_id: number; match_id: string | null; market: string; pick: string | null; team1: string; team2: string; game: string | null; day: string; result: string | null; legs: Leg[] | null }>(
     `SELECT handle, post_id, match_id, market, pick, team1, team2, game, to_char(posted_at AT TIME ZONE 'Europe/Kyiv', 'YYYY-MM-DD') AS day, result, legs FROM tg_posts
       WHERE kind = 'bet' AND our_result IS NULL AND posted_at > now() - interval '120 days' AND (team1 IS NOT NULL OR legs IS NOT NULL) ORDER BY posted_at LIMIT 400`);
