@@ -98,7 +98,7 @@ export function cleanOcr(s: string): string {
 
 /** The money on a bookmaker's slip from OCR text: «Сумма ставки 1 55,00 USDT», «Возможный выигрыш 2 43,35», «Открыта / Выиграна / Проиграна».
  *  OCR splits digits with spaces, so a number is read across them; the payout must be above the stake. */
-export function slipFromOcr(text: string): { status: 'won' | 'lost' | 'pending' | 'void' | 'cashout'; stake: number; currency: string | null; payout: number | null } | null {
+export function slipFromOcr(text: string): { status: 'won' | 'lost' | 'pending' | 'void' | 'cashout'; stake: number; currency: string | null; payout: number | null; odds: number | null } | null {
   const t = (text || '').replace(/\u00a0/g, ' ');
   const num = (label: RegExp) => {
     const m = new RegExp(`${label.source}[^\\d]{0,24}((?:\\d[\\d ]{0,9})[.,]\\d{2})\\s*(USDT|USD|RUB|UAH|EUR|KZT|[₽$€₴₸]|руб|грн)?`, 'i').exec(t);
@@ -110,5 +110,8 @@ export function slipFromOcr(text: string): { status: 'won' | 'lost' | 'pending' 
   const status = /выигран|виграно|выигрыш зачислен|\bwon\b/i.test(t) ? 'won' : /проигран|програно|\blost\b/i.test(t) ? 'lost' : /возврат|повернен|\bvoid\b/i.test(t) ? 'void' : /продан|cash ?out/i.test(t) ? 'cashout' : 'pending';
   const cur = (stake.cur || pay?.cur || (/USDT/i.test(t) ? 'USDT' : null));
   const c = !cur ? null : /USDT/i.test(cur) ? 'USDT' : /USD|\$/.test(cur) ? 'USD' : /RUB|₽|руб/i.test(cur) ? 'RUB' : /UAH|₴|грн/i.test(cur) ? 'UAH' : /EUR|€/.test(cur) ? 'EUR' : /KZT|₸/.test(cur) ? 'KZT' : null;
-  return { status, stake: stake.n, currency: c, payout: pay && pay.n > stake.n ? pay.n : null };
+  const payout = pay && pay.n > stake.n ? pay.n : null;
+  // the slip's own odds: (possible) payout ÷ stake — a sold or returned slip pays something else
+  const odds = payout && status !== 'cashout' && status !== 'void' ? Math.round((payout / stake.n) * 100) / 100 : null;
+  return { status, stake: stake.n, currency: c, payout, odds: odds && odds >= 1.01 && odds <= 50 ? odds : null };
 }

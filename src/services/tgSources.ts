@@ -75,7 +75,7 @@ type PagePost = { id: number; at: string; text: string; photos: string[]; poll?:
 
 /** The caption + what OCR read on its screenshots (up to 2) — what the parser sees. */
 /** What a bet slip on the screenshot shows: its state and money. */
-export interface Slip { status: NonNullable<AiTip['status']>; stake: number | null; currency: string | null; payout: number | null }
+export interface Slip { status: NonNullable<AiTip['status']>; stake: number | null; currency: string | null; payout: number | null; /** payout ÷ stake as the slip shows it — the true odds of the bet */ odds?: number | null }
 const STATUS_UA: Record<string, string> = { won: 'виграш', lost: 'програш', pending: 'очікується', cashout: 'продано', void: 'повернення' };
 
 type Read = { ocr: string; full: string; ai?: boolean; slip?: Slip | null; tip?: AiRead; readBy: 'ai' | 'rules' | 'template' | 'cache' | 'ocr' | 'slip' | 'caption'; hash?: string | null; parsed?: TgParsed };
@@ -92,7 +92,7 @@ async function readPost(ctx: Ctx, post: PagePost): Promise<Read> {
   let hash: string | null = null, ai: AiRead | null = ctx.pre.get(post.id) ?? null, readBy: Read['readBy'] = 'ai';
   let ocrText: string | null = null;
   const ocrAll = async () => { if (ocrText == null) { const parts: string[] = []; for (const url of post.photos.slice(0, 2)) { const t = await ocrImage(url); if (t) parts.push(t); } ocrText = parts.join('\n\n'); } return ocrText; };
-  const ocrSlip = (t: string): Slip | null => { const s0 = slipFromOcr(t); return s0 ? { status: s0.status, stake: s0.stake, currency: s0.currency, payout: s0.status === 'pending' ? null : s0.payout } : null; };
+  const ocrSlip = (t: string): Slip | null => { const s0 = slipFromOcr(t); return s0 ? { status: s0.status, stake: s0.stake, currency: s0.currency, payout: s0.status === 'pending' ? null : s0.payout, odds: s0.odds } : null; };
   if (!ai) {
     const { imgs, hash: h } = post.photos.length ? await loadImages(post.photos) : { imgs: [], hash: null };
     hash = h;
@@ -122,7 +122,8 @@ async function readPost(ctx: Ctx, post: PagePost): Promise<Read> {
   }
   if (ai) {
     const line = aiLine(ai);
-    const slip: Slip | null = ai.status || (ai.isTip && ai.stake) ? { status: ai.status || 'pending', stake: ai.stake && ai.stake > 0 ? ai.stake : null, currency: currencyCode(ai.currency), payout: ai.payout && ai.payout > 0 ? ai.payout : null } : null;
+    const st0 = ai.status || 'pending', so = ai.stake && ai.payout && ai.payout > ai.stake && st0 !== 'cashout' && st0 !== 'void' ? Math.round((ai.payout / ai.stake) * 100) / 100 : null;
+    const slip: Slip | null = ai.status || (ai.isTip && ai.stake) ? { status: st0, stake: ai.stake && ai.stake > 0 ? ai.stake : null, currency: currencyCode(ai.currency), payout: ai.payout && ai.payout > 0 ? ai.payout : null, odds: so && so <= 50 ? so : null } : null;
     const money = slip ? ` · квиток: ${STATUS_UA[slip.status]}${slip.stake ? `, ставка ${slip.stake}${slip.currency ? ` ${slip.currency}` : ''}` : ''}${slip.payout ? `, виплата ${slip.payout}` : ''}` : '';
     const legsTxt = ai.market === 'express' && ai.legs?.length ? ` · ${ai.legs.map((l) => `${l.team1} — ${l.team2}: ${l.pick || ''}${l.odds ? ` @${l.odds}` : ''}`).join('; ')}` : '';
     const who = ai.by ? ` (${ai.by})` : '', doubt = ai.doubt ? ` · РОЗБІЖНІСТЬ: ${ai.doubt}` : '';
@@ -182,13 +183,13 @@ async function repeatOf(handle: string, post: PagePost, p: TgParsed, slip?: Slip
 /** Tips read before OCR took the money (or by a reader that missed it): the stake from the OCR text already saved — no new read. */
 export async function moneyFromOcr(): Promise<number> {
   const { rows } = await pool.query<{ handle: string; post_id: number; ocr: string }>(
-    `SELECT handle, post_id, ocr FROM tg_posts WHERE kind = 'bet' AND stake IS NULL AND ocr IS NOT NULL AND ocr ~* '(сумм?а ставки|ставка|stake)'
-      AND posted_at > now() - interval '14 days' LIMIT 50`);
+    `SELECT handle, post_id, ocr FROM tg_posts WHERE kind = 'bet' AND ocr IS NOT NULL AND ocr ~* '(сумм?а ставки|stake)' AND fixed_by IS NULL
+      AND (stake IS NULL OR read_by IS DISTINCT FROM 'ai') AND posted_at > now() - interval '14 days' ORDER BY posted_at DESC LIMIT 50`);
   let n = 0;
   for (const r of rows) {
     const s0 = slipFromOcr(r.ocr);
     if (!s0 || !s0.currency) continue;
-    await applySlip(r.handle, r.post_id, { status: s0.status, stake: s0.stake, currency: s0.currency, payout: s0.status === 'pending' ? null : s0.payout }, true);
+    await applySlip(r.handle, r.post_id, { status: s0.status, stake: s0.stake, currency: s0.currency, payout: s0.status === 'pending' ? null : s0.payout, odds: s0.odds }, true);
     n++;
   }
   return n;
@@ -217,9 +218,11 @@ async function applySlip(handle: string, postId: number, slip: Slip, keepMoney =
         stake = CASE WHEN $7 AND stake IS NOT NULL THEN stake ELSE COALESCE($4, stake) END,
         currency = CASE WHEN $7 AND currency IS NOT NULL THEN currency ELSE COALESCE($5, currency) END,
         payout = COALESCE($6, payout),
+        -- the slip's payout ÷ stake is the bet's real odds: a number read elsewhere («+4.5» of a handicap) gives way to it
+        odds = CASE WHEN fixed_by IS NULL AND $10::numeric IS NOT NULL AND (odds IS NULL OR abs(odds - $10::numeric) > 0.05) THEN $10::numeric ELSE odds END,
         result = CASE WHEN fixed_by IS NULL AND $8::text IS NOT NULL THEN $8 ELSE result END
       WHERE handle = $1 AND post_id = $2 AND kind = 'bet'`,
-    [handle, postId, slip.status, slip.stake, slip.currency, slip.payout, keepMoney, res, fromLater]);
+    [handle, postId, slip.status, slip.stake, slip.currency, slip.payout, keepMoney, res, fromLater, fromLater ? null : slip.odds ?? null]);
 }
 
 /** New post → insert; a post saved before we read screenshots (photos IS NULL) → photos + OCR, re-parsed unless an admin sorted it. */
