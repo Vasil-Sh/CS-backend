@@ -614,6 +614,21 @@ export function liquipediaPagesInfo(): { pages: number; added: number; empty: nu
   };
 }
 
+/** Map scores of one finished CS2 match (its Liquipedia match page) — for the Telegram tips on one map. One rate-limited call. */
+export async function fetchMatchMaps(matchPage: string): Promise<{ map: string; score1: number | null; score2: number | null }[]> {
+  if (isOpen(LIQUIPEDIA_PARSER)) return [];
+  const url = `https://liquipedia.net/${WIKI.cs2}/api.php?${new URLSearchParams({ action: 'parse', page: matchPage, format: 'json', prop: 'text' })}`;
+  const html = await limited(async () => {
+    try {
+      const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT, 'Accept-Encoding': 'gzip', Accept: 'application/json' }, signal: AbortSignal.timeout(30_000) });
+      if (!res.ok) return '';
+      const json: any = await res.json();
+      return typeof json?.parse?.text === 'string' ? json.parse.text : json?.parse?.text?.['*'] || '';
+    } catch { return ''; }
+  });
+  return html ? parseMaps(html) : [];
+}
+
 // ── Live CS2: map-by-map score from the match page (≤ 2 pages every 3 min, each waits the 31 s gap) ──
 const MAPS_EVERY_MS = 3 * 60_000;
 let lastMaps = 0, mapsTurn = 0;

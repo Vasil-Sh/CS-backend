@@ -5,7 +5,7 @@ import { collectArchive, collectChannel, fetchChannelPage, rereadChannel, firstR
 import { isNight } from '../services/nightMode';
 import { ocrStats } from '../services/tgOcr';
 import { aiEnabled, aiQuota, aiStats } from '../services/tgAi';
-import { feedMatches } from '../services/tgVerify';
+import { diag, feedMatches, verifyErrors, verifyTips } from '../services/tgVerify';
 
 /** «Telegram-джерела» in the admin: channels we read, their posts, the queue of posts we did not understand. */
 const tg = new Hono();
@@ -310,6 +310,13 @@ tg.get('/admin/tg-sources/:handle/stats', requireAuth, requireAdmin, async (c) =
     summaries.push({ at: cl.posted_at, period: cl.claim.period || null, claimed: { won: cl.claim.won ?? null, total: cl.claim.total ?? null }, ours: { won: ours.filter((x) => x === 'Win').length, total: ours.length } });
   }
   return c.json({ chart, byGame: group((r) => (r.game === 'dota2' ? 'Dota 2' : 'CS2')), byMarket: group((r) => kindOf(r.market)), streaks: { best, worst, current: cur }, summaries });
+});
+
+/** POST /api/admin/tg-sources/verify — run our check now; returns how many tips it closed and its last errors / notes. */
+tg.post('/admin/tg-sources/verify', requireAuth, requireAdmin, async (c) => {
+  const n = await verifyTips().catch((e) => { verifyErrors.push(`verify: ${(e as Error).message}`); return 0; });
+  const maps = (await pool.query(`SELECT game, to_char(date, 'YYYY-MM-DD') AS date, team1, team2, winners, source FROM match_maps ORDER BY updated_at DESC LIMIT 15`).catch(() => ({ rows: [] }))).rows;
+  return c.json({ checked: n, errors: verifyErrors.slice(-10), notes: diag.slice(-15), maps });
 });
 
 export default tg;

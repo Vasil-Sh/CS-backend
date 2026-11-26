@@ -10,7 +10,7 @@ import { normalizeTeam } from '../utils/matchUtils';
 import { shortFor } from '../utils/teamAbbrev';
 
 type Res = 'Win' | 'Loss';
-export interface FeedMatch { id: string; game: 'cs2' | 'dota2'; team1: string; team2: string; start: string; status: string; score1: number | null; score2: number | null; maps?: { score1: number | null; score2: number | null }[]; coeff1?: number | null; coeff2?: number | null }
+export interface FeedMatch { id: string; game: 'cs2' | 'dota2'; team1: string; team2: string; start: string; status: string; score1: number | null; score2: number | null; maps?: { score1: number | null; score2: number | null }[]; coeff1?: number | null; coeff2?: number | null; matchPage?: string | null }
 
 /** Today's / tomorrow's / live matches of our feed (the caches the matches screen reads). */
 export function feedMatches(): FeedMatch[] {
@@ -19,20 +19,21 @@ export function feedMatches(): FeedMatch[] {
     const f = join(process.cwd(), '.cache', `${game}_matches.json`);
     try {
       if (!existsSync(f)) continue;
-      const data = JSON.parse(readFileSync(f, 'utf8')).data as { id: string; nameTeam1: string; nameTeam2: string; startDate?: string | null; date: string; status?: string; score1?: number | null; score2?: number | null; maps?: FeedMatch['maps']; coeff1?: number | null; coeff2?: number | null }[];
-      for (const m of data || []) if (m?.id && m.nameTeam1 && m.nameTeam2) out.push({ id: String(m.id), game, team1: m.nameTeam1, team2: m.nameTeam2, start: m.startDate || `${m.date}T12:00:00Z`, status: m.status || 'upcoming', score1: m.score1 ?? null, score2: m.score2 ?? null, maps: m.maps, coeff1: m.coeff1 ?? null, coeff2: m.coeff2 ?? null });
+      const data = JSON.parse(readFileSync(f, 'utf8')).data as { id: string; nameTeam1: string; nameTeam2: string; startDate?: string | null; date: string; status?: string; score1?: number | null; score2?: number | null; maps?: FeedMatch['maps']; coeff1?: number | null; coeff2?: number | null; matchPage?: string | null }[];
+      for (const m of data || []) if (m?.id && m.nameTeam1 && m.nameTeam2) out.push({ id: String(m.id), game, team1: m.nameTeam1, team2: m.nameTeam2, start: m.startDate || `${m.date}T12:00:00Z`, status: m.status || 'upcoming', score1: m.score1 ?? null, score2: m.score2 ?? null, maps: m.maps, coeff1: m.coeff1 ?? null, coeff2: m.coeff2 ?? null, matchPage: m.matchPage ?? null });
     } catch { /* skipped */ }
   }
   return out;
 }
 
 /** Same team in two sources / in a post: one key, or one name short for the other («NAVI» / «Natus Vincere»). */
-export function sameName(a: string, b: string): boolean {
+export function sameName(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false; // a TBD side in the history
   const x = normalizeTeam(a), y = normalizeTeam(b);
   if (!x || !y) return false;
   return x === y || (Math.min(x.length, y.length) >= 4 && (x.includes(y) || y.includes(x))) || shortFor(a, b) || shortFor(b, a);
 }
-const pairOf = (t1: string, t2: string, m1: string, m2: string): 0 | 1 | -1 => (sameName(t1, m1) && sameName(t2, m2) ? 1 : sameName(t1, m2) && sameName(t2, m1) ? -1 : 0);
+const pairOf = (t1: string, t2: string, m1: string | null, m2: string | null): 0 | 1 | -1 => (sameName(t1, m1) && sameName(t2, m2) ? 1 : sameName(t1, m2) && sameName(t2, m1) ? -1 : 0);
 
 // ── map winners ──
 const keyOf = (game: string, date: string, a: string, b: string) => `${game}|${date}|${[normalizeTeam(a), normalizeTeam(b)].join('|')}`;
@@ -107,9 +108,25 @@ async function findFinished(matchId: string | null, team1: string, team2: string
 
 export interface Leg { team1: string; team2: string; market: string; pick: string | null; odds: number | null; matchId?: string | null; result?: Res | null }
 /** Our result of one bet (a single or an express leg): null while the match is not over or the market can't be told. */
+/** A finished CS2 match with a tip on one map and no map winners yet: its Liquipedia match page is read once (an hour apart at most). */
+const mapsAsked = new Map<string, number>();
+async function loadMapsOnce(game: string, matchId: string, date: string): Promise<void> {
+  if (game !== 'cs2' || Date.now() - (mapsAsked.get(matchId) || 0) < 3_600_000) return;
+  const m = feedMatches().find((x) => x.id === matchId);
+  if (!m?.matchPage) return;
+  mapsAsked.set(matchId, Date.now());
+  const { fetchMatchMaps } = await import('./liquipediaFeed');
+  const maps = await fetchMatchMaps(m.matchPage).catch(() => []);
+  const w = winnersFromScores(maps, true);
+  if (w.length) await recordMaps(game, date, m.team1, m.team2, w, 'liquipedia', maps.slice(0, w.length).map((x) => [x.score1 ?? 0, x.score2 ?? 0] as [number, number]));
+  diag.push(`${matchId}: сторінка матчу → ${w.length ? `карти ${w.join(',')}` : 'карт не знайдено'}`); if (diag.length > 30) diag.shift();
+}
+export const diag: string[] = [];
+
 async function betResult(game: string, day: string, b: { matchId: string | null; team1: string; team2: string; market: string; pick: string | null }): Promise<{ res: Res; score: string; matchId: string } | null> {
   const f = await findFinished(b.matchId, b.team1, b.team2, day);
   if (!f || !(f.h.score1 || f.h.score2)) return null;
+  if (/^Map \d/.test(b.market)) await loadMapsOnce(game, f.h.match_id, f.h.date);
   const s1 = f.flip ? f.h.score2! : f.h.score1!, s2 = f.flip ? f.h.score1! : f.h.score2!;
   const mm = /^Map (\d) Winner$/.exec(b.market);
   const mt = /^Map (\d) Total (Over|Under) ([\d.]+)$/.exec(b.market), mh = /^Map (\d) Handicap ([+-][\d.]+)$/.exec(b.market);
@@ -131,13 +148,16 @@ async function betResult(game: string, day: string, b: { matchId: string | null;
 /** One tip posted twice (a share card and the bookmaker's slip, a repost): the same team at the same odds within two days.
  *  The later post becomes «Результат» (its slip shows the result) or «Повтор»; a result it shows goes to the first one. */
 export async function dedupeTips(): Promise<number> {
-  const { rows } = await pool.query<{ handle: string; post_id: number; posted_at: string; pick: string | null; odds: string | null; slip: string | null; result: string | null; stake: string | null; currency: string | null; payout: string | null; team1: string | null; team2: string | null; match_id: string | null }>(
-    `SELECT handle, post_id, posted_at, pick, odds, slip, result, stake, currency, payout, team1, team2, match_id FROM tg_posts
+  const { rows } = await pool.query<{ handle: string; post_id: number; posted_at: string; pick: string | null; odds: string | null; slip: string | null; result: string | null; stake: string | null; currency: string | null; payout: string | null; team1: string | null; team2: string | null; match_id: string | null; market: string | null }>(
+    `SELECT handle, post_id, posted_at, pick, odds, slip, result, stake, currency, payout, team1, team2, match_id, market FROM tg_posts
       WHERE kind = 'bet' AND fixed_by IS NULL AND pick IS NOT NULL AND pick <> '' AND odds IS NOT NULL AND posted_at > now() - interval '120 days' ORDER BY handle, post_id`);
   let n = 0;
   const kept: typeof rows = [];
   for (const r of rows) {
-    const first = kept.find((k) => k.handle === r.handle && Math.abs(Number(k.odds) - Number(r.odds)) < 0.015 && sameName(k.pick!, r.pick!)
+    const sameMatch = (k: typeof r) => !!k.team1 && !!k.team2 && !!r.team1 && !!r.team2 && pairOf(k.team1, k.team2, r.team1, r.team2) !== 0;
+    const first = kept.find((k) => k.handle === r.handle && Math.abs(Number(k.odds) - Number(r.odds)) < 0.015
+      // the same pick — or the same match and market (a slip read with the other team picked, as on a small bookmaker screenshot)
+      && (sameName(k.pick!, r.pick!) || (sameMatch(k) && k.market === r.market))
       && Date.parse(r.posted_at) - Date.parse(k.posted_at) < 2 * 86_400_000
       // and the same match, when both slips name it (two different matches of one team at the same odds are two tips)
       && (k.match_id === r.match_id || !k.team1 || !k.team2 || !r.team1 || !r.team2 || pairOf(k.team1, k.team2, r.team1, r.team2) !== 0));
@@ -163,6 +183,15 @@ export async function verifyTips(): Promise<number> {
       WHERE kind = 'bet' AND our_result IS NULL AND posted_at > now() - interval '120 days' AND (team1 IS NOT NULL OR legs IS NOT NULL) ORDER BY posted_at LIMIT 400`);
   let n = 0;
   for (const r of rows) {
+    try { n += await verifyOne(r); } catch (e) { verifyErrors.push(`${r.handle}/${r.post_id}: ${(e as Error).message}`); if (verifyErrors.length > 20) verifyErrors.shift(); }
+  }
+  return n;
+}
+/** The last errors of the check (the admin's «Перевірити зараз» shows them). */
+export const verifyErrors: string[] = [];
+
+async function verifyOne(r: { handle: string; post_id: number; match_id: string | null; market: string; pick: string | null; team1: string; team2: string; game: string | null; day: string; result: string | null; legs: Leg[] | null }): Promise<number> {
+  {
     const game = r.game === 'dota2' ? 'dota2' : 'cs2';
     let ours: Res | null = null, score: string | null = null, realId: string | null = null;
     if (r.market === 'Express' && r.legs?.length) {
@@ -174,7 +203,7 @@ export async function verifyTips(): Promise<number> {
       const x = await betResult(game, r.day, { matchId: r.match_id, team1: r.team1, team2: r.team2, market: r.market, pick: r.pick });
       if (x) { ours = x.res; score = x.score; realId = x.matchId; }
     }
-    if (!ours) continue;
+    if (!ours) return 0;
     const mismatch = (r.result === 'Win' || r.result === 'Loss') && r.result !== ours;
     await pool.query(
       `UPDATE tg_posts SET our_result = $3, score = COALESCE($4, score), mismatch = $5,
@@ -183,9 +212,8 @@ export async function verifyTips(): Promise<number> {
           match_id = CASE WHEN match_id LIKE 'tg:%' AND $6::text IS NOT NULL THEN $6 ELSE match_id END
         WHERE handle = $1 AND post_id = $2`,
       [r.handle, r.post_id, ours, score, mismatch, realId]);
-    n++;
+    return 1;
   }
-  return n;
 }
 
 /** A tip placed after its match started (only known for matches of our feed). */
