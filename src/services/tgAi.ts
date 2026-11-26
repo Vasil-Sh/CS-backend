@@ -15,7 +15,18 @@ export const aiStats = { calls: 0, failed: 0, lastError: null as string | null, 
 // ── the free tier's daily quota (Google resets it at midnight Pacific): requests per model today, kept across restarts ──
 const DAILY = () => Math.max(10, Number(process.env.GEMINI_DAILY_LIMIT) || 250); // the main model's requests a day (see AI Studio → Rate limits)
 const pacificDay = () => new Date(Date.now() - 8 * 3_600_000).toISOString().slice(0, 10);
-export const aiUsage: { day: string; byModel: Record<string, number> } = { day: '', byModel: {} };
+export const aiUsage: { day: string; byModel: Record<string, number>; seen?: Record<string, number> } = { day: '', byModel: {} };
+/** A reader's requests a day: set in Railway (…_DAILY_LIMIT), else the count it had when it last hit its daily limit, else a guess (shown with «≈»). */
+const LIMIT_ENV: Record<string, string> = { gemini: 'GEMINI_DAILY_LIMIT', github: 'GITHUB_DAILY_LIMIT', cloudflare: 'CLOUDFLARE_DAILY_LIMIT', 'gemini-lite': 'GEMINI_LITE_DAILY_LIMIT' };
+const LIMIT_GUESS: Record<string, number> = { gemini: 250, github: 150, cloudflare: 300, 'gemini-lite': 1000 };
+export function readerLimit(id: string): { limit: number | null; guess: boolean } {
+  const env = Number(process.env[LIMIT_ENV[id] || ''] || 0);
+  if (env > 0) return { limit: env, guess: false };
+  const seen = aiUsage.seen?.[id];
+  if (seen && seen > 0) return { limit: seen, guess: false };
+  return { limit: LIMIT_GUESS[id] ?? null, guess: true };
+}
+const todayOf = (p: { id: string; model: () => string }) => { const by = aiQuota().byModel; return p.id === 'gemini' || p.id === 'gemini-lite' ? by[p.model()] || 0 : by[p.id] || 0; };
 let usageLoaded = false;
 async function loadUsage(): Promise<void> {
   if (usageLoaded) return;
@@ -28,6 +39,9 @@ async function loadUsage(): Promise<void> {
 function count(model: string): void {
   if (aiUsage.day !== pacificDay()) { aiUsage.day = pacificDay(); aiUsage.byModel = {}; }
   aiUsage.byModel[model] = (aiUsage.byModel[model] || 0) + 1;
+  saveUsage();
+}
+function saveUsage(): void {
   void pool.query(`INSERT INTO app_settings(key, value) VALUES('tg_ai_usage', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, [JSON.stringify(aiUsage)]).catch(() => {});
 }
 /** Requests left today for the main model; near the end of it the reader moves to Flash-Lite (its own, larger quota). */
@@ -134,7 +148,7 @@ async function ask(p: Provider, prompt: string, imgs: Img[], schema: object = SC
   const key = p.key(), s = st(p.id), model = p.model();
   if (!key) return { why: 'немає ключа' };
   if (Date.now() < s.restUntil) return { why: 'відпочиває' };
-  if (p.id === 'gemini' && aiQuota().used >= aiQuota().limit * 0.9) return { why: 'денний ліміт майже вичерпано' };
+  if (p.id === 'gemini' && aiQuota().used >= (readerLimit('gemini').limit ?? DAILY()) * 0.95) return { why: 'денний ліміт майже вичерпано' };
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt) await new Promise((ok) => setTimeout(ok, 5_000));
     let res: Response;
@@ -160,8 +174,13 @@ async function ask(p: Provider, prompt: string, imgs: Img[], schema: object = SC
     try { const j = JSON.parse(raw) as { error?: { message?: string } | string; message?: string }; msg = (typeof j.error === 'string' ? j.error : j.error?.message) || j.message || raw; } catch { /* not JSON */ }
     s.failed++; s.lastError = `${res.status}: ${msg.replace(/\s+/g, ' ').slice(0, 140)}`;
     // Cloudflare's free allocation used up for the day (it resets at 00:00 UTC)
-    if (/neurons|free allocation/i.test(msg)) { const d = new Date(); d.setUTCHours(24, 0, 0, 0); s.restUntil = d.getTime(); return { why: `${s.lastError} — денний безкоштовний ліміт` }; }
-    if (res.status === 429) { s.restUntil = /day|daily|per.?day|quota/i.test(msg) ? nextPacificMidnight() : Date.now() + 10 * 60_000; return { why: s.lastError }; }
+    if (/neurons|free allocation/i.test(msg)) { const d = new Date(); d.setUTCHours(24, 0, 0, 0); s.restUntil = d.getTime(); if (todayOf(p) >= 5) { aiUsage.seen = { ...(aiUsage.seen || {}), [p.id]: todayOf(p) }; saveUsage(); } return { why: `${s.lastError} — денний безкоштовний ліміт` }; }
+    if (res.status === 429) {
+      const daily = /day|daily|per.?day|quota/i.test(msg);
+      s.restUntil = daily ? nextPacificMidnight() : Date.now() + 10 * 60_000;
+      if (daily && todayOf(p) >= 5) { aiUsage.seen = { ...(aiUsage.seen || {}), [p.id]: todayOf(p) }; saveUsage(); } // its real daily limit, remembered
+      return { why: s.lastError };
+    }
     if (res.status === 401 || res.status === 403) { s.restUntil = Date.now() + 6 * 3_600_000; return { why: s.lastError }; }
     if (res.status === 402) { s.restUntil = nextPacificMidnight(); return { why: `${s.lastError} — потрібна платна підписка` }; } // not free on this account
     if (res.status === 404) { s.restUntil = Date.now() + 3 * 3_600_000; return { why: `${s.lastError} — модель недоступна` }; }
@@ -308,8 +327,8 @@ export function readersInfo() {
   const by = aiQuota().byModel;
   return PROVIDERS.map((p) => {
     const s = st(p.id), today = p.id === 'gemini' || p.id === 'gemini-lite' ? by[p.model()] || 0 : by[p.id] || 0;
-    const a = readerAccuracy[p.id];
-    return { id: p.id, label: p.label, model: p.model(), hasKey: !!p.key(), keyName: p.keyName, today, ok: s.ok, failed: s.failed,
+    const a = readerAccuracy[p.id], lim = readerLimit(p.id);
+    return { id: p.id, label: p.label, model: p.model(), hasKey: !!p.key(), keyName: p.keyName, today, limit: lim.limit, limitGuess: lim.guess, ok: s.ok, failed: s.failed,
       read30: a?.read ?? 0, wrong30: a?.wrong ?? 0, accuracy: a && a.read ? Math.round((1 - a.wrong / a.read) * 100) : null,
       restUntil: s.restUntil > Date.now() ? new Date(s.restUntil).toISOString() : null, lastError: s.lastError };
   });
