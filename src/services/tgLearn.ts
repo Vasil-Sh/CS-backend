@@ -137,7 +137,7 @@ export async function runGolden(n = 15): Promise<void> {
       const { imgs } = await loadImages(row.photos || []);
       const right: AiTip = row.kind === 'bet' ? marketToAi(row.market, row.pick, row.odds != null ? Number(row.odds) : null) : { isTip: false };
       for (const g of out) {
-        const r = await askOne(g.id, row.text || '', imgs);
+        const r = await askOne(g.id, row.text || '', imgs).catch((e: Error) => ({ tip: undefined, why: e.message }));
         goldenRun.done++;
         if (!r.tip) { g.skipped++; continue; }
         g.total++;

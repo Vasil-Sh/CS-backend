@@ -143,11 +143,16 @@ async function ask(p: Provider, prompt: string, imgs: Img[], schema: object = SC
     }
     aiStats.calls++; aiStats.lastAt = new Date().toISOString(); count(p.id === 'gemini' || p.id === 'gemini-lite' ? model : p.id);
     if (res.ok) {
-      const txt = answerText(await res.json());
+      // a 200 whose body is not JSON («OK …» from a proxy or a model page): this reader failed, the next one reads
+      const body = await res.text();
+      let parsed: unknown;
+      try { parsed = JSON.parse(body); } catch { s.failed++; s.lastError = `відповідь не JSON: ${body.replace(/\s+/g, ' ').slice(0, 80)}`; return { why: s.lastError }; }
+      const txt = answerText(parsed);
       const why = check(txt);
       if (why) { s.failed++; s.lastError = why; return { why }; }
       s.ok++; aiStats.model = `${p.label}`;
-      const raw = JSON.parse(txt) as unknown;
+      let raw: unknown;
+      try { raw = JSON.parse(txt); } catch { s.failed++; s.lastError = 'відповідь не JSON'; return { why: s.lastError }; }
       return { tip: raw as AiTip, raw };
     }
     const raw = await res.text();
