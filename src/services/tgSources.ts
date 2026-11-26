@@ -94,7 +94,14 @@ async function repeatOf(handle: string, post: PagePost, p: TgParsed, slip?: Slip
   const t = norm(post.text);
   const same = prev.rows.find((r) => {
     // the same pick on the same match: the same market, or the same odds (one bet shown on a share card and on the bookmaker's slip)
-    if (p.kind === 'bet') return r.kind === 'bet' && r.match_id === p.match.id && r.pick === p.pick && (r.market === p.market || (p.odds != null && r.odds != null && Math.abs(Number(r.odds) - p.odds) < 0.015));
+    if (p.kind === 'bet') {
+      if (r.kind !== 'bet') return false;
+      if (r.match_id === p.match.id && r.pick === p.pick && r.market === p.market) return true;
+      // the same team at the same odds within two days — whatever the two slips call the match or the market
+      const a = normalizeTeam(r.pick || ''), b = normalizeTeam(p.pick || '');
+      const samePick = !!a && !!b && (a === b || (Math.min(a.length, b.length) >= 4 && (a.includes(b) || b.includes(a))));
+      return samePick && p.odds != null && r.odds != null && Math.abs(Number(r.odds) - p.odds) < 0.015;
+    }
     if (p.kind === 'unknown' && p.match) return r.kind === 'unknown' && r.match_id === p.match.id && r.reason === p.reason;
     return t.length >= 12 && norm(r.text) === t;
   });
@@ -147,7 +154,7 @@ async function savePost(handle: string, post: PagePost, ocr: string, p: TgParsed
 /** Read one channel now: new posts → parsed → saved. Returns how many posts were new. */
 const busy = new Set<string>();
 /** A running «Перечитати» / first read of a new channel: posts to read and read so far (progress in the admin). */
-export const progress = new Map<string, { total: number; done: number; kind: 'reread' | 'add' }>();
+export const progress = new Map<string, { total: number; done: number; kind: 'reread' | 'add' | 'collect' }>();
 
 /** Reads the channel until every saved post is re-read (8 a pass), not waiting for the next 10-minute pass. */
 export async function rereadChannel(handle: string, total: number): Promise<void> {
@@ -196,6 +203,10 @@ async function collectChannel1(handle: string, cands?: TgCandidate[]): Promise<n
   // re-reading is spread over passes (8 posts a pass, newest first) so a pass stays short
   const again = older.filter((p) => unread.has(p.id)).sort((a, b) => b.id - a.id).slice(0, 8);
   const todo = [...fresh, ...again].sort((a, b) => a.id - b.id);
+  // a pass with posts to read shows its progress on the card too (a re-read / a first read already set theirs)
+  const own = !progress.has(handle) && todo.length > 0;
+  if (own) progress.set(handle, { total: todo.length, done: 0, kind: 'collect' });
+  try {
   const oldest = todo.reduce((a, p) => (a && a < p.at ? a : p.at), '');
   const list = cands && !unread.size ? cands : await tgCandidates(oldest || undefined);
   for (const post of todo) {
@@ -210,6 +221,7 @@ async function collectChannel1(handle: string, cands?: TgCandidate[]): Promise<n
     const pr = progress.get(handle);
     if (pr) pr.done = Math.min(pr.total, pr.done + 1);
   }
+  } finally { if (own) progress.delete(handle); }
   const last = page.posts.reduce((a, p) => (p.id > a.id ? p : a), { id: ch.last_post_id, at: '' } as { id: number; at: string });
   await pool.query(
     `UPDATE tg_channels SET title = COALESCE($2, title), subscribers = COALESCE($3, subscribers), checked_at = now(), error = NULL,

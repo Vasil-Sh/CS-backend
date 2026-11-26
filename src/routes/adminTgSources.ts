@@ -188,6 +188,8 @@ tg.post('/admin/tg-sources/:handle/pause', requireAuth, requireAdmin, async (c) 
   const { rowCount } = await pool.query('UPDATE tg_channels SET paused = $2 WHERE handle = $1', [handle, !!b.paused]);
   if (!rowCount) return c.json({ error: 'Канал не знайдено' }, 404);
   audit(actor, 'POST', `/admin/tg-sources/${handle}/pause`, { paused: !!b.paused });
+  // started again: read it now, not at the next 10-minute pass (the card shows the progress)
+  if (!b.paused) void collectChannel(handle).then(() => settleTgTips()).catch((e) => console.warn(`[tg] ${handle}:`, (e as Error).message));
   return c.json({ ok: true });
 });
 

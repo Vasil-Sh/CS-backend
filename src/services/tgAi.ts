@@ -18,7 +18,7 @@ export interface AiTip {
 }
 
 const PROMPT = `You read posts of a Telegram channel about esports betting (CS2, Dota 2). A post has a caption and maybe a screenshot of a bet slip or of an app.
-Decide if the post itself gives a betting tip / a placed bet (a "tip"). A screenshot of ONE bet slip / ticket / coupon (team names, a market, odds, often a stake) IS a tip, even when the caption is a joke, a short comment or empty — also when the slip already shows the result (won/lost).
+Decide if the post itself shows or gives a betting tip / a placed bet (a "tip"). A screenshot of ONE bet slip / ticket / coupon (team names, a market, odds, often a stake) IS a tip, even when the caption is a joke, a short comment or empty — also when the slip already shows the result (won/lost) and when the same slip was posted before (a repost or the result of an earlier tip is still isTip=true).
 NOT tips: news, app updates, chat, a scoreboard or a live score without a bet, an announcement of upcoming matches without a pick,
 and screenshots of an app UI: a dashboard, a table or list of matches or of records (columns like Тип / Сума / Коеф / Профіт / Матч), a form («Новий запис», «Додати запис»), settings — even when odds or a team name appear in it. A slip is ONE bet shown as a ticket/card/coupon, not a row of a table.
 For a tip, read: game, the two teams exactly as written, the market, the side picked, the line and the decimal odds.
