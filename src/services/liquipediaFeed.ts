@@ -629,6 +629,42 @@ export async function fetchMatchMaps(matchPage: string): Promise<{ map: string; 
   return html ? parseMaps(html) : [];
 }
 
+/** Map scores of every match on a tournament page (bracket and match-list popups), and on its stage subpages (≤ 4). Rate-limited calls. */
+export async function fetchTournamentMaps(game: 'cs2' | 'dota2', page: string): Promise<{ team1: string; team2: string; maps: { map: string; score1: number | null; score2: number | null }[] }[]> {
+  if (isOpen(LIQUIPEDIA_PARSER)) return [];
+  const load = (p: string) => limited(async () => {
+    try {
+      const res = await fetch(`https://liquipedia.net/${WIKI[game]}/api.php?${new URLSearchParams({ action: 'parse', page: p, format: 'json', prop: 'text' })}`, { headers: { 'User-Agent': USER_AGENT, 'Accept-Encoding': 'gzip', Accept: 'application/json' }, signal: AbortSignal.timeout(30_000) });
+      if (!res.ok) return '';
+      const json: any = await res.json();
+      return typeof json?.parse?.text === 'string' ? json.parse.text : json?.parse?.text?.['*'] || '';
+    } catch { return ''; }
+  });
+  const first = await load(page);
+  if (!first) return [];
+  const htmls = [first];
+  // a big event keeps its brackets on stage pages: «…/Stage_1», «…/Playoffs»
+  const subs = [...new Set([...first.matchAll(/href="\/[a-z0-9]+\/([^"#?]+)"/gi)].map((m) => decodeURIComponent(m[1])).filter((x) => x.startsWith(`${page}/`) && !/\/(Statistics|Prize|Media|Participants)/i.test(x)))].slice(0, 4);
+  for (const sp of subs) { const h = await load(sp); if (h) htmls.push(h); }
+  return htmls.flatMap(parseTournamentMaps);
+}
+
+/** Matches with map scores on a tournament page's HTML. */
+export function parseTournamentMaps(html: string): { team1: string; team2: string; maps: { map: string; score1: number | null; score2: number | null }[] }[] {
+  const $ = cheerio.load(html);
+  const out: { team1: string; team2: string; maps: { map: string; score1: number | null; score2: number | null }[] }[] = [];
+  $('.brkts-match, .brkts-matchlist-match').each((_, el) => {
+    const opps = $(el).find('.brkts-opponent-entry, .brkts-matchlist-opponent');
+    if (opps.length < 2) return;
+    const name = (i: number) => { const o = opps.eq(i); return (o.attr('aria-label') || o.find('[data-highlightingclass]').first().attr('data-highlightingclass') || o.attr('data-highlightingclass')
+      || o.find('a[title]').first().attr('title') || o.find('.name, .team-template-text').first().text() || '').replace(/\s*\(page does not exist\)\s*$/, '').trim(); };
+    const popup = $(el).find('.brkts-popup').first();
+    const maps = parseMaps(popup.length ? popup.html() || '' : $(el).html() || '');
+    if (name(0) && name(1) && maps.length) out.push({ team1: name(0), team2: name(1), maps });
+  });
+  return out;
+}
+
 // ── Live CS2: map-by-map score from the match page (≤ 2 pages every 3 min, each waits the 31 s gap) ──
 const MAPS_EVERY_MS = 3 * 60_000;
 let lastMaps = 0, mapsTurn = 0;

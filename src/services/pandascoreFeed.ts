@@ -86,6 +86,27 @@ const QUERY: Record<List, string> = {
   past: 'sort=-begin_at&per_page=100',
 };
 
+/** Finished matches of a few days (one call): the Telegram check looks up the map winners of a match the regular lists left out. */
+const dayCache = new Map<string, { at: number; list: PsMatch[] }>();
+export async function pandascorePastAround(game: Game, day: string): Promise<PsMatch[]> {
+  if (!pandascoreEnabled()) return [];
+  const key = `${game}|${day}`, hit = dayCache.get(key);
+  if (hit && Date.now() - hit.at < 30 * 60_000) return hit.list;
+  await hydrate();
+  const now = Date.now();
+  cache.recent = (cache.recent || []).filter((t) => now - t < H);
+  if (cache.recent.length >= 900) return hit?.list || [];
+  cache.recent.push(now);
+  const d = Date.parse(`${day}T00:00:00Z`), from = new Date(d - 86_400_000).toISOString(), to = new Date(d + 2 * 86_400_000).toISOString();
+  try {
+    const res = await fetch(`${BASE}/${PATH[game]}/matches/past?range[begin_at]=${from},${to}&sort=-begin_at&per_page=100`, {
+      headers: { authorization: `Bearer ${process.env.PANDASCORE_API_KEY}`, accept: 'application/json' }, signal: AbortSignal.timeout(20_000) });
+    const list = res.ok ? await res.json() as PsMatch[] : [];
+    dayCache.set(key, { at: Date.now(), list: Array.isArray(list) ? list : [] });
+    return Array.isArray(list) ? list : [];
+  } catch { return hit?.list || []; }
+}
+
 async function get(game: Game, list: List): Promise<PsMatch[] | null> {
   // calls of the last 60 minutes (a rolling hour — a clock hour showed «0 з 1000» right after :00)
   const now = Date.now();

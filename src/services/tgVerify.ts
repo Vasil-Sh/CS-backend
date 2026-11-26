@@ -10,7 +10,7 @@ import { normalizeTeam } from '../utils/matchUtils';
 import { shortFor } from '../utils/teamAbbrev';
 
 type Res = 'Win' | 'Loss';
-export interface FeedMatch { id: string; game: 'cs2' | 'dota2'; team1: string; team2: string; start: string; status: string; score1: number | null; score2: number | null; maps?: { score1: number | null; score2: number | null }[]; coeff1?: number | null; coeff2?: number | null; matchPage?: string | null }
+export interface FeedMatch { id: string; game: 'cs2' | 'dota2'; team1: string; team2: string; start: string; status: string; score1: number | null; score2: number | null; maps?: { score1: number | null; score2: number | null }[]; coeff1?: number | null; coeff2?: number | null; matchPage?: string | null; tournamentPage?: string | null }
 
 /** Today's / tomorrow's / live matches of our feed (the caches the matches screen reads). */
 export function feedMatches(): FeedMatch[] {
@@ -19,8 +19,8 @@ export function feedMatches(): FeedMatch[] {
     const f = join(process.cwd(), '.cache', `${game}_matches.json`);
     try {
       if (!existsSync(f)) continue;
-      const data = JSON.parse(readFileSync(f, 'utf8')).data as { id: string; nameTeam1: string; nameTeam2: string; startDate?: string | null; date: string; status?: string; score1?: number | null; score2?: number | null; maps?: FeedMatch['maps']; coeff1?: number | null; coeff2?: number | null; matchPage?: string | null }[];
-      for (const m of data || []) if (m?.id && m.nameTeam1 && m.nameTeam2) out.push({ id: String(m.id), game, team1: m.nameTeam1, team2: m.nameTeam2, start: m.startDate || `${m.date}T12:00:00Z`, status: m.status || 'upcoming', score1: m.score1 ?? null, score2: m.score2 ?? null, maps: m.maps, coeff1: m.coeff1 ?? null, coeff2: m.coeff2 ?? null, matchPage: m.matchPage ?? null });
+      const data = JSON.parse(readFileSync(f, 'utf8')).data as { id: string; nameTeam1: string; nameTeam2: string; startDate?: string | null; date: string; status?: string; score1?: number | null; score2?: number | null; maps?: FeedMatch['maps']; coeff1?: number | null; coeff2?: number | null; matchPage?: string | null; tournamentPage?: string | null }[];
+      for (const m of data || []) if (m?.id && m.nameTeam1 && m.nameTeam2) out.push({ id: String(m.id), game, team1: m.nameTeam1, team2: m.nameTeam2, start: m.startDate || `${m.date}T12:00:00Z`, status: m.status || 'upcoming', score1: m.score1 ?? null, score2: m.score2 ?? null, maps: m.maps, coeff1: m.coeff1 ?? null, coeff2: m.coeff2 ?? null, matchPage: m.matchPage ?? null, tournamentPage: m.tournamentPage ?? null });
     } catch { /* skipped */ }
   }
   return out;
@@ -116,17 +116,48 @@ export interface Leg { team1: string; team2: string; market: string; pick: strin
 /** Our result of one bet (a single or an express leg): null while the match is not over or the market can't be told. */
 /** A finished CS2 match with a tip on one map and no map winners yet: its Liquipedia match page is read once (an hour apart at most). */
 const mapsAsked = new Map<string, number>();
-async function loadMapsOnce(game: string, matchId: string, date: string): Promise<void> {
-  if (game !== 'cs2' || Date.now() - (mapsAsked.get(matchId) || 0) < 3_600_000) return;
-  const m = feedMatches().find((x) => x.id === matchId);
-  if (!m?.matchPage) { note(`${matchId}: ${m ? 'у стрічці немає сторінки матчу' : 'матчу немає в стрічці'}`); mapsAsked.set(matchId, Date.now()); return; }
+async function loadMapsOnce(game: string, matchId: string, date: string, t1: string, t2: string): Promise<void> {
+  if (Date.now() - (mapsAsked.get(matchId) || 0) < 3_600_000) return;
   mapsAsked.set(matchId, Date.now());
-  const { fetchMatchMaps } = await import('./liquipediaFeed');
-  const maps = await fetchMatchMaps(m.matchPage).catch(() => []);
-  const w = winnersFromScores(maps, true);
-  if (w.length) await recordMaps(game, date, m.team1, m.team2, w, 'liquipedia', maps.slice(0, w.length).map((x) => [x.score1 ?? 0, x.score2 ?? 0] as [number, number]));
-  note(`${matchId}: сторінка матчу → ${w.length ? `карти ${w.join(',')}` : 'карт не знайдено'}`);
+  const m = feedMatches().find((x) => x.id === matchId);
+  const g = game === 'dota2' ? 'dota2' : 'cs2';
+  // 1) PandaScore: the finished matches around that day, this one by its teams
+  try {
+    const { pandascorePastAround, psMapWinners } = await import('./pandascoreFeed');
+    for (const p of await pandascorePastAround(g, date)) {
+      const a = p.opponents?.[0]?.opponent, b = p.opponents?.[1]?.opponent;
+      const names = (o?: { name?: string | null; acronym?: string | null }) => [o?.name, o?.acronym].filter(Boolean) as string[];
+      const o = names(a).some((x) => sameName(x, t1)) && names(b).some((x) => sameName(x, t2)) ? 1 : names(a).some((x) => sameName(x, t2)) && names(b).some((x) => sameName(x, t1)) ? -1 : 0;
+      const w = o ? psMapWinners(p) : [];
+      if (w.length) { await recordMaps(g, date, o === 1 ? t1 : t2, o === 1 ? t2 : t1, w, 'pandascore'); note(`${matchId}: PandaScore → карти ${w.join(',')}`); return; }
+    }
+    note(`${matchId}: PandaScore — матчу з картами немає`);
+  } catch (e) { note(`${matchId}: PandaScore — ${(e as Error).message}`); }
+  const { fetchMatchMaps, fetchTournamentMaps } = await import('./liquipediaFeed');
+  // 2) Liquipedia: the match page
+  if (m?.matchPage && g === 'cs2') {
+    const maps = await fetchMatchMaps(m.matchPage).catch(() => []);
+    const w = winnersFromScores(maps, true);
+    if (w.length) { await recordMaps(g, date, m.team1, m.team2, w, 'liquipedia', maps.slice(0, w.length).map((x) => [x.score1 ?? 0, x.score2 ?? 0] as [number, number])); note(`${matchId}: сторінка матчу → карти ${w.join(',')}`); return; }
+  }
+  // 3) Liquipedia: the tournament page (and its stage pages), the match by its teams
+  const tp = m?.tournamentPage;
+  if (!tp) { note(`${matchId}: немає сторінки турніру`); return; }
+  const list = tourCache.get(tp) && Date.now() - tourCache.get(tp)!.at < 3_600_000 ? tourCache.get(tp)!.list : await fetchTournamentMaps(g, tp).catch(() => []);
+  tourCache.set(tp, { at: Date.now(), list });
+  for (const x of list) {
+    const o = pairOf(t1, t2, x.team1, x.team2);
+    if (!o) continue;
+    const w = winnersFromScores(x.maps, true);
+    if (!w.length) continue;
+    await recordMaps(g, date, x.team1, x.team2, w, 'liquipedia', x.maps.slice(0, w.length).map((y) => [y.score1 ?? 0, y.score2 ?? 0] as [number, number]));
+    note(`${matchId}: сторінка турніру ${tp} → карти ${w.join(',')}`);
+    return;
+  }
+  note(`${matchId}: сторінка турніру ${tp} — матчу з картами немає (${list.length} матчів з картами)`);
 }
+const tourCache = new Map<string, { at: number; list: { team1: string; team2: string; maps: { map: string; score1: number | null; score2: number | null }[] }[] }>();
+
 export const diag: string[] = [];
 const note = (x: string) => { diag.push(x); if (diag.length > 30) diag.shift(); };
 
@@ -138,13 +169,13 @@ export async function explainTip(r: { match_id: string | null; team1: string; te
   const mm = /^Map (\d)/.exec(r.market);
   if (!mm) return `матч ${f.h.score1}:${f.h.score2} — ринок не розраховується`;
   const w = await mapWinner(r.game || 'cs2', f.h.date, r.team1, r.team2, Number(mm[1]), null);
-  return `матч ${f.h.match_id} ${f.h.score1}:${f.h.score2}; сторінка матчу: ${fm?.matchPage || 'немає'}; карти в стрічці: ${fm?.maps?.length ? JSON.stringify(fm.maps) : 'немає'}; переможець карти ${mm[1]}: ${w ?? 'невідомо'}`;
+  return `матч ${f.h.match_id} ${f.h.score1}:${f.h.score2}; сторінка матчу: ${fm?.matchPage || 'немає'}; турнір: ${fm?.tournamentPage || 'немає'}; карти в стрічці: ${fm?.maps?.length ? JSON.stringify(fm.maps) : 'немає'}; переможець карти ${mm[1]}: ${w ?? 'невідомо'}`;
 }
 
 async function betResult(game: string, day: string, b: { matchId: string | null; team1: string; team2: string; market: string; pick: string | null }): Promise<{ res: Res; score: string; matchId: string } | null> {
   const f = await findFinished(b.matchId, b.team1, b.team2, day);
   if (!f || !(f.h.score1 || f.h.score2)) return null;
-  if (/^Map \d/.test(b.market)) await loadMapsOnce(game, f.h.match_id, f.h.date);
+  if (/^Map \d/.test(b.market)) await loadMapsOnce(game, f.h.match_id, f.h.date, f.flip ? f.h.team2 : f.h.team1, f.flip ? f.h.team1 : f.h.team2);
   const s1 = f.flip ? f.h.score2! : f.h.score1!, s2 = f.flip ? f.h.score1! : f.h.score2!;
   const mm = /^Map (\d) Winner$/.exec(b.market);
   const mt = /^Map (\d) Total (Over|Under) ([\d.]+)$/.exec(b.market), mh = /^Map (\d) Handicap ([+-][\d.]+)$/.exec(b.market);
