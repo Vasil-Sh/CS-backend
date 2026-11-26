@@ -123,7 +123,14 @@ export async function aiReadPost(caption: string, photos: string[], hint = ''): 
           break;
         }
         aiStats.calls++; aiStats.lastAt = new Date().toISOString(); aiStats.model = model; count(model);
-        if (res.ok) { body = await res.json() as Resp; break; }
+        if (res.ok) {
+          // a broken answer (text stuffed into a team name, a tip without its market) is not used — the next model reads the post
+          const got = await res.json() as Resp;
+          const why = answerProblem(got);
+          if (!why) { body = got; break; }
+          lastErr = `Gemini ${model}: ${why}`; aiStats.failed++;
+          break;
+        }
         const raw = await res.text();
         let msg = raw;
         try { msg = (JSON.parse(raw) as { error?: { message?: string } }).error?.message || raw; } catch { /* not JSON */ }
@@ -140,6 +147,18 @@ export async function aiReadPost(caption: string, photos: string[], hint = ''): 
     console.warn('[tg] ai:', aiStats.lastError);
     return null;
   }
+}
+
+/** What is wrong with an answer, or '' when it can be used. */
+export function answerProblem(r: Resp): string {
+  const txt = r.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
+  let a: AiTip;
+  try { a = JSON.parse(txt) as AiTip; } catch { return 'відповідь не JSON'; }
+  const bad = (x?: string | null) => !!x && (x.length > 40 || /[{}"]|error|json|schema|fallback|pipeline/i.test(x));
+  if (bad(a.team1) || bad(a.team2) || bad(a.pick)) return 'зіпсована назва команди у відповіді';
+  if (a.isTip && !a.market) return 'прогноз без ринку';
+  if (a.isTip && a.market !== 'express' && a.market !== 'total_maps' && a.market !== 'map_total' && !a.pick) return 'прогноз без вибору';
+  return '';
 }
 
 type Resp = { candidates?: { content?: { parts?: { text?: string }[] } }[] };

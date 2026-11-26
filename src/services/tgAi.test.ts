@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { aiLine, currencyCode } from './tgAi';
+import { aiLine, answerProblem, currencyCode } from './tgAi';
 import { parseTgPost } from './tgPostParser';
 
 const at = '2026-08-04T14:05:00Z';
@@ -15,6 +15,10 @@ describe('the model answer → the parser', () => {
     expect(parseTgPost(aiLine({ isTip: true, game: 'cs2', team1: 'NAVI', team2: 'G2', market: 'total_maps', line: 2.5, over: true, odds: 1.9 }), at, [])).toMatchObject({ kind: 'bet', market: 'Total Maps Over 2.5', odds: 1.9 });
     expect(parseTgPost(aiLine({ isTip: true, game: 'cs2', team1: 'MOUZ', team2: 'G2', market: 'handicap', pick: 'MOUZ', line: -1.5, odds: 2.4 }), at, [])).toMatchObject({ kind: 'bet', market: 'Handicap -1.5', pick: 'MOUZ' });
     expect(aiLine({ isTip: false })).toBe('');
+    const resp = (o: object) => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(o) }] } }] });
+    expect(answerProblem(resp({ isTip: true, team1: 'Lynn Vision', team2: 'PARIVISIONValueError: Invalid game format … use valid json', market: 'map_winner', pick: 'Lynn Vision' }))).toBe('зіпсована назва команди у відповіді');
+    expect(answerProblem(resp({ isTip: true, team1: 'Heroic', team2: 'FaZe' }))).toBe('прогноз без ринку');
+    expect(answerProblem(resp({ isTip: true, team1: 'Heroic', team2: 'FaZe', market: 'map_winner', map: 3, pick: 'Heroic' }))).toBe('');
     expect(parseTgPost(aiLine({ isTip: true, game: 'cs2', team1: 'M80', team2: 'Eternal Fire', market: 'map_winner', map: 1, pick: 'M80', odds: 1.9 }), at, [])).toMatchObject({ kind: 'bet', market: 'Map 1 Winner', pick: 'M80' });
     expect([currencyCode('₴'), currencyCode('грн'), currencyCode('₽'), currencyCode('USDT'), currencyCode('$')]).toEqual(['UAH', 'UAH', 'RUB', 'USDT', 'USD']);
   });
