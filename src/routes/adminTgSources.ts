@@ -29,7 +29,7 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
     pool.query<{ handle: string; total: string; tips: string; unknown: string; other: string; repeats: string; won: string; lost: string; pending: string; profit: string | null; priced: string; first_at: string | null;
       o_won: string; o_lost: string; o_profit: string | null; o_priced: string; confirmed: string; mismatches: string; ours_only: string; live: string; live_won: string; live_lost: string; deleted: string; edited: string; deleted_lost: string; odds_high: string; w_won: string; w_lost: string; w_profit: string | null; w_priced: string }>(
       `SELECT handle, count(*) AS total, count(*) FILTER (WHERE kind = 'bet') AS tips, count(*) FILTER (WHERE kind = 'unknown') AS unknown,
-              count(*) FILTER (WHERE kind = 'other' AND reason IS DISTINCT FROM 'Повтор') AS other, count(*) FILTER (WHERE reason = 'Повтор') AS repeats,
+              count(*) FILTER (WHERE kind = 'other' AND reason IS DISTINCT FROM 'Повтор' AND reason IS DISTINCT FROM 'Результат') AS other, count(*) FILTER (WHERE reason IN ('Повтор', 'Результат')) AS repeats,
               count(*) FILTER (WHERE kind = 'bet' AND result = 'Win') AS won, count(*) FILTER (WHERE kind = 'bet' AND result = 'Loss') AS lost,
               count(*) FILTER (WHERE kind = 'bet' AND result IS NULL) AS pending,
               sum(CASE WHEN kind = 'bet' AND result = 'Win' AND odds IS NOT NULL THEN (odds - 1) * 100 WHEN kind = 'bet' AND result = 'Loss' AND odds IS NOT NULL THEN -100 END) AS profit,
@@ -68,7 +68,7 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
     .sort((a, b) => Math.abs(b.profit) - Math.abs(a.profit));
   const dayOf = (h: string, d: string) => {
     const rs = byDay.rows.filter((r) => r.handle === h && r.day === d), cnt = (f: (r: typeof rs[number]) => boolean) => rs.filter(f).reduce((x, r) => x + Number(r.n), 0);
-    return { tips: cnt((r) => r.kind === 'bet'), unknown: cnt((r) => r.kind === 'unknown'), info: cnt((r) => r.kind === 'other' && !r.reason), repeats: cnt((r) => r.kind === 'other' && !!r.reason) };
+    return { tips: cnt((r) => r.kind === 'bet'), unknown: cnt((r) => r.kind === 'unknown'), info: cnt((r) => r.kind === 'other' && r.reason !== 'Повтор' && r.reason !== 'Результат'), repeats: cnt((r) => r.kind === 'other' && (r.reason === 'Повтор' || r.reason === 'Результат')) };
   };
   const now = Date.now(), days = Array.from({ length: 7 }, (_, i) => kyivDay(now - (6 - i) * DAY));
   const who = new Map<string, Set<string>>(), blocked = new Set<string>();
