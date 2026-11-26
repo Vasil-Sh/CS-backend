@@ -101,7 +101,7 @@ async function readPost(ctx: Ctx, post: PagePost): Promise<Read> {
   }
   if (ai) {
     const line = aiLine(ai);
-    const slip: Slip | null = ai.isTip && ai.status ? { status: ai.status, stake: ai.stake && ai.stake > 0 ? ai.stake : null, currency: currencyCode(ai.currency), payout: ai.payout && ai.payout > 0 ? ai.payout : null } : null;
+    const slip: Slip | null = ai.status || (ai.isTip && ai.stake) ? { status: ai.status || 'pending', stake: ai.stake && ai.stake > 0 ? ai.stake : null, currency: currencyCode(ai.currency), payout: ai.payout && ai.payout > 0 ? ai.payout : null } : null;
     const money = slip ? ` · квиток: ${STATUS_UA[slip.status]}${slip.stake ? `, ставка ${slip.stake}${slip.currency ? ` ${slip.currency}` : ''}` : ''}${slip.payout ? `, виплата ${slip.payout}` : ''}` : '';
     const legsTxt = ai.market === 'express' && ai.legs?.length ? ` · ${ai.legs.map((l) => `${l.team1} — ${l.team2}: ${l.pick || ''}${l.odds ? ` @${l.odds}` : ''}`).join('; ')}` : '';
     const who = ai.by ? ` (${ai.by})` : '', doubt = ai.doubt ? ` · РОЗБІЖНІСТЬ: ${ai.doubt}` : '';
@@ -156,6 +156,19 @@ async function repeatOf(handle: string, post: PagePost, p: TgParsed, slip?: Slip
     return { kind: 'other', reason: 'Результат', repeatOf: same.post_id };
   }
   return { kind: 'other', reason: 'Повтор', repeatOf: same.post_id };
+}
+
+/** A settled slip without a tip in it: the channel's tip (≤ 3 days before) on the same teams or at the same odds gets its result and money. */
+async function resultSlip(handle: string, post: PagePost, tip: AiTip, slip: Slip): Promise<TgParsed | null> {
+  const { rows } = await pool.query<{ post_id: number; team1: string | null; team2: string | null; pick: string | null; odds: string | null }>(
+    `SELECT post_id, team1, team2, pick, odds FROM tg_posts WHERE handle = $1 AND post_id < $2 AND kind = 'bet' AND posted_at > $3::timestamptz - interval '3 days' ORDER BY post_id DESC LIMIT 20`,
+    [handle, post.id, post.at]);
+  const names = [tip.team1, tip.team2, tip.pick].filter((x): x is string => !!x);
+  const hit = rows.find((r) => names.some((n) => sameName(n, r.team1 || '') || sameName(n, r.team2 || '')))
+    ?? (tip.odds ? rows.find((r) => r.odds != null && Math.abs(Number(r.odds) - Number(tip.odds)) < 0.011) : undefined);
+  if (!hit) return null;
+  await applySlip(handle, hit.post_id, slip, true, true);
+  return { kind: 'other', reason: 'Результат', repeatOf: hit.post_id };
 }
 
 /** The slip's money and, when it shows one, its result (won → Win, lost → Loss, returned/sold → Void) on a tip. */
@@ -292,6 +305,8 @@ async function handlePost(ctx: Ctx, post: PagePost, backfill: boolean): Promise<
   if (parsed.kind === 'bet' && ourOdds && parsed.odds && (parsed.odds > ourOdds * 2.5 || parsed.odds * 2.5 < ourOdds))
     parsed = { kind: 'unknown', reason: `Коефіцієнт ${parsed.odds} не схожий на справжній (у нас ${ourOdds})`, match: parsed.match, odds: parsed.odds };
   parsed = await repeatOf(handle, post, parsed, slip);
+  // a settled slip the reader did not take for a tip («Выиграна · Ординар … 243 USDT»): the result and the money of the tip it belongs to
+  if (parsed.kind === 'other' && !parsed.reason && slip && slip.status !== 'pending' && tip) parsed = await resultSlip(handle, post, tip, slip) ?? parsed;
   await savePost(handle, post, ocr, parsed, backfill);
   const raw = tip ? Object.fromEntries(Object.entries(tip).filter(([k]) => !['by', 'byId', 'doubt'].includes(k))) : null;
   await pool.query('UPDATE tg_posts SET ai_raw = $3, ai_by = $4, read_by = $5, img_hash = COALESCE($6, img_hash), ai_wrong = false WHERE handle = $1 AND post_id = $2 AND fixed_by IS NULL',
