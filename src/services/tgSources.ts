@@ -88,12 +88,13 @@ async function readPost(post: PagePost): Promise<{ ocr: string; full: string; ai
 const norm = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 /** A channel often posts the same tip twice (a repost, a reply with the same ticket): the later one is «Повтор», so stats count it once. */
 async function repeatOf(handle: string, post: PagePost, p: TgParsed, slip?: Slip | null): Promise<TgParsed> {
-  const prev = await pool.query<{ post_id: number; text: string; kind: string; match_id: string | null; market: string | null; pick: string | null; reason: string | null }>(
-    `SELECT post_id, text, kind, match_id, market, pick, reason FROM tg_posts WHERE handle = $1 AND post_id < $2 AND posted_at > $3::timestamptz - interval '2 days' AND (reason IS DISTINCT FROM 'Повтор') ORDER BY post_id DESC LIMIT 30`,
+  const prev = await pool.query<{ post_id: number; text: string; kind: string; match_id: string | null; market: string | null; pick: string | null; reason: string | null; odds: string | null }>(
+    `SELECT post_id, text, kind, match_id, market, pick, reason, odds FROM tg_posts WHERE handle = $1 AND post_id < $2 AND posted_at > $3::timestamptz - interval '2 days' AND (reason IS DISTINCT FROM 'Повтор') ORDER BY post_id DESC LIMIT 30`,
     [handle, post.id, post.at]);
   const t = norm(post.text);
   const same = prev.rows.find((r) => {
-    if (p.kind === 'bet') return r.kind === 'bet' && r.match_id === p.match.id && r.market === p.market && r.pick === p.pick;
+    // the same pick on the same match: the same market, or the same odds (one bet shown on a share card and on the bookmaker's slip)
+    if (p.kind === 'bet') return r.kind === 'bet' && r.match_id === p.match.id && r.pick === p.pick && (r.market === p.market || (p.odds != null && r.odds != null && Math.abs(Number(r.odds) - p.odds) < 0.015));
     if (p.kind === 'unknown' && p.match) return r.kind === 'unknown' && r.match_id === p.match.id && r.reason === p.reason;
     return t.length >= 12 && norm(r.text) === t;
   });

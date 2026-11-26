@@ -64,11 +64,19 @@ export async function aiReadPost(caption: string, photos: string[]): Promise<AiT
     for (const model of models) {
       for (let attempt = 0; attempt < 3 && !body; attempt++) {
         if (attempt) await new Promise((ok) => setTimeout(ok, attempt * 5_000));
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-          method: 'POST', signal: AbortSignal.timeout(40_000),
-          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-          body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: SCHEMA } }),
-        });
+        let res: Response;
+        try {
+          // Flash «thinks» before answering — up to ~1.5 min on a busy day
+          res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+            method: 'POST', signal: AbortSignal.timeout(90_000),
+            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+            body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: SCHEMA } }),
+          });
+        } catch (e) {
+          // a timeout / dropped connection: not a quota — the next model answers faster
+          aiStats.calls++; lastErr = `Gemini ${model}: ${(e as Error).name === 'TimeoutError' ? 'не відповів за 90 с' : (e as Error).message.slice(0, 120)}`;
+          break;
+        }
         aiStats.calls++; aiStats.lastAt = new Date().toISOString(); aiStats.model = model;
         if (res.ok) { body = await res.json() as Resp; break; }
         const raw = await res.text();
