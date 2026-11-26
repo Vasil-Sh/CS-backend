@@ -100,23 +100,23 @@ async function repeatOf(handle: string, post: PagePost, p: TgParsed, slip?: Slip
   if (!same) return p;
   // the same tip again with its result on the slip (won / lost): the result goes to the first post, this one is «Результат»
   if (p.kind === 'bet' && slip && (slip.status === 'won' || slip.status === 'lost' || slip.status === 'cashout' || slip.status === 'void')) {
-    await applySlip(handle, same.post_id, slip, true);
+    await applySlip(handle, same.post_id, slip, true, true);
     return { kind: 'other', reason: 'Результат', repeatOf: same.post_id };
   }
   return { kind: 'other', reason: 'Повтор', repeatOf: same.post_id };
 }
 
 /** The slip's money and, when it shows one, its result (won → Win, lost → Loss, returned/sold → Void) on a tip. */
-async function applySlip(handle: string, postId: number, slip: Slip, keepMoney = false): Promise<void> {
+async function applySlip(handle: string, postId: number, slip: Slip, keepMoney = false, fromLater = false): Promise<void> {
   const res = slip.status === 'won' ? 'Win' : slip.status === 'lost' ? 'Loss' : slip.status === 'void' || slip.status === 'cashout' ? 'Void' : null;
   await pool.query(
-    `UPDATE tg_posts SET slip = $3,
+    `UPDATE tg_posts SET slip = CASE WHEN $9 AND slip IS NOT NULL THEN slip ELSE $3 END, -- a post keeps what its own slip shows («очікується»); the result comes from the later one
         stake = CASE WHEN $7 AND stake IS NOT NULL THEN stake ELSE COALESCE($4, stake) END,
         currency = CASE WHEN $7 AND currency IS NOT NULL THEN currency ELSE COALESCE($5, currency) END,
         payout = COALESCE($6, payout),
         result = CASE WHEN fixed_by IS NULL AND $8::text IS NOT NULL THEN $8 ELSE result END
       WHERE handle = $1 AND post_id = $2 AND kind = 'bet'`,
-    [handle, postId, slip.status, slip.stake, slip.currency, slip.payout, keepMoney, res]);
+    [handle, postId, slip.status, slip.stake, slip.currency, slip.payout, keepMoney, res, fromLater]);
 }
 
 /** New post → insert; a post saved before we read screenshots (photos IS NULL) → photos + OCR, re-parsed unless an admin sorted it. */
@@ -204,6 +204,8 @@ async function collectChannel1(handle: string, cands?: TgCandidate[]): Promise<n
     parsed = await repeatOf(handle, post, parsed, slip);
     await savePost(handle, post, ocr, parsed, post.id <= ch.last_post_id);
     if (slip && parsed.kind === 'bet') await applySlip(handle, post.id, slip);
+    // «Результат»: the post shows its own slip (won / lost), the tip and its money stay counted once — on the first post
+    else if (slip && parsed.kind === 'other' && parsed.reason === 'Результат') await pool.query('UPDATE tg_posts SET slip = $3, stake = $4, currency = $5, payout = $6 WHERE handle = $1 AND post_id = $2', [handle, post.id, slip.status, slip.stake, slip.currency, slip.payout]);
     const pr = progress.get(handle);
     if (pr) pr.done = Math.min(pr.total, pr.done + 1);
   }

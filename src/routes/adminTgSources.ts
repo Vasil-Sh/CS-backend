@@ -100,7 +100,7 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
   });
 });
 
-const postCols = `handle, post_id AS "postId", posted_at AS "postedAt", text, kind, reason, game, match_id AS "matchId", team1, team2, market, pick, odds::float AS odds, result, score, fixed_by AS "fixedBy", COALESCE(photos, '{}') AS photos, ocr`;
+const postCols = `handle, post_id AS "postId", posted_at AS "postedAt", text, kind, reason, game, match_id AS "matchId", team1, team2, market, pick, odds::float AS odds, result, score, fixed_by AS "fixedBy", COALESCE(photos, '{}') AS photos, ocr, slip, stake::float AS stake, currency, payout::float AS payout`;
 
 /** GET /api/admin/tg-sources/:handle/posts — the channel's newest posts with what we made of them. */
 tg.get('/admin/tg-sources/:handle/posts', requireAuth, requireAdmin, async (c) => {

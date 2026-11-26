@@ -4,7 +4,7 @@
  * The answer is written back as a plain tip line («A vs B / Перемога X @1.72») and goes through the same parser,
  * so matching to our feed, synthetic matches and settlement stay in one place.
  */
-const MODEL = () => process.env.GEMINI_MODEL || 'gemini-flash-lite-latest';
+const MODEL = () => process.env.GEMINI_MODEL || 'gemini-flash-latest'; // Flash reads slips better than Flash-Lite; Lite is the fallback
 export const aiEnabled = () => !!process.env.GEMINI_API_KEY;
 export const aiStats = { calls: 0, failed: 0, lastError: null as string | null, lastAt: null as string | null, model: '' };
 let nextAt = 0; // free tier: ~10–15 requests a minute — one call per 6 s
@@ -19,10 +19,11 @@ export interface AiTip {
 
 const PROMPT = `You read posts of a Telegram channel about esports betting (CS2, Dota 2). A post has a caption and maybe a screenshot of a bet slip or of an app.
 Decide if the post itself gives a betting tip / a placed bet (a "tip"). A screenshot of ONE bet slip / ticket / coupon (team names, a market, odds, often a stake) IS a tip, even when the caption is a joke, a short comment or empty — also when the slip already shows the result (won/lost).
-NOT tips: news, app updates, chat, screenshots of an app UI with a table or a list of many matches, a scoreboard or a live score without a bet, an announcement of upcoming matches without a pick.
+NOT tips: news, app updates, chat, a scoreboard or a live score without a bet, an announcement of upcoming matches without a pick,
+and screenshots of an app UI: a dashboard, a table or list of matches or of records (columns like Тип / Сума / Коеф / Профіт / Матч), a form («Новий запис», «Додати запис»), settings — even when odds or a team name appear in it. A slip is ONE bet shown as a ticket/card/coupon, not a row of a table.
 For a tip, read: game, the two teams exactly as written, the market, the side picked, the line and the decimal odds.
 "pick" is the team name only (no numbers, no brackets). For a handicap give the signed line of the picked team (+1.5 or -1.5).
-From the slip also read: status — won (Виграш, Выигрыш, Выиграна, Won, a green "won"/"win" mark, a profit shown as gained), lost (Програш, Проигрыш, Lost, red), pending (Очікується, Ожидается, Открыта, Pending, "possible win" only), cashout (sold / Продано / cash out), void (returned / refund); null when there is no slip;
+From the slip also read: status — read the words on the slip and its button/badge first: won (Виграш, Виграно, Выигрыш, Выиграна, Won, «Профіт +…» shown as gained, a green ticket whose button says the bet won), lost (Програш, Проигрыш, Lost, red), pending (Очікується, Ожидается, Открыта, Pending, "possible win" only), cashout (sold / Продано / cash out), void (returned / refund); null when there is no slip;
 stake — the amount staked, currency — its code or sign as written (₴, UAH, ₽, RUB, $, USD, USDT, €), payout — the total paid or to be paid (stake × odds), all as plain numbers.
 Markets: match_winner (the series winner), map_winner (winner of map N — set "map"), total_maps (over/under N.5 maps — set "line" and "over"), handicap (map handicap — set "pick" and "line" like -1.5), express (several matches in one bet), other.
 Football, basketball and other non-esports bets: isTip=false. Answer JSON only.`;
@@ -58,7 +59,7 @@ export async function aiReadPost(caption: string, photos: string[]): Promise<AiT
       parts.push({ inline_data: { mime_type: r.headers.get('content-type') || 'image/jpeg', data: buf.toString('base64') } });
     }
     // «high demand» (503) / quota (429) are usually short: wait and retry, then the other Flash model
-    const models = [...new Set([MODEL(), 'gemini-flash-latest'])];
+    const models = [...new Set([MODEL(), 'gemini-flash-latest', 'gemini-flash-lite-latest'])];
     let body = null as Resp | null, lastErr = '';
     for (const model of models) {
       for (let attempt = 0; attempt < 3 && !body; attempt++) {
