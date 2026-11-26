@@ -154,6 +154,20 @@ function withLive<T extends { matchId?: string | null; kind?: string }>(rows: T[
   return rows.map((r) => { const m = r.kind === 'bet' && r.matchId ? feed.find((x) => x.id === r.matchId) : undefined; return m ? { ...r, live: { status: m.status, score1: m.score1, score2: m.score2, start: m.start } } : r; });
 }
 
+/** GET /api/admin/tg-sources/:handle/slips — every post with money on a slip: what it shows and whether it is in «Гроші каналу» (a tip, once). */
+tg.get('/admin/tg-sources/:handle/slips', requireAuth, requireAdmin, async (c) => {
+  const { rows } = await pool.query<{ postId: number; postedAt: string; kind: string; reason: string | null; result: string | null; slip: string | null; stake: string; currency: string | null; payout: string | null; odds: string | null; team1: string | null; team2: string | null; pick: string | null; market: string | null; readBy: string | null }>(
+    `SELECT post_id AS "postId", posted_at AS "postedAt", kind, reason, result, slip, stake, currency, payout, odds, team1, team2, pick, market, read_by AS "readBy"
+       FROM tg_posts WHERE handle = $1 AND stake IS NOT NULL ORDER BY posted_at DESC LIMIT 200`, [c.req.param('handle')]);
+  return c.json({ slips: rows.map((r) => {
+    const stake = Number(r.stake), payout = r.payout != null ? Number(r.payout) : null, odds = r.odds != null ? Number(r.odds) : null;
+    const counted = r.kind === 'bet' && !!r.currency;
+    const profit = !counted ? null : r.result === 'Win' ? Math.round(((payout ?? stake * (odds ?? 1)) - stake) * 100) / 100 : r.result === 'Loss' ? -stake : r.result === 'Void' ? 0 : null;
+    const why = counted ? null : !r.currency ? 'не прочитано валюту' : r.reason === 'Результат' ? 'квиток з результатом — гроші на першому пості' : r.reason === 'Повтор' ? 'повтор — рахуємо раз' : r.kind === 'unknown' ? 'пост не розпізнано' : 'пост не прогноз';
+    return { ...r, stake, payout, odds, counted, profit, why };
+  }) });
+});
+
 /** GET /api/admin/tg-sources/:handle/posts — the channel's newest posts with what we made of them. */
 tg.get('/admin/tg-sources/:handle/posts', requireAuth, requireAdmin, async (c) => {
   const { rows } = await pool.query(`SELECT ${postCols} FROM tg_posts WHERE handle = $1 ORDER BY posted_at DESC LIMIT 30`, [c.req.param('handle')]);
