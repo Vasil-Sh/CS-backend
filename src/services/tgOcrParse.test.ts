@@ -17,15 +17,15 @@ describe('screenshots (OCR text)', () => {
   });
   it('BC.GAME: «1 карта - победитель Team OG» → a map bet, match and odds found', () => {
     const ocr = '1-ая карта (©)\nN Dota 2 › BLAST SLAM IX\nTeam OG vs Aurora Gaming 0:0 и!\nID ставки: 2737067784851821110 Qj [С] ВС.САМЕ\n1 карта - победитель Team ОС 0:0\nИтоговый коэффициент 2.35\nСтавка 12000.00 Р';
-    expect(parseTgPost(ocr, at, C)).toMatchObject({ kind: 'unknown', reason: 'Ставки на окрему карту поки не рахуємо', match: { id: 'og-aur' }, odds: 2.35 });
+    expect(parseTgPost(ocr, at, C)).toMatchObject({ kind: 'bet', market: 'Map 1 Winner', pick: 'OG', match: { id: 'og-aur' }, odds: 2.35 });
   });
   it('one team on the screen → its match around the post time', () => {
     const ocr = 'SS PGL Major\n< © 00:37:02 363 x\nLiquid\nПобеда на карте #2\nili, СТАТИСТИКА\nх 2.418 = =\nКОЭФФИЦИЕНТ ВЫИГРЫШ';
-    expect(parseTgPost(ocr, at, C)).toMatchObject({ kind: 'unknown', reason: 'Ставки на окрему карту поки не рахуємо', match: { id: 'nip-liq' }, odds: 2.418 });
+    expect(parseTgPost(ocr, at, C)).toMatchObject({ kind: 'bet', market: 'Map 2 Winner', pick: 'Team Liquid', match: { id: 'nip-liq' }, odds: 2.418 });
     expect(parseTgPost('Liquid\nПобеда\nх 2.418', at, C)).toMatchObject({ kind: 'bet', match: { id: 'nip-liq' }, pick: 'Team Liquid', odds: 2.418 });
   });
-  it('the caption «Камбек на 2карту від ЗдМакс» is a map bet', () => {
-    expect(parseTgPost('Камбек на 2карту від ЗдМакс\nКарта 2: Переможець карти: 3DMAX 1.90', at, C)).toMatchObject({ kind: 'unknown', reason: 'Ставки на окрему карту поки не рахуємо' });
+  it('a map bet on a match we cannot find stays in the queue', () => {
+    expect(parseTgPost('Камбек на 2карту від ЗдМакс\nКарта 2: Переможець карти: 3DMAX 1.90', at, C)).toMatchObject({ kind: 'unknown', reason: 'Матч не знайдено' }); // 3DMAX is not in the candidates
   });
   it('football screenshots are not ours', () => {
     expect(parseTgPost('ЭКСПРЕСС 25 нояб.\n1.6 Сабах ФК vs Барселона\nБарселона выиграет обе половины да\nЛига Чемпионов УЕФА\nИтоговый коэффициент 1.84', at, C)).toMatchObject({ kind: 'other' });

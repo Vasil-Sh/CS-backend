@@ -13,11 +13,17 @@ export interface AiTip {
   isTip: boolean; game?: 'cs2' | 'dota2' | 'other' | null; team1?: string | null; team2?: string | null;
   market?: 'match_winner' | 'map_winner' | 'total_maps' | 'handicap' | 'express' | 'other' | null;
   map?: number | null; pick?: string | null; line?: number | null; over?: boolean | null; odds?: number | null;
+  /** What the slip itself shows: its state and the money on it (in the slip's currency). */
+  status?: 'won' | 'lost' | 'pending' | 'void' | 'cashout' | null; stake?: number | null; currency?: string | null; payout?: number | null;
 }
 
 const PROMPT = `You read posts of a Telegram channel about esports betting (CS2, Dota 2). A post has a caption and maybe a screenshot of a bet slip or of an app.
-Decide if the post itself gives a betting tip / a placed bet (a "tip"). News, app updates, chat, results talk, screenshots of an app UI or of a list of matches are NOT tips.
+Decide if the post itself gives a betting tip / a placed bet (a "tip"). A screenshot of ONE bet slip / ticket / coupon (team names, a market, odds, often a stake) IS a tip, even when the caption is a joke, a short comment or empty — also when the slip already shows the result (won/lost).
+NOT tips: news, app updates, chat, screenshots of an app UI with a table or a list of many matches, a scoreboard or a live score without a bet, an announcement of upcoming matches without a pick.
 For a tip, read: game, the two teams exactly as written, the market, the side picked, the line and the decimal odds.
+"pick" is the team name only (no numbers, no brackets). For a handicap give the signed line of the picked team (+1.5 or -1.5).
+From the slip also read: status — won (Виграш, Выигрыш, Выиграна, Won, a green "won"/"win" mark, a profit shown as gained), lost (Програш, Проигрыш, Lost, red), pending (Очікується, Ожидается, Открыта, Pending, "possible win" only), cashout (sold / Продано / cash out), void (returned / refund); null when there is no slip;
+stake — the amount staked, currency — its code or sign as written (₴, UAH, ₽, RUB, $, USD, USDT, €), payout — the total paid or to be paid (stake × odds), all as plain numbers.
 Markets: match_winner (the series winner), map_winner (winner of map N — set "map"), total_maps (over/under N.5 maps — set "line" and "over"), handicap (map handicap — set "pick" and "line" like -1.5), express (several matches in one bet), other.
 Football, basketball and other non-esports bets: isTip=false. Answer JSON only.`;
 
@@ -29,6 +35,8 @@ const SCHEMA = {
     market: { type: 'STRING', nullable: true, enum: ['match_winner', 'map_winner', 'total_maps', 'handicap', 'express', 'other'] },
     map: { type: 'INTEGER', nullable: true }, pick: { type: 'STRING', nullable: true }, line: { type: 'NUMBER', nullable: true },
     over: { type: 'BOOLEAN', nullable: true }, odds: { type: 'NUMBER', nullable: true },
+    status: { type: 'STRING', nullable: true, enum: ['won', 'lost', 'pending', 'void', 'cashout'] },
+    stake: { type: 'NUMBER', nullable: true }, currency: { type: 'STRING', nullable: true }, payout: { type: 'NUMBER', nullable: true },
   },
   required: ['isTip'],
 };
@@ -81,10 +89,25 @@ export async function aiReadPost(caption: string, photos: string[]): Promise<AiT
 }
 
 type Resp = { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+/** The slip's currency as one code: ₴/грн → UAH, ₽/руб → RUB, $ → USD, € → EUR, USDT stays. */
+export function currencyCode(c?: string | null): string | null {
+  const x = (c || '').trim().toUpperCase();
+  if (!x) return null;
+  if (/₴|ГРН|UAH/.test(x)) return 'UAH';
+  if (/₽|РУБ|RUB|Р$/.test(x)) return 'RUB';
+  if (/USDT/.test(x)) return 'USDT';
+  if (/\$|USD/.test(x)) return 'USD';
+  if (/€|EUR/.test(x)) return 'EUR';
+  if (/₸|KZT/.test(x)) return 'KZT';
+  return /^[A-Z]{3,4}$/.test(x) ? x : null;
+}
+
 const n2 = (x: number) => String(x).replace(',', '.');
 /** The model's answer as a tip line for the parser; '' for «not a tip». */
 export function aiLine(a: AiTip): string {
   if (!a.isTip || a.game === 'other') return '';
+  const pick = (a.pick || '').replace(/\([^)]*\)/g, '').replace(/[+\-−]?\d+(?:[.,]\d+)?/g, '').replace(/\s+/g, ' ').trim() || null;
+  a = { ...a, pick };
   const head = a.team1 && a.team2 ? `${a.team1} vs ${a.team2}` : a.team1 || a.team2 || '';
   const kf = a.odds ? ` @${n2(a.odds)}` : '';
   const game = a.game === 'dota2' ? 'Dota 2' : a.game === 'cs2' ? 'CS2' : '';

@@ -23,7 +23,7 @@ const TOTAL = re(String.raw`(?:<B(тб|тм|tb|tm)B>|<Bтотал\s*(больш�
 const HCP = re(String.raw`(?:<Bф(?:ора)?|<Bhandicap|<Bhcp)\s*(?:([12])|([^\d+\-−–@\n]{0,30}?))\s*\(?\s*([+\-−–]\s?\d+[.,]5)`);
 const P12 = re(String.raw`<B(п|w|p)\s?([12])(?![${L}]|[.,]\d)`);
 // «1 карта», «1-ая карта», «на 2карту», «Карта 2:», «карте #2», «map 2» — a bet on one map, not the series
-const MAP = re(String.raw`(?<![\d.,])[1-5]\s*-?(?:[ая]{1,2}|ша|га|тя|я|й)?\s*карт(?:а|у|е|і)(?![${L}])|<Bкарт(?:а|е|і|ы)\s*(?:#|№)?\s*[1-5](?![\d.,])|<Bmap\s*(?:#|№)?\s*[1-5](?![\d.,])`);
+const MAP = re(String.raw`(?:перш|перв|друг|втор|трет|четв|п.?ят)\S*\s+карт|(?<![\d.,])[1-5]\s*-?(?:[ая]{1,2}|ша|га|тя|я|й)?\s*карт(?:а|у|е|і)(?![${L}])|<Bкарт(?:а|е|і|ы)\s*(?:#|№)?\s*[1-5](?![\d.,])|<Bmap\s*(?:#|№)?\s*[1-5](?![\d.,])`);
 // other sports in the same channels (football screenshots): not ours
 const NOT_ESPORTS = re(String.raw`<Bуефа|<Bфутбол|<Bfootball|<Bsoccer|<Bnba|<Bnhl|<Bтайм|<Bполовин|<Bhalf\s?time|<Btotal in time period|<Bтеніс|<Bтеннис|<Bхокей|<Bхоккей|<Bбаскетбол|<B(фк|fc)B>`);
 const WIN = re(String.raw`перемо[гж]|побед|<BwinB>|<Bwinner|виграє|выиграет|забира|візьм|возьм|ставка на|ставлю на|<BберуB>`);
@@ -131,7 +131,18 @@ export function parseTgPost(text: string, postedAt: string, cands: TgCandidate[]
   if (EXPRESS.test(t)) return { kind: 'unknown', reason: 'Експреси поки не рахуємо', match, odds };
   if (INDIVIDUAL.test(t)) return { kind: 'unknown', reason: 'Індивідуальні тотали поки не рахуємо', match, odds };
   const tot0 = TOTAL.test(t);
-  if (!tot0 && MAP.test(t)) return { kind: 'unknown', reason: 'Ставки на окрему карту поки не рахуємо', match: match || half, odds };
+  if (!tot0 && MAP.test(t)) {
+    // «Карта 2 — переможець NiP»: a tip on one map (settled by the slip's result or the map scores)
+    if (!match) return { kind: 'unknown', reason: half ? 'Матч не знайдено — немає суперника' : 'Матч не знайдено', match: half, odds };
+    const mn = /(?<![\d.,])([1-5])\s*-?(?:[ая]{1,2}|ша|га|тя|я|й)?\s*карт|карт(?:а|е|і|ы)\s*(?:#|№)?\s*([1-5])|map\s*(?:#|№)?\s*([1-5])/i.exec(t);
+    const ORD: [RegExp, number][] = [[/(перш|перв)\S*\s+карт/i, 1], [/(друг|втор)\S*\s+карт/i, 2], [/трет\S*\s+карт/i, 3], [/четв\S*\s+карт/i, 4], [/п.?ят\S*\s+карт/i, 5]];
+    const n = mn ? Number(mn[1] || mn[2] || mn[3]) : (ORD.find(([r]) => r.test(t))?.[1] ?? 0);
+    const k = words(t).search(MAP);
+    const after = (ps: number[]) => Math.min(...ps.map((x) => (x >= k ? x - k : 1e6 + k - x)));
+    const side = p1.length || p2.length ? (after(p1) <= after(p2) ? 1 : 2) : 0;
+    if (!n || !side) return { kind: 'unknown', reason: !n ? 'Не вказано, яка карта' : 'Не вказано, на кого ставка', match, odds };
+    return { kind: 'bet', match, market: `Map ${n} Winner`, pick: side === 1 ? match.team1 : match.team2, odds };
+  }
   if (!match) return { kind: 'unknown', reason: half ? 'Матч не знайдено — немає суперника' : 'Матч не знайдено', match: half, odds };
 
   const tot = TOTAL.exec(t);

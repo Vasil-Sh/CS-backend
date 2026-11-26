@@ -12,7 +12,7 @@ import { resultFor } from './betHints';
 import { teamKey } from './matchFeed';
 import { isNight } from './nightMode';
 import { closeOcr, ocrImage } from './tgOcr';
-import { aiLine, aiReadPost } from './tgAi';
+import { aiLine, aiReadPost, currencyCode, type AiTip } from './tgAi';
 import { normalizeTeam } from '../utils/matchUtils';
 
 export const TG_EVERY_MS = 10 * 60_000, TG_NIGHT_MS = 60 * 60_000;
@@ -66,12 +66,18 @@ const gameOk = (chGame: string, p: TgParsed) => chGame === 'both' || !('match' i
 type PagePost = { id: number; at: string; text: string; photos: string[] };
 
 /** The caption + what OCR read on its screenshots (up to 2) — what the parser sees. */
-async function readPost(post: PagePost): Promise<{ ocr: string; full: string; ai?: boolean }> {
+/** What a bet slip on the screenshot shows: its state and money. */
+export interface Slip { status: NonNullable<AiTip['status']>; stake: number | null; currency: string | null; payout: number | null }
+const STATUS_UA: Record<string, string> = { won: 'виграш', lost: 'програш', pending: 'очікується', cashout: 'продано', void: 'повернення' };
+
+async function readPost(post: PagePost): Promise<{ ocr: string; full: string; ai?: boolean; slip?: Slip | null }> {
   // the model first (when GEMINI_API_KEY is set): it tells a tip from news and reads the slip; its answer becomes a plain tip line
   const ai = await aiReadPost(post.text, post.photos);
   if (ai) {
     const line = aiLine(ai);
-    return { ocr: `ШІ: ${line ? line.replace(/\n/g, ' · ') : 'не прогноз'}`, full: line, ai: true };
+    const slip: Slip | null = ai.isTip && ai.status ? { status: ai.status, stake: ai.stake && ai.stake > 0 ? ai.stake : null, currency: currencyCode(ai.currency), payout: ai.payout && ai.payout > 0 ? ai.payout : null } : null;
+    const money = slip ? ` · квиток: ${STATUS_UA[slip.status]}${slip.stake ? `, ставка ${slip.stake}${slip.currency ? ` ${slip.currency}` : ''}` : ''}${slip.payout ? `, виплата ${slip.payout}` : ''}` : '';
+    return { ocr: `ШІ: ${line ? line.replace(/\n/g, ' · ') : 'не прогноз'}${money}`, full: line, ai: true, slip };
   }
   const parts: string[] = [];
   for (const url of post.photos.slice(0, 2)) { const t = await ocrImage(url); if (t) parts.push(t); }
@@ -81,7 +87,7 @@ async function readPost(post: PagePost): Promise<{ ocr: string; full: string; ai
 
 const norm = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 /** A channel often posts the same tip twice (a repost, a reply with the same ticket): the later one is «Повтор», so stats count it once. */
-async function repeatOf(handle: string, post: PagePost, p: TgParsed): Promise<TgParsed> {
+async function repeatOf(handle: string, post: PagePost, p: TgParsed, slip?: Slip | null): Promise<TgParsed> {
   const prev = await pool.query<{ post_id: number; text: string; kind: string; match_id: string | null; market: string | null; pick: string | null; reason: string | null }>(
     `SELECT post_id, text, kind, match_id, market, pick, reason FROM tg_posts WHERE handle = $1 AND post_id < $2 AND posted_at > $3::timestamptz - interval '2 days' AND (reason IS DISTINCT FROM 'Повтор') ORDER BY post_id DESC LIMIT 30`,
     [handle, post.id, post.at]);
@@ -91,7 +97,26 @@ async function repeatOf(handle: string, post: PagePost, p: TgParsed): Promise<Tg
     if (p.kind === 'unknown' && p.match) return r.kind === 'unknown' && r.match_id === p.match.id && r.reason === p.reason;
     return t.length >= 12 && norm(r.text) === t;
   });
-  return same ? { kind: 'other', reason: 'Повтор', repeatOf: same.post_id } : p;
+  if (!same) return p;
+  // the same tip again with its result on the slip (won / lost): the result goes to the first post, this one is «Результат»
+  if (p.kind === 'bet' && slip && (slip.status === 'won' || slip.status === 'lost' || slip.status === 'cashout' || slip.status === 'void')) {
+    await applySlip(handle, same.post_id, slip, true);
+    return { kind: 'other', reason: 'Результат', repeatOf: same.post_id };
+  }
+  return { kind: 'other', reason: 'Повтор', repeatOf: same.post_id };
+}
+
+/** The slip's money and, when it shows one, its result (won → Win, lost → Loss, returned/sold → Void) on a tip. */
+async function applySlip(handle: string, postId: number, slip: Slip, keepMoney = false): Promise<void> {
+  const res = slip.status === 'won' ? 'Win' : slip.status === 'lost' ? 'Loss' : slip.status === 'void' || slip.status === 'cashout' ? 'Void' : null;
+  await pool.query(
+    `UPDATE tg_posts SET slip = $3,
+        stake = CASE WHEN $7 AND stake IS NOT NULL THEN stake ELSE COALESCE($4, stake) END,
+        currency = CASE WHEN $7 AND currency IS NOT NULL THEN currency ELSE COALESCE($5, currency) END,
+        payout = COALESCE($6, payout),
+        result = CASE WHEN fixed_by IS NULL AND $8::text IS NOT NULL THEN $8 ELSE result END
+      WHERE handle = $1 AND post_id = $2 AND kind = 'bet'`,
+    [handle, postId, slip.status, slip.stake, slip.currency, slip.payout, keepMoney, res]);
 }
 
 /** New post → insert; a post saved before we read screenshots (photos IS NULL) → photos + OCR, re-parsed unless an admin sorted it. */
@@ -111,27 +136,42 @@ async function savePost(handle: string, post: PagePost, ocr: string, p: TgParsed
        team2 = CASE WHEN tg_posts.fixed_by IS NULL THEN EXCLUDED.team2 ELSE tg_posts.team2 END,
        market = CASE WHEN tg_posts.fixed_by IS NULL THEN EXCLUDED.market ELSE tg_posts.market END,
        pick = CASE WHEN tg_posts.fixed_by IS NULL THEN EXCLUDED.pick ELSE tg_posts.pick END,
-       odds = CASE WHEN tg_posts.fixed_by IS NULL THEN EXCLUDED.odds ELSE tg_posts.odds END` : 'NOTHING'}`,
+       odds = CASE WHEN tg_posts.fixed_by IS NULL THEN EXCLUDED.odds ELSE tg_posts.odds END,
+       result = CASE WHEN tg_posts.fixed_by IS NULL THEN NULL ELSE tg_posts.result END, score = CASE WHEN tg_posts.fixed_by IS NULL THEN NULL ELSE tg_posts.score END,
+       slip = CASE WHEN tg_posts.fixed_by IS NULL THEN NULL ELSE tg_posts.slip END` : 'NOTHING'}`,
     vals,
   );
 }
 
 /** Read one channel now: new posts → parsed → saved. Returns how many posts were new. */
 const busy = new Set<string>();
-/** «Перечитати»: how many posts the re-read started with (progress in the admin). */
-export const rereadTotal = new Map<string, number>();
+/** A running «Перечитати» / first read of a new channel: posts to read and read so far (progress in the admin). */
+export const progress = new Map<string, { total: number; done: number; kind: 'reread' | 'add' }>();
 
 /** Reads the channel until every saved post is re-read (8 a pass), not waiting for the next 10-minute pass. */
 export async function rereadChannel(handle: string, total: number): Promise<void> {
-  rereadTotal.set(handle, total);
+  progress.set(handle, { total, done: 0, kind: 'reread' });
   try {
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < 12; i++) {
+      const before = progress.get(handle)?.done ?? 0;
       await collectChannel(handle);
-      const left = Number((await pool.query<{ n: string }>('SELECT count(*) AS n FROM tg_posts WHERE handle = $1 AND photos IS NULL', [handle])).rows[0]?.n || 0);
-      if (!left) break;
+      const pr = progress.get(handle);
+      if (!pr || pr.done === before) break; // nothing left on the channel's page (older posts are no longer there to read)
     }
+    if (progress.get(handle)) progress.get(handle)!.done = progress.get(handle)!.total;
     await settleTgTips().catch(() => 0);
-  } finally { rereadTotal.delete(handle); }
+  } finally { progress.delete(handle); }
+}
+
+/** A channel just added: its page is read in the background (≈6 s a post with the AI reader), the admin sees the progress. */
+export async function firstRead(handle: string): Promise<void> {
+  progress.set(handle, { total: 20, done: 0, kind: 'add' });
+  try {
+    const page = await fetchChannelPage(handle).catch(() => null);
+    if (page) progress.set(handle, { total: Math.max(1, page.posts.filter((p) => p.text || p.photos.length).length), done: 0, kind: 'add' });
+    await collectChannel(handle);
+    await settleTgTips().catch(() => 0);
+  } finally { progress.delete(handle); }
 }
 
 export async function collectChannel(handle: string, cands?: TgCandidate[]): Promise<number> {
@@ -158,11 +198,14 @@ async function collectChannel1(handle: string, cands?: TgCandidate[]): Promise<n
   const oldest = todo.reduce((a, p) => (a && a < p.at ? a : p.at), '');
   const list = cands && !unread.size ? cands : await tgCandidates(oldest || undefined);
   for (const post of todo) {
-    const { ocr, full, ai } = await readPost(post);
+    const { ocr, full, ai, slip } = await readPost(post);
     let parsed = ai && !full ? { kind: 'other' as const } : parseTgPost(full, post.at, list, ch.rules || {});
     if (!gameOk(ch.game, parsed)) parsed = { kind: 'other' };
-    parsed = await repeatOf(handle, post, parsed);
+    parsed = await repeatOf(handle, post, parsed, slip);
     await savePost(handle, post, ocr, parsed, post.id <= ch.last_post_id);
+    if (slip && parsed.kind === 'bet') await applySlip(handle, post.id, slip);
+    const pr = progress.get(handle);
+    if (pr) pr.done = Math.min(pr.total, pr.done + 1);
   }
   const last = page.posts.reduce((a, p) => (p.id > a.id ? p : a), { id: ch.last_post_id, at: '' } as { id: number; at: string });
   await pool.query(

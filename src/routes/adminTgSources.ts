@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { pool } from '../db/client';
-import { collectChannel, rereadChannel, rereadTotal, previewChannel, publicHandle, settleTgTips, tgCandidates, tgCycle, tgNextAt } from '../services/tgSources';
+import { collectChannel, fetchChannelPage, rereadChannel, firstRead, progress, previewChannel, publicHandle, settleTgTips, tgCandidates, tgCycle, tgNextAt } from '../services/tgSources';
 import { isNight } from '../services/nightMode';
 import { ocrStats } from '../services/tgOcr';
 import { aiEnabled, aiStats } from '../services/tgAi';
@@ -18,7 +18,7 @@ const kyivDay = (t: number) => new Intl.DateTimeFormat('sv-SE', { timeZone: 'Eur
 
 /** GET /api/admin/tg-sources — channels with their week, totals, invites users added (not readable yet). */
 tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
-  const [chs, posts, groups, all, again] = await Promise.all([
+  const [chs, posts, groups, all, again, money, byDay] = await Promise.all([
     pool.query(`SELECT handle, title, subscribers, game, is_test AS "isTest", paused, added_by AS "addedBy", last_post_at AS "lastPostAt", checked_at AS "checkedAt", error, created_at AS "createdAt" FROM tg_channels ORDER BY created_at`),
     pool.query<{ handle: string; posted_at: string; kind: string; result: string | null; odds: string | null }>(
       `SELECT handle, posted_at, kind, result, odds FROM tg_posts WHERE posted_at > now() - interval '30 days'`),
@@ -34,9 +34,25 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
               count(*) FILTER (WHERE kind = 'bet' AND result IS NOT NULL AND odds IS NOT NULL) AS priced, min(posted_at) AS first_at
          FROM tg_posts GROUP BY handle`),
     pool.query<{ handle: string; n: string }>(`SELECT handle, count(*) AS n FROM tg_posts WHERE photos IS NULL GROUP BY handle`),
+    // real money from the slips (the slip's currency): won → paid − staked, lost → −staked
+    pool.query<{ handle: string; currency: string; profit: string; staked: string; n: string }>(
+      `SELECT handle, currency, sum(CASE WHEN result = 'Win' THEN COALESCE(payout - stake, stake * (odds - 1)) WHEN result = 'Loss' THEN -stake ELSE 0 END) AS profit,
+              sum(stake) FILTER (WHERE result IN ('Win', 'Loss')) AS staked, count(*) FILTER (WHERE result IN ('Win', 'Loss')) AS n
+         FROM tg_posts WHERE kind = 'bet' AND stake IS NOT NULL AND currency IS NOT NULL GROUP BY handle, currency`),
+    // 7 days by kind, for the day sheet
+    pool.query<{ handle: string; day: string; kind: string; reason: string | null; n: string }>(
+      `SELECT handle, to_char(posted_at AT TIME ZONE 'Europe/Kyiv', 'YYYY-MM-DD') AS day, kind, reason, count(*) AS n FROM tg_posts
+        WHERE posted_at > now() - interval '8 days' GROUP BY 1, 2, 3, 4`),
   ]);
   const agg = new Map(all.rows.map((r) => [r.handle, r]));
   const rereading = new Map(again.rows.map((r) => [r.handle, Number(r.n)]));
+  const moneyOf = (h: string) => money.rows.filter((r) => r.handle === h && Number(r.n) > 0)
+    .map((r) => ({ currency: r.currency, profit: Math.round(Number(r.profit) * 100) / 100, staked: Math.round(Number(r.staked || 0) * 100) / 100, bets: Number(r.n) }))
+    .sort((a, b) => Math.abs(b.profit) - Math.abs(a.profit));
+  const dayOf = (h: string, d: string) => {
+    const rs = byDay.rows.filter((r) => r.handle === h && r.day === d), cnt = (f: (r: typeof rs[number]) => boolean) => rs.filter(f).reduce((x, r) => x + Number(r.n), 0);
+    return { tips: cnt((r) => r.kind === 'bet'), unknown: cnt((r) => r.kind === 'unknown'), info: cnt((r) => r.kind === 'other' && !r.reason), repeats: cnt((r) => r.kind === 'other' && !!r.reason) };
+  };
   const now = Date.now(), days = Array.from({ length: 7 }, (_, i) => kyivDay(now - (6 - i) * DAY));
   const who = new Map<string, Set<string>>(), blocked = new Set<string>();
   const invites: { name: string; link: string; who: string[] }[] = [];
@@ -62,7 +78,7 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
       posts7d: wk.length, tips7d: tips, unknown7d: unk, recognized: tips + unk ? Math.round((tips / (tips + unk)) * 100) : null,
       settled: settled.length, wins, winrate: settled.length ? Math.round((wins / settled.length) * 100) : null,
       roi: priced.length ? Math.round((profit / priced.length) * 100) : null, pending: ps.filter((p) => p.kind === 'bet' && !p.result).length,
-      users, rereading: rereading.get(ch.handle) || 0, rereadTotal: rereadTotal.get(ch.handle) || null,
+      users, rereading: rereading.get(ch.handle) || 0, money: moneyOf(ch.handle), daysDetail: days.map((d) => dayOf(ch.handle, d)), progress: progress.get(ch.handle) || null,
       all: { posts: n(a?.total), tips: tipsAll, unknown: unkAll, other: n(a?.other), repeats: n(a?.repeats), won: wonAll, lost: lostAll, pending: n(a?.pending),
         recognized: tipsAll + unkAll ? Math.round((tipsAll / (tipsAll + unkAll)) * 100) : null, winrate: wonAll + lostAll ? Math.round((wonAll / (wonAll + lostAll)) * 100) : null,
         profit: pricedAll ? profitAll : null, roi: pricedAll ? Math.round(profitAll / pricedAll) : null, firstAt: a?.first_at ?? null },
@@ -114,22 +130,29 @@ tg.get('/admin/tg-posts/matches', requireAuth, requireAdmin, async (c) => {
 tg.post('/admin/tg-posts/:handle/:postId', requireAuth, requireAdmin, async (c) => {
   const actor = c.get('user');
   const handle = c.req.param('handle') || '', postId = Number(c.req.param('postId'));
-  const b = await c.req.json().catch(() => null) as { kind?: string; matchId?: string; market?: string; side?: 1 | 2; line?: number; over?: boolean; odds?: number | null; remember?: boolean } | null;
+  const b = await c.req.json().catch(() => null) as { kind?: string; matchId?: string; market?: string; side?: 1 | 2; line?: number; over?: boolean; map?: number; odds?: number | null; remember?: boolean } | null;
   if (!b || !postId) return c.json({ error: 'Invalid body' }, 400);
   if (b.kind === 'other') {
     await pool.query(`UPDATE tg_posts SET kind = 'other', reason = NULL, fixed_by = $3 WHERE handle = $1 AND post_id = $2`, [handle, postId, actor.username]);
     audit(actor, 'POST', `/admin/tg-posts/${handle}/${postId}`, { kind: 'other' });
     return c.json({ ok: true });
   }
-  const m = (await tgCandidates()).find((x) => x.id === b.matchId);
+  // a match of our feed, or the one read from the post itself (not in the feed: «tg:…»)
+  let m: { id: string; game: string; team1: string; team2: string } | undefined = (await tgCandidates()).find((x) => x.id === b.matchId);
+  if (!m && b.matchId) {
+    const own = (await pool.query<{ match_id: string; game: string | null; team1: string; team2: string }>('SELECT match_id, game, team1, team2 FROM tg_posts WHERE handle = $1 AND post_id = $2 AND match_id = $3', [handle, postId, b.matchId])).rows[0];
+    if (own?.team1 && own.team2) m = { id: own.match_id, game: own.game || 'cs2', team1: own.team1, team2: own.team2 };
+  }
   if (!m) return c.json({ error: 'Матч не знайдено — оберіть інший' }, 400);
   const mk = b.market || 'Match Winner';
-  const market = mk === 'Match Winner' ? 'Match Winner' : mk === 'Total' ? `Total Maps ${b.over === false ? 'Under' : 'Over'} ${Number(b.line || 2.5)}` : mk === 'Handicap' ? `Handicap ${Number(b.line) > 0 ? '+' : ''}${Number(b.line || -1.5)}` : '';
+  const ln = Math.abs(Number(b.line) || 1.5), mapN = Math.min(5, Math.max(1, Math.round(Number(b.map) || 1)));
+  const market = mk === 'Match Winner' ? 'Match Winner' : mk === 'Total' ? `Total Maps ${b.over === false ? 'Under' : 'Over'} ${Number(b.line || 2.5)}`
+    : mk === 'Handicap' ? `Handicap ${Number(b.line) > 0 ? '+' : '-'}${ln}` : mk === 'Map' ? `Map ${mapN} Winner` : '';
   if (!market) return c.json({ error: 'Невідомий ринок' }, 400);
   const pick = mk === 'Total' ? '' : b.side === 2 ? m.team2 : m.team1;
   const odds = b.odds != null && Number(b.odds) > 1 ? Number(b.odds) : null;
   await pool.query(
-    `UPDATE tg_posts SET kind = 'bet', reason = NULL, game = $3, match_id = $4, team1 = $5, team2 = $6, market = $7, pick = $8, odds = $9, result = NULL, score = NULL, fixed_by = $10 WHERE handle = $1 AND post_id = $2`,
+    `UPDATE tg_posts SET kind = 'bet', reason = NULL, game = $3, match_id = $4, team1 = $5, team2 = $6, market = $7, pick = $8, odds = $9, result = CASE slip WHEN 'won' THEN 'Win' WHEN 'lost' THEN 'Loss' ELSE NULL END, score = NULL, fixed_by = $10 WHERE handle = $1 AND post_id = $2`,
     [handle, postId, m.game, m.id, m.team1, m.team2, market, pick, odds, actor.username]);
   if (b.remember && mk === 'Match Winner') await pool.query(`UPDATE tg_channels SET rules = rules || jsonb_build_object('oddsOnly', $2::text) WHERE handle = $1`, [handle, b.side === 2 ? 'p2' : 'p1']);
   void settleTgTips().catch(() => {});
@@ -153,8 +176,9 @@ tg.post('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
   await pool.query(`INSERT INTO tg_channels(handle, game, is_test, added_by) VALUES($1,$2,$3,$4)
     ON CONFLICT (handle) DO UPDATE SET game = EXCLUDED.game, is_test = tg_channels.is_test AND EXCLUDED.is_test, paused = false`, [handle, game, b?.test !== false, `@${actor.username}`]);
   audit(actor, 'POST', '/admin/tg-sources', { handle, game, test: b?.test !== false });
-  const added = await collectChannel(handle).catch(() => 0);
-  return c.json({ ok: true, handle, added });
+  // reading takes a while (screenshots, ≈6 s a post with the AI reader): it runs on, the list shows the progress
+  void firstRead(handle).catch((e) => console.warn(`[tg] add ${handle}:`, (e as Error).message));
+  return c.json({ ok: true, handle, started: true });
 });
 
 /** POST /api/admin/tg-sources/:handle/pause {paused} — stop / start reading. */
@@ -179,7 +203,10 @@ tg.post('/admin/tg-sources/:handle/refresh', requireAuth, requireAdmin, async (c
 /** POST /api/admin/tg-sources/:handle/reread — read the channel's saved posts again (after GEMINI_API_KEY is added, say); manual fixes stay. */
 tg.post('/admin/tg-sources/:handle/reread', requireAuth, requireAdmin, async (c) => {
   const actor = c.get('user'), handle = c.req.param('handle') || '';
-  const { rowCount } = await pool.query('UPDATE tg_posts SET photos = NULL WHERE handle = $1 AND fixed_by IS NULL', [handle]);
+  // only the posts still on the channel's page can be read again (t.me/s shows the last ~20)
+  const page = await fetchChannelPage(handle).catch(() => null);
+  const ids = (page?.posts || []).map((p) => p.id);
+  const { rowCount } = await pool.query('UPDATE tg_posts SET photos = NULL WHERE handle = $1 AND fixed_by IS NULL AND post_id = ANY($2::int[])', [handle, ids]);
   audit(actor, 'tg_channel_reread', handle, { posts: rowCount });
   void rereadChannel(handle, rowCount || 0).catch((e) => console.warn(`[tg] reread ${handle}:`, (e as Error).message));
   return c.json({ ok: true, posts: rowCount || 0 });
