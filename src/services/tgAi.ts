@@ -108,18 +108,22 @@ export const PROVIDERS: Provider[] = [
   { id: 'gemini', label: 'Gemini Flash', keyName: 'GEMINI_API_KEY', key: () => process.env.GEMINI_API_KEY, model: () => MODEL(), call: gemini },
   { id: 'groq', label: 'Groq', keyName: 'GROQ_API_KEY', key: () => process.env.GROQ_API_KEY, model: () => process.env.GROQ_VISION_MODEL || groqModel, call: openAi('https://api.groq.com/openai/v1/chat/completions') },
   { id: 'mistral', label: 'Mistral', keyName: 'MISTRAL_API_KEY', key: () => process.env.MISTRAL_API_KEY, model: () => process.env.MISTRAL_VISION_MODEL || 'mistral-small-latest', call: openAi('https://api.mistral.ai/v1/chat/completions') },
-  { id: 'openrouter', label: 'OpenRouter', keyName: 'OPENROUTER_API_KEY', key: () => process.env.OPENROUTER_API_KEY, model: () => process.env.OPENROUTER_VISION_MODEL || 'openrouter/free', call: openAi('https://openrouter.ai/api/v1/chat/completions', false) },
+  // json mode: the free router then picks only models that can answer in JSON
+  { id: 'openrouter', label: 'OpenRouter', keyName: 'OPENROUTER_API_KEY', key: () => process.env.OPENROUTER_API_KEY, model: () => process.env.OPENROUTER_VISION_MODEL || 'openrouter/free', call: openAi('https://openrouter.ai/api/v1/chat/completions') },
   { id: 'github', label: 'GitHub Models', keyName: 'GITHUB_MODELS_TOKEN', key: () => process.env.GITHUB_MODELS_TOKEN, model: () => process.env.GITHUB_VISION_MODEL || 'openai/gpt-4o-mini', call: openAi('https://models.github.ai/inference/chat/completions') },
   { id: 'gemini-lite', label: 'Gemini Flash-Lite', keyName: 'GEMINI_API_KEY', key: () => process.env.GEMINI_API_KEY, model: () => 'gemini-flash-lite-latest', call: gemini },
 ];
 // Groq changes its vision models often: the first one that exists for this key is kept
-const GROQ_MODELS = ['meta-llama/llama-4-scout-17b-16e-instruct', 'meta-llama/llama-4-maverick-17b-128e-instruct', 'qwen/qwen3.6-27b'];
+const GROQ_MODELS = ['qwen/qwen3.8-27b', 'meta-models/muse-spark-open', 'qwen/qwen3.6-27b', 'meta-llama/llama-4-scout-17b-16e-instruct', 'meta-llama/llama-4-maverick-17b-128e-instruct'];
+/** The models this Groq key lists (for the admin when none of ours fits). */
+export let groqIds: string[] = [];
 let groqModel = GROQ_MODELS[0];
 async function pickGroqModel(key: string): Promise<boolean> {
   try {
     const r = await fetch('https://api.groq.com/openai/v1/models', { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(15_000) });
     const ids = ((await r.json()) as { data?: { id: string }[] }).data?.map((x) => x.id) || [];
-    const next = GROQ_MODELS.find((m) => ids.includes(m) && m !== groqModel) || ids.find((m) => /scout|maverick|vision|vl\b|qwen.*(vl|omni)/i.test(m) && m !== groqModel);
+    groqIds = ids;
+    const next = GROQ_MODELS.find((m) => ids.includes(m) && m !== groqModel) || ids.find((m) => /scout|maverick|vision|vl\b|muse|qwen3\.\d+-\d+b|omni/i.test(m) && m !== groqModel);
     if (next) { groqModel = next; return true; }
   } catch { /* keep */ }
   return false;
@@ -166,6 +170,7 @@ async function ask(p: Provider, prompt: string, imgs: Img[]): Promise<{ tip?: Ai
     if (res.status === 401 || res.status === 403) { s.restUntil = Date.now() + 6 * 3_600_000; return { why: s.lastError }; }
     if (res.status === 402) { s.restUntil = nextPacificMidnight(); return { why: `${s.lastError} — потрібна платна підписка` }; } // not free on this account
     if (res.status === 404 && p.id === 'groq' && !process.env.GROQ_VISION_MODEL && attempt === 0 && await pickGroqModel(key)) continue; // a retired model: the next one
+    if (res.status === 404) { s.restUntil = Date.now() + 3 * 3_600_000; return { why: `${s.lastError} — модель недоступна` }; }
     if (![500, 502, 503, 504].includes(res.status)) return { why: s.lastError };
   }
   s.restUntil = Date.now() + 5 * 60_000; // overloaded twice: let it rest
@@ -229,7 +234,7 @@ export function readersInfo() {
   return PROVIDERS.map((p) => {
     const s = st(p.id), today = p.id === 'gemini' || p.id === 'gemini-lite' ? by[p.model()] || 0 : by[p.id] || 0;
     return { id: p.id, label: p.label, model: p.model(), hasKey: !!p.key(), keyName: p.keyName, today, ok: s.ok, failed: s.failed,
-      restUntil: s.restUntil > Date.now() ? new Date(s.restUntil).toISOString() : null, lastError: s.lastError };
+      restUntil: s.restUntil > Date.now() ? new Date(s.restUntil).toISOString() : null, lastError: s.lastError, ...(p.id === 'groq' && groqIds.length ? { available: groqIds } : {}) };
   });
 }
 
