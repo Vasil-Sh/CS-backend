@@ -7,7 +7,7 @@
 import { pool } from '../db/client';
 
 const MODEL = () => process.env.GEMINI_MODEL || 'gemini-flash-latest'; // Flash reads slips better than Flash-Lite; Lite is the fallback
-export const aiEnabled = () => ['GEMINI_API_KEY', 'GROQ_API_KEY', 'MISTRAL_API_KEY', 'OPENROUTER_API_KEY', 'GITHUB_MODELS_TOKEN'].some((k) => !!process.env[k]);
+export const aiEnabled = () => ['GEMINI_API_KEY', 'OPENROUTER_API_KEY', 'GITHUB_MODELS_TOKEN'].some((k) => !!process.env[k]);
 export const aiStats = { calls: 0, failed: 0, lastError: null as string | null, lastAt: null as string | null, model: '' };
 
 // ── the free tier's daily quota (Google resets it at midnight Pacific): requests per model today, kept across restarts ──
@@ -91,7 +91,7 @@ const SCHEMA = {
 };
 
 /** The post read by the model, or null (no key, quota, network) — then OCR + rules take over. */
-// ── the readers, in order: Gemini Flash → Groq → Mistral → OpenRouter → GitHub Models → Gemini Flash-Lite (each on its own key) ──
+// ── the readers, in order: Gemini Flash → OpenRouter → GitHub Models → Gemini Flash-Lite (each on its own key) ──
 type Img = { mime: string; b64: string };
 interface Provider { id: string; label: string; key: () => string | undefined; keyName: string; model: () => string; call: (prompt: string, imgs: Img[], model: string, key: string) => Promise<Response> }
 const openAi = (url: string, json = true) => (prompt: string, imgs: Img[], model: string, key: string) => fetch(url, {
@@ -106,29 +106,11 @@ const gemini = (prompt: string, imgs: Img[], model: string, key: string) => fetc
 });
 export const PROVIDERS: Provider[] = [
   { id: 'gemini', label: 'Gemini Flash', keyName: 'GEMINI_API_KEY', key: () => process.env.GEMINI_API_KEY, model: () => MODEL(), call: gemini },
-  { id: 'groq', label: 'Groq', keyName: 'GROQ_API_KEY', key: () => process.env.GROQ_API_KEY, model: () => process.env.GROQ_VISION_MODEL || groqModel, call: openAi('https://api.groq.com/openai/v1/chat/completions') },
-  { id: 'mistral', label: 'Mistral', keyName: 'MISTRAL_API_KEY', key: () => process.env.MISTRAL_API_KEY, model: () => process.env.MISTRAL_VISION_MODEL || 'mistral-small-latest', call: openAi('https://api.mistral.ai/v1/chat/completions') },
   // json mode: the free router then picks only models that can answer in JSON
   { id: 'openrouter', label: 'OpenRouter', keyName: 'OPENROUTER_API_KEY', key: () => process.env.OPENROUTER_API_KEY, model: () => process.env.OPENROUTER_VISION_MODEL || 'openrouter/free', call: openAi('https://openrouter.ai/api/v1/chat/completions') },
   { id: 'github', label: 'GitHub Models', keyName: 'GITHUB_MODELS_TOKEN', key: () => process.env.GITHUB_MODELS_TOKEN, model: () => process.env.GITHUB_VISION_MODEL || 'openai/gpt-4o-mini', call: openAi('https://models.github.ai/inference/chat/completions') },
   { id: 'gemini-lite', label: 'Gemini Flash-Lite', keyName: 'GEMINI_API_KEY', key: () => process.env.GEMINI_API_KEY, model: () => 'gemini-flash-lite-latest', call: gemini },
 ];
-// Groq changes its vision models often: the first one that exists for this key is kept
-const GROQ_MODELS = ['qwen/qwen3.8-27b', 'meta-models/muse-spark-open', 'qwen/qwen3.6-27b', 'meta-llama/llama-4-scout-17b-16e-instruct', 'meta-llama/llama-4-maverick-17b-128e-instruct'];
-/** The models this Groq key lists (for the admin when none of ours fits). */
-export let groqIds: string[] = [];
-let groqModel = GROQ_MODELS[0];
-async function pickGroqModel(key: string): Promise<boolean> {
-  try {
-    const r = await fetch('https://api.groq.com/openai/v1/models', { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(15_000) });
-    const ids = ((await r.json()) as { data?: { id: string }[] }).data?.map((x) => x.id) || [];
-    groqIds = ids;
-    const next = GROQ_MODELS.find((m) => ids.includes(m) && m !== groqModel) || ids.find((m) => /scout|maverick|vision|vl\b|muse|qwen3\.\d+-\d+b|omni/i.test(m) && m !== groqModel);
-    if (next) { groqModel = next; return true; }
-  } catch { /* keep */ }
-  return false;
-}
-
 /** Per reader: today's requests, its last error, and until when it rests (a daily quota → the next Pacific day, a minute limit / overload → a few minutes). */
 export const readerState: Record<string, { ok: number; failed: number; lastError: string | null; restUntil: number }> = {};
 const st = (id: string) => (readerState[id] ||= { ok: 0, failed: 0, lastError: null, restUntil: 0 });
@@ -169,7 +151,6 @@ async function ask(p: Provider, prompt: string, imgs: Img[]): Promise<{ tip?: Ai
     if (res.status === 429) { s.restUntil = /day|daily|per.?day|quota/i.test(msg) ? nextPacificMidnight() : Date.now() + 10 * 60_000; return { why: s.lastError }; }
     if (res.status === 401 || res.status === 403) { s.restUntil = Date.now() + 6 * 3_600_000; return { why: s.lastError }; }
     if (res.status === 402) { s.restUntil = nextPacificMidnight(); return { why: `${s.lastError} — потрібна платна підписка` }; } // not free on this account
-    if (res.status === 404 && p.id === 'groq' && !process.env.GROQ_VISION_MODEL && attempt === 0 && await pickGroqModel(key)) continue; // a retired model: the next one
     if (res.status === 404) { s.restUntil = Date.now() + 3 * 3_600_000; return { why: `${s.lastError} — модель недоступна` }; }
     if (![500, 502, 503, 504].includes(res.status)) return { why: s.lastError };
   }
@@ -234,7 +215,7 @@ export function readersInfo() {
   return PROVIDERS.map((p) => {
     const s = st(p.id), today = p.id === 'gemini' || p.id === 'gemini-lite' ? by[p.model()] || 0 : by[p.id] || 0;
     return { id: p.id, label: p.label, model: p.model(), hasKey: !!p.key(), keyName: p.keyName, today, ok: s.ok, failed: s.failed,
-      restUntil: s.restUntil > Date.now() ? new Date(s.restUntil).toISOString() : null, lastError: s.lastError, ...(p.id === 'groq' && groqIds.length ? { available: groqIds } : {}) };
+      restUntil: s.restUntil > Date.now() ? new Date(s.restUntil).toISOString() : null, lastError: s.lastError };
   });
 }
 

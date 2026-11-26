@@ -256,8 +256,8 @@ async function verifyOne(r: { handle: string; post_id: number; match_id: string 
     const mismatch = (r.result === 'Win' || r.result === 'Loss') && r.result !== ours;
     await pool.query(
       `UPDATE tg_posts SET our_result = $3::text, score = COALESCE($4::text, score), mismatch = $5::boolean,
-          result = CASE WHEN result IS NULL AND fixed_by IS NULL THEN $3::text ELSE result END,
-          settled_by = CASE WHEN result IS NULL THEN 'ours' ELSE COALESCE(settled_by, 'slip') END,
+          result = CASE WHEN result IS NULL AND (fixed_by IS NULL OR settled_by IS NULL) THEN $3::text ELSE result END,
+          settled_by = CASE WHEN settled_by = 'admin' THEN settled_by WHEN result IS NULL THEN 'ours' ELSE COALESCE(settled_by, 'slip') END,
           match_id = CASE WHEN match_id LIKE 'tg:%' AND $6::text IS NOT NULL THEN $6::text ELSE match_id END
         WHERE handle = $1 AND post_id = $2`,
       [r.handle, r.post_id, ours, score, mismatch, realId]);

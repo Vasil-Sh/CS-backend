@@ -162,11 +162,13 @@ tg.get('/admin/tg-posts/matches', requireAuth, requireAdmin, async (c) => {
 tg.post('/admin/tg-posts/:handle/:postId', requireAuth, requireAdmin, async (c) => {
   const actor = c.get('user');
   const handle = c.req.param('handle') || '', postId = Number(c.req.param('postId'));
-  const b = await c.req.json().catch(() => null) as { kind?: string; matchId?: string; market?: string; side?: 1 | 2; line?: number; over?: boolean; map?: number; odds?: number | null; remember?: boolean } | null;
+  const b = await c.req.json().catch(() => null) as { kind?: string; reason?: string | null; matchId?: string; market?: string; side?: 1 | 2; line?: number; over?: boolean; map?: number; odds?: number | null; remember?: boolean; result?: string | null } | null;
   if (!b || !postId) return c.json({ error: 'Invalid body' }, 400);
   if (b.kind === 'other') {
-    await pool.query(`UPDATE tg_posts SET kind = 'other', reason = NULL, fixed_by = $3 WHERE handle = $1 AND post_id = $2`, [handle, postId, actor.username]);
-    audit(actor, 'POST', `/admin/tg-posts/${handle}/${postId}`, { kind: 'other' });
+    // the admin's status for a post that is not a tip: info, a repeat, a poll, a results summary
+    const reason = ['Повтор', 'Опитування', 'Підсумок', 'Результат'].includes(String(b.reason)) ? String(b.reason) : null;
+    await pool.query(`UPDATE tg_posts SET kind = 'other', reason = $4, result = NULL, our_result = NULL, mismatch = false, settled_by = NULL, fixed_by = $3 WHERE handle = $1 AND post_id = $2`, [handle, postId, actor.username, reason]);
+    audit(actor, 'POST', `/admin/tg-posts/${handle}/${postId}`, { kind: 'other', reason });
     return c.json({ ok: true });
   }
   // a match of our feed, or the one read from the post itself (not in the feed: «tg:…»)
@@ -184,8 +186,12 @@ tg.post('/admin/tg-posts/:handle/:postId', requireAuth, requireAdmin, async (c) 
   const pick = mk === 'Total' ? '' : b.side === 2 ? m.team2 : m.team1;
   const odds = b.odds != null && Number(b.odds) > 1 ? Number(b.odds) : null;
   await pool.query(
-    `UPDATE tg_posts SET kind = 'bet', reason = NULL, game = $3, match_id = $4, team1 = $5, team2 = $6, market = $7, pick = $8, odds = $9, result = CASE slip WHEN 'won' THEN 'Win' WHEN 'lost' THEN 'Loss' ELSE NULL END, score = NULL, our_result = NULL, mismatch = false, settled_by = NULL, fixed_by = $10 WHERE handle = $1 AND post_id = $2`,
-    [handle, postId, m.game, m.id, m.team1, m.team2, market, pick, odds, actor.username]);
+    `UPDATE tg_posts SET kind = 'bet', reason = NULL, game = $3, match_id = $4, team1 = $5, team2 = $6, market = $7, pick = $8, odds = $9,
+        result = CASE WHEN $11::text = 'auto' THEN CASE slip WHEN 'won' THEN 'Win' WHEN 'lost' THEN 'Loss' ELSE NULL END ELSE $12::text END,
+        settled_by = CASE WHEN $11::text = 'auto' THEN NULL WHEN $12::text IS NULL THEN NULL ELSE 'admin' END,
+        score = NULL, our_result = NULL, mismatch = false, fixed_by = $10 WHERE handle = $1 AND post_id = $2`,
+    // result: 'auto' (from the slip, then our check), 'pending' (open — our check closes it), or the admin's Win / Loss / Void
+    [handle, postId, m.game, m.id, m.team1, m.team2, market, pick, odds, actor.username, ['Win', 'Loss', 'Void', 'pending'].includes(String(b.result)) ? 'set' : 'auto', ['Win', 'Loss', 'Void'].includes(String(b.result)) ? String(b.result) : null]);
   if (b.remember && mk === 'Match Winner') await pool.query(`UPDATE tg_channels SET rules = rules || jsonb_build_object('oddsOnly', $2::text) WHERE handle = $1`, [handle, b.side === 2 ? 'p2' : 'p1']);
   void settleTgTips().catch(() => {});
   audit(actor, 'POST', `/admin/tg-posts/${handle}/${postId}`, { kind: 'bet', match: `${m.team1} — ${m.team2}`, market, pick, odds, remember: !!b.remember });
