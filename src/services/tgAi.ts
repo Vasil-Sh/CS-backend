@@ -106,12 +106,25 @@ const gemini = (prompt: string, imgs: Img[], model: string, key: string) => fetc
 });
 export const PROVIDERS: Provider[] = [
   { id: 'gemini', label: 'Gemini Flash', keyName: 'GEMINI_API_KEY', key: () => process.env.GEMINI_API_KEY, model: () => MODEL(), call: gemini },
-  { id: 'groq', label: 'Groq', keyName: 'GROQ_API_KEY', key: () => process.env.GROQ_API_KEY, model: () => process.env.GROQ_VISION_MODEL || 'qwen/qwen3.6-27b', call: openAi('https://api.groq.com/openai/v1/chat/completions') },
+  { id: 'groq', label: 'Groq', keyName: 'GROQ_API_KEY', key: () => process.env.GROQ_API_KEY, model: () => process.env.GROQ_VISION_MODEL || groqModel, call: openAi('https://api.groq.com/openai/v1/chat/completions') },
   { id: 'mistral', label: 'Mistral', keyName: 'MISTRAL_API_KEY', key: () => process.env.MISTRAL_API_KEY, model: () => process.env.MISTRAL_VISION_MODEL || 'mistral-small-latest', call: openAi('https://api.mistral.ai/v1/chat/completions') },
   { id: 'openrouter', label: 'OpenRouter', keyName: 'OPENROUTER_API_KEY', key: () => process.env.OPENROUTER_API_KEY, model: () => process.env.OPENROUTER_VISION_MODEL || 'openrouter/free', call: openAi('https://openrouter.ai/api/v1/chat/completions', false) },
   { id: 'github', label: 'GitHub Models', keyName: 'GITHUB_MODELS_TOKEN', key: () => process.env.GITHUB_MODELS_TOKEN, model: () => process.env.GITHUB_VISION_MODEL || 'openai/gpt-4o-mini', call: openAi('https://models.github.ai/inference/chat/completions') },
   { id: 'gemini-lite', label: 'Gemini Flash-Lite', keyName: 'GEMINI_API_KEY', key: () => process.env.GEMINI_API_KEY, model: () => 'gemini-flash-lite-latest', call: gemini },
 ];
+// Groq changes its vision models often: the first one that exists for this key is kept
+const GROQ_MODELS = ['meta-llama/llama-4-scout-17b-16e-instruct', 'meta-llama/llama-4-maverick-17b-128e-instruct', 'qwen/qwen3.6-27b'];
+let groqModel = GROQ_MODELS[0];
+async function pickGroqModel(key: string): Promise<boolean> {
+  try {
+    const r = await fetch('https://api.groq.com/openai/v1/models', { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(15_000) });
+    const ids = ((await r.json()) as { data?: { id: string }[] }).data?.map((x) => x.id) || [];
+    const next = GROQ_MODELS.find((m) => ids.includes(m) && m !== groqModel) || ids.find((m) => /scout|maverick|vision|vl\b|qwen.*(vl|omni)/i.test(m) && m !== groqModel);
+    if (next) { groqModel = next; return true; }
+  } catch { /* keep */ }
+  return false;
+}
+
 /** Per reader: today's requests, its last error, and until when it rests (a daily quota → the next Pacific day, a minute limit / overload → a few minutes). */
 export const readerState: Record<string, { ok: number; failed: number; lastError: string | null; restUntil: number }> = {};
 const st = (id: string) => (readerState[id] ||= { ok: 0, failed: 0, lastError: null, restUntil: 0 });
@@ -134,7 +147,7 @@ async function ask(p: Provider, prompt: string, imgs: Img[]): Promise<{ tip?: Ai
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt) await new Promise((ok) => setTimeout(ok, 5_000));
     let res: Response;
-    try { res = await p.call(prompt, imgs, model, key); } catch (e) {
+    try { res = await p.call(prompt, imgs, p.model(), key); } catch (e) {
       s.failed++; s.lastError = (e as Error).name === 'TimeoutError' ? 'не відповів за 90 с' : (e as Error).message.slice(0, 120); return { why: s.lastError };
     }
     aiStats.calls++; aiStats.lastAt = new Date().toISOString(); count(p.id === 'gemini' || p.id === 'gemini-lite' ? model : p.id);
@@ -151,6 +164,8 @@ async function ask(p: Provider, prompt: string, imgs: Img[]): Promise<{ tip?: Ai
     s.failed++; s.lastError = `${res.status}: ${msg.replace(/\s+/g, ' ').slice(0, 140)}`;
     if (res.status === 429) { s.restUntil = /day|daily|per.?day|quota/i.test(msg) ? nextPacificMidnight() : Date.now() + 10 * 60_000; return { why: s.lastError }; }
     if (res.status === 401 || res.status === 403) { s.restUntil = Date.now() + 6 * 3_600_000; return { why: s.lastError }; }
+    if (res.status === 402) { s.restUntil = nextPacificMidnight(); return { why: `${s.lastError} — потрібна платна підписка` }; } // not free on this account
+    if (res.status === 404 && p.id === 'groq' && !process.env.GROQ_VISION_MODEL && attempt === 0 && await pickGroqModel(key)) continue; // a retired model: the next one
     if (![500, 502, 503, 504].includes(res.status)) return { why: s.lastError };
   }
   s.restUntil = Date.now() + 5 * 60_000; // overloaded twice: let it rest
