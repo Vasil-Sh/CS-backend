@@ -92,7 +92,7 @@ async function readPost(ctx: Ctx, post: PagePost): Promise<Read> {
   let hash: string | null = null, ai: AiRead | null = ctx.pre.get(post.id) ?? null, readBy: Read['readBy'] = 'ai';
   let ocrText: string | null = null;
   const ocrAll = async () => { if (ocrText == null) { const parts: string[] = []; for (const url of post.photos.slice(0, 2)) { const t = await ocrImage(url); if (t) parts.push(t); } ocrText = parts.join('\n\n'); } return ocrText; };
-  const ocrSlip = (t: string): Slip | null => { const s0 = slipFromOcr(t); return s0 ? { status: s0.status, stake: s0.stake, currency: s0.currency, payout: s0.status === 'pending' ? null : s0.payout, odds: s0.odds } : null; };
+  const ocrSlip = (t: string): Slip | null => { const s0 = slipFromOcr(t); return s0 ? { status: s0.status, stake: s0.stake, currency: s0.currency, payout: s0.payout, odds: s0.odds } : null; };
   if (!ai) {
     const { imgs, hash: h } = post.photos.length ? await loadImages(post.photos) : { imgs: [], hash: null };
     hash = h;
@@ -189,7 +189,7 @@ export async function moneyFromOcr(): Promise<number> {
   for (const r of rows) {
     const s0 = slipFromOcr(r.ocr);
     if (!s0 || !s0.currency) continue;
-    await applySlip(r.handle, r.post_id, { status: s0.status, stake: s0.stake, currency: s0.currency, payout: s0.status === 'pending' ? null : s0.payout, odds: s0.odds }, true);
+    await applySlip(r.handle, r.post_id, { status: s0.status, stake: s0.stake, currency: s0.currency, payout: s0.payout, odds: s0.odds }, true);
     n++;
   }
   // a slip with both numbers saved: its payout ÷ stake is the odds
