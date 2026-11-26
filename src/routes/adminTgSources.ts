@@ -52,9 +52,12 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
          FROM tg_posts GROUP BY handle`),
     pool.query<{ handle: string; n: string }>(`SELECT handle, count(*) AS n FROM tg_posts WHERE photos IS NULL GROUP BY handle`),
     // real money from the slips (the slip's currency): won → paid − staked, lost → −staked
-    pool.query<{ handle: string; currency: string; profit: string; staked: string; n: string }>(
+    pool.query<{ handle: string; currency: string; profit: string; staked: string; n: string; won: string | null; lost: string | null; wins: string; losses: string; open: string | null; open_n: string }>(
       `SELECT handle, currency, sum(CASE WHEN result = 'Win' THEN COALESCE(payout - stake, stake * (odds - 1)) WHEN result = 'Loss' THEN -stake ELSE 0 END) AS profit,
-              sum(stake) FILTER (WHERE result IN ('Win', 'Loss')) AS staked, count(*) FILTER (WHERE result IN ('Win', 'Loss')) AS n
+              sum(stake) FILTER (WHERE result IN ('Win', 'Loss')) AS staked, count(*) FILTER (WHERE result IN ('Win', 'Loss')) AS n,
+              sum(COALESCE(payout - stake, stake * (odds - 1))) FILTER (WHERE result = 'Win') AS won, sum(stake) FILTER (WHERE result = 'Loss') AS lost,
+              count(*) FILTER (WHERE result = 'Win') AS wins, count(*) FILTER (WHERE result = 'Loss') AS losses,
+              sum(stake) FILTER (WHERE result IS NULL) AS open, count(*) FILTER (WHERE result IS NULL) AS open_n
          FROM tg_posts WHERE kind = 'bet' AND stake IS NOT NULL AND currency IS NOT NULL GROUP BY handle, currency`),
     // 7 days by kind, for the day sheet
     pool.query<{ handle: string; day: string; kind: string; reason: string | null; n: string }>(
@@ -63,8 +66,9 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
   ]);
   const agg = new Map(all.rows.map((r) => [r.handle, r]));
   const rereading = new Map(again.rows.map((r) => [r.handle, Number(r.n)]));
-  const moneyOf = (h: string) => money.rows.filter((r) => r.handle === h && Number(r.n) > 0)
-    .map((r) => ({ currency: r.currency, profit: Math.round(Number(r.profit) * 100) / 100, staked: Math.round(Number(r.staked || 0) * 100) / 100, bets: Number(r.n) }))
+  const r2 = (x: string | null) => Math.round(Number(x || 0) * 100) / 100;
+  const moneyOf = (h: string) => money.rows.filter((r) => r.handle === h && (Number(r.n) > 0 || Number(r.open_n) > 0))
+    .map((r) => ({ currency: r.currency, profit: r2(r.profit), staked: r2(r.staked), bets: Number(r.n), won: r2(r.won), lost: r2(r.lost), wins: Number(r.wins), losses: Number(r.losses), open: r2(r.open), openBets: Number(r.open_n) }))
     .sort((a, b) => Math.abs(b.profit) - Math.abs(a.profit));
   const dayOf = (h: string, d: string) => {
     const rs = byDay.rows.filter((r) => r.handle === h && r.day === d), cnt = (f: (r: typeof rs[number]) => boolean) => rs.filter(f).reduce((x, r) => x + Number(r.n), 0);
