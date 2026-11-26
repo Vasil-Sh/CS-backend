@@ -10,11 +10,11 @@ import { cleanHandle, validHandle } from './telegramAvatar';
 import { parseTgPage, parseTgPost, type TgCandidate, type TgParsed, type TgRules } from './tgPostParser';
 import { teamKey } from './matchFeed';
 import { isNight } from './nightMode';
-import { closeOcr, ocrImage } from './tgOcr';
+import { closeOcr, ocrImage, slipFromOcr } from './tgOcr';
 import { feedMatches, placedLive, sameName, verifyTips, type FeedMatch, type Leg } from './tgVerify';
 import { recordServerError } from './serverErrors';
 import { abbreviations } from '../utils/teamAbbrev';
-import { aiLine, aiReadBatch, aiReadPost, currencyCode, loadImages, type AiRead, type AiTip } from './tgAi';
+import { aiLine, aiReadBatch, aiReadPost, currencyCode, loadImages, readerReady, type AiRead, type AiTip } from './tgAi';
 import { channelExamples, countTemplate, fullTip, loadReaderAccuracy, sameTip, surelyNotTip, templateTrusted, type Template } from './tgLearn';
 import { normalizeTeam } from '../utils/matchUtils';
 import { accountEnabled, fetchPrivatePage, inviteHash, inviteInfo, privateHandle, privateId } from './tgAccount';
@@ -110,7 +110,10 @@ async function readPost(ctx: Ctx, post: PagePost): Promise<Read> {
   const parts: string[] = [];
   for (const url of post.photos.slice(0, 2)) { const t = await ocrImage(url); if (t) parts.push(t); }
   const ocr = parts.join('\n\n');
-  return { ocr, full: [post.text, ocr].filter(Boolean).join('\n'), readBy: 'ocr', hash };
+  // no reader answered: the slip's money as OCR read it (the AI reads it again when a reader is back)
+  const s0 = slipFromOcr(ocr);
+  const slip: Slip | null = s0 ? { status: s0.status, stake: s0.stake, currency: s0.currency, payout: s0.status === 'pending' ? null : s0.payout } : null;
+  return { ocr, full: [post.text, ocr].filter(Boolean).join('\n'), readBy: 'ocr', hash, slip };
 }
 /** Requests not spent since the start: posts sorted by rules, by a channel's template, slips read before (shown in the admin). */
 export const saved = { rules: 0, template: 0, cache: 0, since: new Date().toISOString() };
@@ -159,12 +162,14 @@ async function repeatOf(handle: string, post: PagePost, p: TgParsed, slip?: Slip
 }
 
 /** A settled slip without a tip in it: the channel's tip (≤ 3 days before) on the same teams or at the same odds gets its result and money. */
-async function resultSlip(handle: string, post: PagePost, tip: AiTip, slip: Slip): Promise<TgParsed | null> {
+async function resultSlip(handle: string, post: PagePost, tip: AiTip, slip: Slip, text = ''): Promise<TgParsed | null> {
   const { rows } = await pool.query<{ post_id: number; team1: string | null; team2: string | null; pick: string | null; odds: string | null }>(
     `SELECT post_id, team1, team2, pick, odds FROM tg_posts WHERE handle = $1 AND post_id < $2 AND kind = 'bet' AND posted_at > $3::timestamptz - interval '3 days' ORDER BY post_id DESC LIMIT 20`,
     [handle, post.id, post.at]);
   const names = [tip.team1, tip.team2, tip.pick].filter((x): x is string => !!x);
+  const low = text.toLowerCase(), named = (n: string | null) => !!n && n.length >= 3 && low.includes(n.toLowerCase());
   const hit = rows.find((r) => names.some((n) => sameName(n, r.team1 || '') || sameName(n, r.team2 || '')))
+    ?? rows.find((r) => named(r.team1) && named(r.team2)) // OCR text of the slip: both teams of the tip in it
     ?? (tip.odds ? rows.find((r) => r.odds != null && Math.abs(Number(r.odds) - Number(tip.odds)) < 0.011) : undefined);
   if (!hit) return null;
   await applySlip(handle, hit.post_id, slip, true, true);
@@ -306,7 +311,7 @@ async function handlePost(ctx: Ctx, post: PagePost, backfill: boolean): Promise<
     parsed = { kind: 'unknown', reason: `Коефіцієнт ${parsed.odds} не схожий на справжній (у нас ${ourOdds})`, match: parsed.match, odds: parsed.odds };
   parsed = await repeatOf(handle, post, parsed, slip);
   // a settled slip the reader did not take for a tip («Выиграна · Ординар … 243 USDT»): the result and the money of the tip it belongs to
-  if (parsed.kind === 'other' && !parsed.reason && slip && slip.status !== 'pending' && tip) parsed = await resultSlip(handle, post, tip, slip) ?? parsed;
+  if (parsed.kind === 'other' && !parsed.reason && slip && slip.status !== 'pending') parsed = await resultSlip(handle, post, tip ?? { isTip: false }, slip, full) ?? parsed;
   await savePost(handle, post, ocr, parsed, backfill);
   const raw = tip ? Object.fromEntries(Object.entries(tip).filter(([k]) => !['by', 'byId', 'doubt'].includes(k))) : null;
   await pool.query('UPDATE tg_posts SET ai_raw = $3, ai_by = $4, read_by = $5, img_hash = COALESCE($6, img_hash), ai_wrong = false WHERE handle = $1 AND post_id = $2 AND fixed_by IS NULL',
@@ -430,6 +435,9 @@ export async function tgCycle(): Promise<void> {
     await syncUserChannels().catch(() => {});
     await pauseSilent().catch(() => 0);
     await loadReaderAccuracy();
+    // posts read by OCR while every reader rested (3 days back): read again by the AI now that one is back
+    if (readerReady()) await pool.query(`UPDATE tg_posts SET photos = NULL WHERE (handle, post_id) IN (SELECT handle, post_id FROM tg_posts
+        WHERE read_by = 'ocr' AND fixed_by IS NULL AND photos IS NOT NULL AND posted_at > now() - interval '3 days' ORDER BY posted_at DESC LIMIT 15)`).catch(() => {});
     const { rows } = await pool.query<{ handle: string }>(
       `SELECT c.handle FROM tg_channels c WHERE NOT c.paused AND NOT EXISTS (
          SELECT 1 FROM telegram_groups g WHERE g.moderation_status = 'rejected' AND lower(g.link) LIKE '%' || c.handle || '%') ORDER BY c.checked_at NULLS FIRST`);

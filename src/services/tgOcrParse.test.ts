@@ -64,3 +64,15 @@ describe('screenshots (OCR text)', () => {
     expect(parseTgPage(html).posts[0]).toMatchObject({ id: 9, poll: true, text: 'Хто виграє?' });
   });
 });
+
+import { slipFromOcr } from './tgOcr';
+describe('slip money from OCR', () => {
+  it('reads the stake across the spaces OCR puts into numbers', () => {
+    const t = '26 ноября 2026 г. в 16:06 4\nID 415437741 Фу\nОткрыта Ординар (1573)\nСумма ставки 1 55,00 USDT\nВозможный выигрыш\n2 43,35 USDT\nСобытие 1';
+    expect(slipFromOcr(t)).toEqual({ status: 'pending', stake: 155, currency: 'USDT', payout: 243.35 });
+  });
+  it('a won slip', () => {
+    expect(slipFromOcr('Выиграна • Ординар 1.57\nСумма ставки 155,00 USDT\nВыигрыш 243,35 USDT')).toMatchObject({ status: 'won', stake: 155, payout: 243.35 });
+  });
+  it('no stake — no slip', () => { expect(slipFromOcr('NAVI — Spirit 1.85')).toBe(null); });
+});

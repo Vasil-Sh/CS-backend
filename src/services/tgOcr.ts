@@ -95,3 +95,20 @@ export async function closeOcr(): Promise<void> {
 export function cleanOcr(s: string): string {
   return s.split('\n').map((l) => l.replace(/\s+/g, ' ').trim()).filter((l) => /[\p{L}\d]{2}/u.test(l)).join('\n').slice(0, 3000);
 }
+
+/** The money on a bookmaker's slip from OCR text: «Сумма ставки 1 55,00 USDT», «Возможный выигрыш 2 43,35», «Открыта / Выиграна / Проиграна».
+ *  OCR splits digits with spaces, so a number is read across them; the payout must be above the stake. */
+export function slipFromOcr(text: string): { status: 'won' | 'lost' | 'pending' | 'void' | 'cashout'; stake: number; currency: string | null; payout: number | null } | null {
+  const t = (text || '').replace(/\u00a0/g, ' ');
+  const num = (label: RegExp) => {
+    const m = new RegExp(`${label.source}[^\\d]{0,24}((?:\\d[\\d ]{0,9})[.,]\\d{2})\\s*(USDT|USD|RUB|UAH|EUR|KZT|[₽$€₴₸]|руб|грн)?`, 'i').exec(t);
+    return m ? { n: Number(m[1].replace(/ /g, '').replace(',', '.')), cur: m[2] || null } : null;
+  };
+  const stake = num(/(?:сумм?а ставки|ставка|stake|bet amount)/);
+  if (!stake || !(stake.n > 0)) return null;
+  const pay = num(/(?:возможный выигрыш|потенциальный выигрыш|можливий виграш|выигрыш|виграш|выплата|виплата|payout|to win|win)/);
+  const status = /выигран|виграно|выигрыш зачислен|\bwon\b/i.test(t) ? 'won' : /проигран|програно|\blost\b/i.test(t) ? 'lost' : /возврат|повернен|\bvoid\b/i.test(t) ? 'void' : /продан|cash ?out/i.test(t) ? 'cashout' : 'pending';
+  const cur = (stake.cur || pay?.cur || (/USDT/i.test(t) ? 'USDT' : null));
+  const c = !cur ? null : /USDT/i.test(cur) ? 'USDT' : /USD|\$/.test(cur) ? 'USD' : /RUB|₽|руб/i.test(cur) ? 'RUB' : /UAH|₴|грн/i.test(cur) ? 'UAH' : /EUR|€/.test(cur) ? 'EUR' : /KZT|₸/.test(cur) ? 'KZT' : null;
+  return { status, stake: stake.n, currency: c, payout: pay && pay.n > stake.n ? pay.n : null };
+}

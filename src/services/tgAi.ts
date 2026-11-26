@@ -287,6 +287,9 @@ export async function askOne(id: string, caption: string, imgs: Img[]): Promise<
   return { tip: r.tip, why: r.why };
 }
 
+/** Some reader with a key is not resting now (a post read by OCR can be read again by the AI). */
+export const readerReady = () => PROVIDERS.some((p) => p.key() && st(p.id).restUntil <= Date.now());
+
 /** Every reader for the admin: key present, today's requests, resting until, last error. */
 export function readersInfo() {
   const by = aiQuota().byModel;
