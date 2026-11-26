@@ -36,26 +36,8 @@ export function sameTeam(x: string, y: string, resolve: Resolve = teamKey): bool
 /** One team of two sources' same-time match: the same name, or one short for the other («NAVI Junior» / «Natus Vincere Junior»). Only for duplicates, never for odds. */
 const sameOrShort = (x: string, y: string, resolve: Resolve) => sameTeam(x, y, resolve) || shortFor(x, y) || shortFor(y, x);
 
-const tokens = (v: string) => v.toLowerCase().replace(/\b(e-?sports?|club|clan|team|gaming)\b/g, ' ').split(/[^a-z0-9а-яіїєґё]+/).filter(Boolean);
-/** «NAVI Junior» is short for «Natus Vincere Junior», «NIP» for «Ninjas in Pyjamas»: every short word is the first letters
- *  of the next long words in order (na+vi), all long words used. One short word of ≥3 letters at least; no guessing beyond that. */
-export function shortFor(short: string, long: string): boolean {
-  const s = tokens(short), l = tokens(long);
-  if (!s.length || l.length <= s.length || !s.some((w) => w.length >= 3)) return false;
-  const go = (i: number, j: number): boolean => {
-    if (i === s.length) return j === l.length;
-    const w = s[i];
-    // w = prefixes of l[j..k] glued together
-    const fit = (pos: number, k: number): boolean => {
-      if (pos === w.length) return go(i + 1, k);
-      if (k >= l.length) return false;
-      for (let n = Math.min(l[k].length, w.length - pos); n >= 1; n--) if (l[k].startsWith(w.slice(pos, pos + n)) && fit(pos + n, k + 1)) return true;
-      return false;
-    };
-    return w === l[j] ? go(i + 1, j + 1) : fit(0, j);
-  };
-  return go(0, 0);
-}
+export { shortFor } from '../utils/teamAbbrev';
+import { shortFor } from '../utils/teamAbbrev';
 
 /** Team aliases from the admin («Це одна команда», «Зв’язати» on OddsPapi): alias → canonical, per game. Re-read every minute. */
 let aliasCache: { at: number; map: Record<string, Map<string, string>> } | null = null;

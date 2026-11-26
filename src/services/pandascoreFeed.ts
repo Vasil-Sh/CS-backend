@@ -6,6 +6,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import type { TipsGgMatch } from './matchTypes';
+import { recordMaps } from './tgVerify';
 import { pool } from '../db/client';
 import { pauseInfo, recordFailure, recordSuccess } from './circuitBreaker';
 import { isNight } from './nightMode';
@@ -38,6 +39,22 @@ export interface PsMatch {
   tournament?: { name?: string | null; tier?: string | null } | null;
   league?: { name?: string | null; image_url?: string | null } | null;
   serie?: { full_name?: string | null; name?: string | null } | null;
+  /** The maps: who won each (PandaScore puts them in every match). */
+  games?: { position?: number | null; status?: string | null; winner?: { id?: number | null } | null }[] | null;
+}
+
+/** Map winners of a match as 1 / 2 (team order of `opponents`), only maps already won, in their order. */
+export function psMapWinners(m: PsMatch): (1 | 2)[] {
+  const a = m.opponents?.[0]?.opponent?.id, b = m.opponents?.[1]?.opponent?.id;
+  if (!a || !b || !m.games?.length) return [];
+  const out: (1 | 2)[] = [];
+  for (const g of [...m.games].sort((x, y) => (x.position ?? 0) - (y.position ?? 0))) {
+    const w = g.winner?.id;
+    if (g.status !== 'finished' || !w) break;
+    out.push(w === a ? 1 : w === b ? 2 : 1);
+    if (w !== a && w !== b) { out.pop(); break; }
+  }
+  return out;
 }
 
 interface CacheShape { at: number; failedAt: number; calls: { hour: number; n: number }; recent?: number[]; lists: Record<Game, Record<List, PsMatch[]>> }
@@ -117,6 +134,11 @@ export async function refreshPandaScore(force = false): Promise<void> {
     if (failed && !ok) cache.failedAt = now;
     if (ok && now - learnedAt > H) { learnedAt = now; void learnAliases().catch((e) => console.warn('[pandascore] aliases failed:', (e as Error).message)); }
     save();
+    // who won each map — the Telegram tips on one map are checked by it
+    for (const game of ['cs2', 'dota2'] as Game[]) for (const list of ['running', 'past'] as List[]) for (const m of cache.lists[game][list]) {
+      const w = psMapWinners(m), t1 = m.opponents?.[0]?.opponent?.name, t2 = m.opponents?.[1]?.opponent?.name, at = m.begin_at || m.scheduled_at;
+      if (w.length && t1 && t2 && at) void recordMaps(game, new Date(at).toISOString().slice(0, 10), t1, t2, w, 'pandascore');
+    }
     if (ok) {
       const n = (g: Game) => cache.lists[g].upcoming.length + cache.lists[g].running.length;
       recordSuccess(PANDASCORE_PARSER, `CS2 ${n('cs2')} · Dota 2 ${n('dota2')} матчів попереду й наживо${failed ? ` · ${failed} із 6 запитів не вдалися` : ''}`);

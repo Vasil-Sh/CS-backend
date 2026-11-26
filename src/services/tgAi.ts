@@ -4,9 +4,35 @@
  * The answer is written back as a plain tip line («A vs B / Перемога X @1.72») and goes through the same parser,
  * so matching to our feed, synthetic matches and settlement stay in one place.
  */
+import { pool } from '../db/client';
+
 const MODEL = () => process.env.GEMINI_MODEL || 'gemini-flash-latest'; // Flash reads slips better than Flash-Lite; Lite is the fallback
 export const aiEnabled = () => !!process.env.GEMINI_API_KEY;
 export const aiStats = { calls: 0, failed: 0, lastError: null as string | null, lastAt: null as string | null, model: '' };
+
+// ── the free tier's daily quota (Google resets it at midnight Pacific): requests per model today, kept across restarts ──
+const DAILY = () => Math.max(10, Number(process.env.GEMINI_DAILY_LIMIT) || 250); // the main model's requests a day (see AI Studio → Rate limits)
+const pacificDay = () => new Date(Date.now() - 8 * 3_600_000).toISOString().slice(0, 10);
+export const aiUsage: { day: string; byModel: Record<string, number> } = { day: '', byModel: {} };
+let usageLoaded = false;
+async function loadUsage(): Promise<void> {
+  if (usageLoaded) return;
+  usageLoaded = true;
+  try {
+    const r = (await pool.query<{ value: string }>(`SELECT value FROM app_settings WHERE key = 'tg_ai_usage'`)).rows[0];
+    if (r) Object.assign(aiUsage, JSON.parse(r.value));
+  } catch { /* first run */ }
+}
+function count(model: string): void {
+  if (aiUsage.day !== pacificDay()) { aiUsage.day = pacificDay(); aiUsage.byModel = {}; }
+  aiUsage.byModel[model] = (aiUsage.byModel[model] || 0) + 1;
+  void pool.query(`INSERT INTO app_settings(key, value) VALUES('tg_ai_usage', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, [JSON.stringify(aiUsage)]).catch(() => {});
+}
+/** Requests left today for the main model; near the end of it the reader moves to Flash-Lite (its own, larger quota). */
+export function aiQuota(): { used: number; limit: number; day: string; byModel: Record<string, number> } {
+  const day = pacificDay(), by = aiUsage.day === day ? aiUsage.byModel : {};
+  return { used: by[MODEL()] || 0, limit: DAILY(), day, byModel: by };
+}
 let nextAt = 0; // free tier: ~10–15 requests a minute — one call per 6 s
 
 export interface AiTip {
@@ -15,6 +41,8 @@ export interface AiTip {
   map?: number | null; pick?: string | null; line?: number | null; over?: boolean | null; odds?: number | null;
   /** What the slip itself shows: its state and the money on it (in the slip's currency). */
   status?: 'won' | 'lost' | 'pending' | 'void' | 'cashout' | null; stake?: number | null; currency?: string | null; payout?: number | null;
+  /** An express: its legs (each a single bet), odds = the total odds. */
+  legs?: AiTip[] | null;
 }
 
 const PROMPT = `You read posts of a Telegram channel about esports betting (CS2, Dota 2). A post has a caption and maybe a screenshot of a bet slip or of an app.
@@ -25,7 +53,7 @@ For a tip, read: game, the two teams exactly as written, the market, the side pi
 "pick" is the team name only (no numbers, no brackets). For a handicap give the signed line of the picked team (+1.5 or -1.5).
 From the slip also read: status — read the words on the slip and its button/badge first: won (Виграш, Виграно, Выигрыш, Выиграна, Won, «Профіт +…» shown as gained, a green ticket whose button says the bet won), lost (Програш, Проигрыш, Lost, red), pending (Очікується, Ожидается, Открыта, Pending, "possible win" only), cashout (sold / Продано / cash out), void (returned / refund); null when there is no slip;
 stake — the amount staked, currency — its code or sign as written (₴, UAH, ₽, RUB, $, USD, USDT, €), payout — the total paid or to be paid (stake × odds), all as plain numbers.
-Markets: match_winner (the series winner), map_winner (winner of map N — set "map"), total_maps (over/under N.5 maps — set "line" and "over"), handicap (map handicap — set "pick" and "line" like -1.5), express (several matches in one bet), other.
+Markets: match_winner (the series winner), map_winner (winner of map N — set "map"), total_maps (over/under N.5 maps — set "line" and "over"), handicap (map handicap — set "pick" and "line" like -1.5), express (several matches in one bet — then list every match in "legs" with its own market, pick and odds, and give the total odds in "odds"), other.
 Football, basketball and other non-esports bets: isTip=false. Answer JSON only.`;
 
 const SCHEMA = {
@@ -38,6 +66,11 @@ const SCHEMA = {
     over: { type: 'BOOLEAN', nullable: true }, odds: { type: 'NUMBER', nullable: true },
     status: { type: 'STRING', nullable: true, enum: ['won', 'lost', 'pending', 'void', 'cashout'] },
     stake: { type: 'NUMBER', nullable: true }, currency: { type: 'STRING', nullable: true }, payout: { type: 'NUMBER', nullable: true },
+    legs: { type: 'ARRAY', nullable: true, items: { type: 'OBJECT', properties: {
+      team1: { type: 'STRING', nullable: true }, team2: { type: 'STRING', nullable: true },
+      market: { type: 'STRING', nullable: true, enum: ['match_winner', 'map_winner', 'total_maps', 'handicap', 'other'] },
+      map: { type: 'INTEGER', nullable: true }, pick: { type: 'STRING', nullable: true }, line: { type: 'NUMBER', nullable: true }, over: { type: 'BOOLEAN', nullable: true }, odds: { type: 'NUMBER', nullable: true },
+    } } },
   },
   required: ['isTip'],
 };
@@ -59,7 +92,10 @@ export async function aiReadPost(caption: string, photos: string[]): Promise<AiT
       parts.push({ inline_data: { mime_type: r.headers.get('content-type') || 'image/jpeg', data: buf.toString('base64') } });
     }
     // «high demand» (503) / quota (429) are usually short: wait and retry, then the other Flash model
-    const models = [...new Set([MODEL(), 'gemini-flash-latest', 'gemini-flash-lite-latest'])];
+    await loadUsage();
+    const q = aiQuota();
+    let models = [...new Set([MODEL(), 'gemini-flash-latest', 'gemini-flash-lite-latest'])];
+    if (q.used >= q.limit * 0.9) models = models.filter((m) => m !== MODEL()).concat(MODEL()); // the main model's quota is nearly spent
     let body = null as Resp | null, lastErr = '';
     for (const model of models) {
       for (let attempt = 0; attempt < 3 && !body; attempt++) {
@@ -77,7 +113,7 @@ export async function aiReadPost(caption: string, photos: string[]): Promise<AiT
           aiStats.calls++; lastErr = `Gemini ${model}: ${(e as Error).name === 'TimeoutError' ? 'не відповів за 90 с' : (e as Error).message.slice(0, 120)}`;
           break;
         }
-        aiStats.calls++; aiStats.lastAt = new Date().toISOString(); aiStats.model = model;
+        aiStats.calls++; aiStats.lastAt = new Date().toISOString(); aiStats.model = model; count(model);
         if (res.ok) { body = await res.json() as Resp; break; }
         const raw = await res.text();
         let msg = raw;

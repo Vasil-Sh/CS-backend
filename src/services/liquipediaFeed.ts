@@ -15,6 +15,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import * as cheerio from 'cheerio';
+import { recordMaps, winnersFromScores } from './tgVerify';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordFailure, recordSuccess, isOpen } from './circuitBreaker';
@@ -637,7 +638,11 @@ async function refreshMaps(game: 'cs2' | 'dota2'): Promise<void> {
     });
     const maps = html ? parseMaps(html) : [];
     if (html && !maps.length) console.warn(`[liquipedia] ${m.matchPage}: no map scores parsed — ${describeHtml(html)}`);
-    if (maps.length) { m.maps = maps; got++; }
+    if (maps.length) {
+      m.maps = maps; got++;
+      const w = winnersFromScores(maps, m.status === 'finished');
+      if (w.length) void recordMaps(game, (m.startDate || m.date || '').slice(0, 10), m.nameTeam1, m.nameTeam2, w, 'liquipedia');
+    }
   }
   if (got) persist(game, data, mem[game]?.at);
 }

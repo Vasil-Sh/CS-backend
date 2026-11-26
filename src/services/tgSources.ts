@@ -8,10 +8,11 @@ import { join } from 'path';
 import { pool } from '../db/client';
 import { cleanHandle, validHandle } from './telegramAvatar';
 import { parseTgPage, parseTgPost, type TgCandidate, type TgParsed, type TgRules } from './tgPostParser';
-import { resultFor } from './betHints';
 import { teamKey } from './matchFeed';
 import { isNight } from './nightMode';
 import { closeOcr, ocrImage } from './tgOcr';
+import { feedMatches, placedLive, verifyTips, type Leg } from './tgVerify';
+import { abbreviations } from '../utils/teamAbbrev';
 import { aiLine, aiReadPost, currencyCode, type AiTip } from './tgAi';
 import { normalizeTeam } from '../utils/matchUtils';
 
@@ -38,7 +39,7 @@ export async function tgCandidates(since?: string): Promise<TgCandidate[]> {
   const al = await pool.query<{ game: string; canonical: string; alias: string }>('SELECT game, canonical, alias FROM team_aliases').catch(() => ({ rows: [] as { game: string; canonical: string; alias: string }[] }));
   const byKey = new Map<string, string[]>();
   for (const r of al.rows) { const k = `${r.game}:${teamKey(r.canonical)}`; (byKey.get(k) || byKey.set(k, []).get(k)!).push(r.alias); }
-  const aliases = (g: string, n: string) => byKey.get(`${g}:${teamKey(n)}`) || [];
+  const aliases = (g: string, n: string) => [...(byKey.get(`${g}:${teamKey(n)}`) || []), ...abbreviations(n)]; // + «NAVI» for «Natus Vincere»
   const out = new Map<string, TgCandidate>();
   for (const game of ['cs2', 'dota2'] as const) {
     const f = join(process.cwd(), '.cache', `${game}_matches.json`);
@@ -70,14 +71,15 @@ type PagePost = { id: number; at: string; text: string; photos: string[] };
 export interface Slip { status: NonNullable<AiTip['status']>; stake: number | null; currency: string | null; payout: number | null }
 const STATUS_UA: Record<string, string> = { won: 'виграш', lost: 'програш', pending: 'очікується', cashout: 'продано', void: 'повернення' };
 
-async function readPost(post: PagePost): Promise<{ ocr: string; full: string; ai?: boolean; slip?: Slip | null }> {
+async function readPost(post: PagePost): Promise<{ ocr: string; full: string; ai?: boolean; slip?: Slip | null; tip?: AiTip }> {
   // the model first (when GEMINI_API_KEY is set): it tells a tip from news and reads the slip; its answer becomes a plain tip line
   const ai = await aiReadPost(post.text, post.photos);
   if (ai) {
     const line = aiLine(ai);
     const slip: Slip | null = ai.isTip && ai.status ? { status: ai.status, stake: ai.stake && ai.stake > 0 ? ai.stake : null, currency: currencyCode(ai.currency), payout: ai.payout && ai.payout > 0 ? ai.payout : null } : null;
     const money = slip ? ` · квиток: ${STATUS_UA[slip.status]}${slip.stake ? `, ставка ${slip.stake}${slip.currency ? ` ${slip.currency}` : ''}` : ''}${slip.payout ? `, виплата ${slip.payout}` : ''}` : '';
-    return { ocr: `ШІ: ${line ? line.replace(/\n/g, ' · ') : 'не прогноз'}${money}`, full: line, ai: true, slip };
+    const legsTxt = ai.market === 'express' && ai.legs?.length ? ` · ${ai.legs.map((l) => `${l.team1} — ${l.team2}: ${l.pick || ''}${l.odds ? ` @${l.odds}` : ''}`).join('; ')}` : '';
+    return { ocr: `ШІ: ${line ? line.replace(/\n/g, ' · ') : 'не прогноз'}${legsTxt}${money}`, full: line, ai: true, slip, tip: ai };
   }
   const parts: string[] = [];
   for (const url of post.photos.slice(0, 2)) { const t = await ocrImage(url); if (t) parts.push(t); }
@@ -151,6 +153,16 @@ async function savePost(handle: string, post: PagePost, ocr: string, p: TgParsed
   );
 }
 
+/** Posts the channel changed since we read them (text differs) are read again; posts gone from the page between its first and last → «видалено». */
+async function markEditedAndDeleted(handle: string, posts: PagePost[], lastId: number): Promise<void> {
+  if (!posts.length) return;
+  const ids = posts.map((p) => p.id), lo = Math.min(...ids), hi = Math.min(Math.max(...ids), lastId);
+  const saved = (await pool.query<{ post_id: number; text: string }>('SELECT post_id, text FROM tg_posts WHERE handle = $1 AND post_id = ANY($2::int[]) AND photos IS NOT NULL AND fixed_by IS NULL', [handle, ids])).rows;
+  const changed = saved.filter((r) => { const p = posts.find((x) => x.id === r.post_id); return p && r.text && norm(p.text) !== norm(r.text); }).map((r) => r.post_id);
+  if (changed.length) await pool.query('UPDATE tg_posts SET photos = NULL, edited_at = now() WHERE handle = $1 AND post_id = ANY($2::int[])', [handle, changed]);
+  if (hi > lo) await pool.query('UPDATE tg_posts SET deleted_at = now() WHERE handle = $1 AND post_id BETWEEN $2 AND $3 AND NOT (post_id = ANY($4::int[])) AND deleted_at IS NULL', [handle, lo, hi, ids]);
+}
+
 /** Read one channel now: new posts → parsed → saved. Returns how many posts were new. */
 const busy = new Set<string>();
 /** A running «Перечитати» / first read of a new channel: posts to read and read so far (progress in the admin). */
@@ -197,6 +209,7 @@ async function collectChannel1(handle: string, cands?: TgCandidate[]): Promise<n
   }
   if (!page.isPublic) { await pool.query(`UPDATE tg_channels SET checked_at = now(), error = 'Канал не знайдено або він приватний' WHERE handle = $1`, [handle]); return 0; }
   const fresh = page.posts.filter((p) => p.id > ch.last_post_id && (p.text || p.photos.length));
+  await markEditedAndDeleted(handle, page.posts, ch.last_post_id);
   // posts saved by an older reader (photos IS NULL): read again — own text (not a reply's quote), screenshots
   const older = page.posts.filter((p) => p.id <= ch.last_post_id);
   const unread = older.length ? new Set((await pool.query<{ post_id: number }>('SELECT post_id FROM tg_posts WHERE handle = $1 AND photos IS NULL AND post_id = ANY($2::int[])', [handle, older.map((p) => p.id)])).rows.map((r) => r.post_id)) : new Set<number>();
@@ -209,12 +222,28 @@ async function collectChannel1(handle: string, cands?: TgCandidate[]): Promise<n
   try {
   const oldest = todo.reduce((a, p) => (a && a < p.at ? a : p.at), '');
   const list = cands && !unread.size ? cands : await tgCandidates(oldest || undefined);
+  const feed = feedMatches();
   for (const post of todo) {
-    const { ocr, full, ai, slip } = await readPost(post);
+    const { ocr, full, ai, slip, tip } = await readPost(post);
     let parsed = ai && !full ? { kind: 'other' as const } : parseTgPost(full, post.at, list, ch.rules || {});
+    // an express: every leg is read like a single, the bet is won when all legs are
+    let legs: Leg[] | null = null;
+    if (tip?.isTip && tip.market === 'express' && tip.legs?.length) {
+      legs = tip.legs.map((l) => {
+        const p1 = parseTgPost(aiLine({ ...l, isTip: true, game: tip.game }), post.at, list, ch.rules || {});
+        const m = 'match' in p1 ? p1.match : undefined;
+        return { team1: m?.team1 || l.team1 || '', team2: m?.team2 || l.team2 || '', market: p1.kind === 'bet' ? p1.market : 'Match Winner', pick: p1.kind === 'bet' ? p1.pick : l.pick || null, odds: l.odds ?? null, matchId: m?.id ?? null };
+      }).filter((l) => l.team1 && l.team2);
+      if (legs.length >= 2) parsed = { kind: 'bet', match: { id: `tg:express:${handle}:${post.id}`, game: tip.game === 'dota2' ? 'dota2' : 'cs2', team1: 'Експрес', team2: `${legs.length} ${legs.length < 5 ? 'події' : 'подій'}`, start: post.at }, market: 'Express', pick: '', odds: tip.odds ?? null };
+      else legs = null;
+    }
     if (!gameOk(ch.game, parsed)) parsed = { kind: 'other' };
     parsed = await repeatOf(handle, post, parsed, slip);
     await savePost(handle, post, ocr, parsed, post.id <= ch.last_post_id);
+    if (parsed.kind === 'bet') {
+      await pool.query('UPDATE tg_posts SET legs = $3, is_live = $4, our_result = NULL, mismatch = false, settled_by = NULL WHERE handle = $1 AND post_id = $2 AND fixed_by IS NULL',
+        [handle, post.id, legs ? JSON.stringify(legs) : null, placedLive(parsed.match.id, post.at, feed)]);
+    }
     if (slip && parsed.kind === 'bet') await applySlip(handle, post.id, slip);
     // «Результат»: the post shows its own slip (won / lost), the tip and its money stay counted once — on the first post
     else if (slip && parsed.kind === 'other' && parsed.reason === 'Результат') await pool.query('UPDATE tg_posts SET slip = $3, stake = $4, currency = $5, payout = $6 WHERE handle = $1 AND post_id = $2', [handle, post.id, slip.status, slip.stake, slip.currency, slip.payout]);
@@ -243,38 +272,9 @@ export async function syncUserChannels(): Promise<void> {
 }
 
 /** Pending tips whose match has a series score in the history → Win / Loss. */
+/** Results of the tips: our own check (series, maps, express legs) — see tgVerify. */
 export async function settleTgTips(): Promise<number> {
-  const { rows } = await pool.query<{ handle: string; post_id: number; match_id: string; market: string; pick: string | null; team1: string; team2: string; game: string; posted_at: string;
-    s1: number | null; s2: number | null; h1: string; h2: string; hdate: string }>(
-    `SELECT p.handle, p.post_id, p.match_id, p.market, p.pick, p.team1, p.team2, p.game, p.posted_at, h.score1 AS s1, h.score2 AS s2, h.team1 AS h1, h.team2 AS h2, to_char(h.date, 'YYYY-MM-DD') AS hdate
-     FROM tg_posts p JOIN matches_history h ON h.match_id = p.match_id
-     WHERE p.kind = 'bet' AND p.result IS NULL AND h.status = 'finished'`);
-  let n = 0;
-  for (const r of rows) {
-    const res = resultFor({ id: '', team1: r.team1, team2: r.team2, selection: r.pick, betType: r.market, game: r.game, date: r.hdate }, { team1: r.h1, team2: r.h2, score1: r.s1, score2: r.s2, date: r.hdate, game: r.game });
-    if (!res) continue;
-    await pool.query('UPDATE tg_posts SET result = $3, score = $4 WHERE handle = $1 AND post_id = $2', [r.handle, r.post_id, res, `${r.s1}:${r.s2}`]);
-    n++;
-  }
-  // tips on matches we did not have (teams taken from the post): the finished match of these two teams within days of the post
-  const loose = await pool.query<{ handle: string; post_id: number; market: string; pick: string | null; team1: string; team2: string; game: string; day: string }>(
-    `SELECT handle, post_id, market, pick, team1, team2, game, to_char(posted_at AT TIME ZONE 'Europe/Kyiv', 'YYYY-MM-DD') AS day FROM tg_posts
-      WHERE kind = 'bet' AND result IS NULL AND match_id LIKE 'tg:%' AND posted_at > now() - interval '120 days' LIMIT 200`);
-  for (const r of loose.rows) {
-    const k1 = normalizeTeam(r.team1), k2 = normalizeTeam(r.team2);
-    if (!k1 || !k2) continue;
-    const same = (a: string, b: string) => { const x = normalizeTeam(a); return !!x && (x === b || (b.length >= 4 && x.includes(b)) || (x.length >= 4 && b.includes(x))); };
-    const hs = await pool.query<{ team1: string; team2: string; score1: number | null; score2: number | null; date: string }>(
-      `SELECT team1, team2, score1, score2, to_char(date, 'YYYY-MM-DD') AS date FROM matches_history WHERE status = 'finished' AND date BETWEEN $1::date - 1 AND $1::date + 3 ORDER BY date`, [r.day]);
-    const h = hs.rows.find((x) => (same(x.team1, k1) && same(x.team2, k2)) || (same(x.team1, k2) && same(x.team2, k1)));
-    if (!h || !(h.score1 || h.score2)) continue;
-    const res = resultFor({ id: '', team1: r.team1, team2: r.team2, selection: r.pick, betType: r.market, game: r.game, date: h.date }, { team1: h.team1, team2: h.team2, score1: h.score1, score2: h.score2, date: h.date, game: r.game });
-    if (!res) continue;
-    const flip = same(h.team1, k2);
-    await pool.query('UPDATE tg_posts SET result = $3, score = $4 WHERE handle = $1 AND post_id = $2', [r.handle, r.post_id, res, flip ? `${h.score2}:${h.score1}` : `${h.score1}:${h.score2}`]);
-    n++;
-  }
-  return n;
+  return verifyTips();
 }
 
 let running = false;

@@ -4,7 +4,8 @@ import { pool } from '../db/client';
 import { collectChannel, fetchChannelPage, rereadChannel, firstRead, progress, previewChannel, publicHandle, settleTgTips, tgCandidates, tgCycle, tgNextAt } from '../services/tgSources';
 import { isNight } from '../services/nightMode';
 import { ocrStats } from '../services/tgOcr';
-import { aiEnabled, aiStats } from '../services/tgAi';
+import { aiEnabled, aiQuota, aiStats } from '../services/tgAi';
+import { feedMatches } from '../services/tgVerify';
 
 /** «Telegram-джерела» in the admin: channels we read, their posts, the queue of posts we did not understand. */
 const tg = new Hono();
@@ -25,13 +26,22 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
     pool.query<{ name: string; link: string; status: string; username: string | null }>(
       `SELECT g.name, g.link, g.moderation_status AS status, u.username FROM telegram_groups g LEFT JOIN users u ON u.id = g.user_id WHERE g.link <> ''`),
     // all time: what the channel posted and how its tips went (a tip = 100 on the odds; repeats are not counted)
-    pool.query<{ handle: string; total: string; tips: string; unknown: string; other: string; repeats: string; won: string; lost: string; pending: string; profit: string | null; priced: string; first_at: string | null }>(
+    pool.query<{ handle: string; total: string; tips: string; unknown: string; other: string; repeats: string; won: string; lost: string; pending: string; profit: string | null; priced: string; first_at: string | null;
+      o_won: string; o_lost: string; o_profit: string | null; o_priced: string; confirmed: string; mismatches: string; ours_only: string; live: string; live_won: string; live_lost: string; deleted: string; edited: string }>(
       `SELECT handle, count(*) AS total, count(*) FILTER (WHERE kind = 'bet') AS tips, count(*) FILTER (WHERE kind = 'unknown') AS unknown,
               count(*) FILTER (WHERE kind = 'other' AND reason IS DISTINCT FROM 'Повтор') AS other, count(*) FILTER (WHERE reason = 'Повтор') AS repeats,
               count(*) FILTER (WHERE kind = 'bet' AND result = 'Win') AS won, count(*) FILTER (WHERE kind = 'bet' AND result = 'Loss') AS lost,
               count(*) FILTER (WHERE kind = 'bet' AND result IS NULL) AS pending,
               sum(CASE WHEN kind = 'bet' AND result = 'Win' AND odds IS NOT NULL THEN (odds - 1) * 100 WHEN kind = 'bet' AND result = 'Loss' AND odds IS NOT NULL THEN -100 END) AS profit,
-              count(*) FILTER (WHERE kind = 'bet' AND result IS NOT NULL AND odds IS NOT NULL) AS priced, min(posted_at) AS first_at
+              count(*) FILTER (WHERE kind = 'bet' AND result IS NOT NULL AND odds IS NOT NULL) AS priced, min(posted_at) AS first_at,
+              -- our own check: results by our scores, the channel's claims we confirmed / disproved
+              count(*) FILTER (WHERE kind = 'bet' AND our_result = 'Win') AS o_won, count(*) FILTER (WHERE kind = 'bet' AND our_result = 'Loss') AS o_lost,
+              sum(CASE WHEN kind = 'bet' AND our_result = 'Win' AND odds IS NOT NULL THEN (odds - 1) * 100 WHEN kind = 'bet' AND our_result = 'Loss' AND odds IS NOT NULL THEN -100 END) AS o_profit,
+              count(*) FILTER (WHERE kind = 'bet' AND our_result IS NOT NULL AND odds IS NOT NULL) AS o_priced,
+              count(*) FILTER (WHERE kind = 'bet' AND settled_by = 'slip' AND our_result IS NOT NULL AND NOT mismatch) AS confirmed,
+              count(*) FILTER (WHERE kind = 'bet' AND mismatch) AS mismatches, count(*) FILTER (WHERE kind = 'bet' AND settled_by = 'ours') AS ours_only,
+              count(*) FILTER (WHERE kind = 'bet' AND is_live) AS live, count(*) FILTER (WHERE kind = 'bet' AND is_live AND result = 'Win') AS live_won, count(*) FILTER (WHERE kind = 'bet' AND is_live AND result = 'Loss') AS live_lost,
+              count(*) FILTER (WHERE deleted_at IS NOT NULL) AS deleted, count(*) FILTER (WHERE edited_at IS NOT NULL) AS edited
          FROM tg_posts GROUP BY handle`),
     pool.query<{ handle: string; n: string }>(`SELECT handle, count(*) AS n FROM tg_posts WHERE photos IS NULL GROUP BY handle`),
     // real money from the slips (the slip's currency): won → paid − staked, lost → −staked
@@ -81,7 +91,11 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
       users, rereading: rereading.get(ch.handle) || 0, money: moneyOf(ch.handle), daysDetail: days.map((d) => dayOf(ch.handle, d)), progress: progress.get(ch.handle) || null,
       all: { posts: n(a?.total), tips: tipsAll, unknown: unkAll, other: n(a?.other), repeats: n(a?.repeats), won: wonAll, lost: lostAll, pending: n(a?.pending),
         recognized: tipsAll + unkAll ? Math.round((tipsAll / (tipsAll + unkAll)) * 100) : null, winrate: wonAll + lostAll ? Math.round((wonAll / (wonAll + lostAll)) * 100) : null,
-        profit: pricedAll ? profitAll : null, roi: pricedAll ? Math.round(profitAll / pricedAll) : null, firstAt: a?.first_at ?? null },
+        profit: pricedAll ? profitAll : null, roi: pricedAll ? Math.round(profitAll / pricedAll) : null, firstAt: a?.first_at ?? null,
+        // our check: ROI by our scores, how honest the channel's results are (confirmed / (confirmed + disproved))
+        ours: { won: n(a?.o_won), lost: n(a?.o_lost), roi: n(a?.o_priced) ? Math.round(n(a?.o_profit) / n(a?.o_priced)) : null, onlyOurs: n(a?.ours_only) },
+        confirmed: n(a?.confirmed), mismatches: n(a?.mismatches), honesty: n(a?.confirmed) + n(a?.mismatches) ? Math.round((n(a?.confirmed) / (n(a?.confirmed) + n(a?.mismatches))) * 100) : null,
+        live: n(a?.live), liveWon: n(a?.live_won), liveLost: n(a?.live_lost), deleted: n(a?.deleted), edited: n(a?.edited) },
       days: days.map((d) => wk.filter((p) => kyivDay(Date.parse(p.posted_at)) === d).length),
     };
   });
@@ -94,35 +108,43 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
     totals: { channels: channels.length, running: channels.filter((x) => x.status === 'run').length, posts24h: p24.length, tips24h: p24.filter((p) => p.kind === 'bet').length,
       recognized: tips7 + unk7 ? Math.round((tips7 / (tips7 + unk7)) * 100) : null, unknown7d: unk7, queue: all.rows.reduce((x, r) => x + Number(r.unknown || 0), 0), settled30d: settled.length,
       winrate30d: settled.length ? Math.round((settled.filter((p) => p.result === 'Win').length / settled.length) * 100) : null, pending: posts.rows.filter((p) => p.kind === 'bet' && !p.result).length },
-    reader: { ai: aiEnabled(), model: aiStats.model || null, aiCalls: aiStats.calls, aiFailed: aiStats.failed, aiError: aiStats.lastError,
+    alerts: { unknown: all.rows.reduce((x, r) => x + Number(r.unknown || 0), 0), mismatches: all.rows.reduce((x, r) => x + Number(r.mismatches || 0), 0) },
+    reader: { ai: aiEnabled(), model: aiStats.model || null, quota: aiQuota(), aiCalls: aiStats.calls, aiFailed: aiStats.failed, aiError: aiStats.lastError,
       ocrImages: ocrStats.images, ocrFailed: ocrStats.failed, ocrAvgMs: ocrStats.images ? Math.round(ocrStats.ms / ocrStats.images) : null, ocrError: ocrStats.lastError },
     night: isNight(), nextAt: tgNextAt.at ? new Date(tgNextAt.at).toISOString() : null,
   });
 });
 
-const postCols = `handle, post_id AS "postId", posted_at AS "postedAt", text, kind, reason, game, match_id AS "matchId", team1, team2, market, pick, odds::float AS odds, result, score, fixed_by AS "fixedBy", COALESCE(photos, '{}') AS photos, ocr, slip, stake::float AS stake, currency, payout::float AS payout`;
+const postCols = `handle, post_id AS "postId", posted_at AS "postedAt", text, kind, reason, game, match_id AS "matchId", team1, team2, market, pick, odds::float AS odds, result, score, fixed_by AS "fixedBy", COALESCE(photos, '{}') AS photos, ocr, slip, stake::float AS stake, currency, payout::float AS payout, our_result AS "ourResult", settled_by AS "settledBy", mismatch, is_live AS "isLive", deleted_at AS "deletedAt", edited_at AS "editedAt", legs`;
+/** A tip on a match of our feed that is on now / ahead: its live state and score. */
+function withLive<T extends { matchId?: string | null; kind?: string }>(rows: T[]): (T & { live?: { status: string; score1: number | null; score2: number | null; start: string } })[] {
+  const feed = feedMatches();
+  return rows.map((r) => { const m = r.kind === 'bet' && r.matchId ? feed.find((x) => x.id === r.matchId) : undefined; return m ? { ...r, live: { status: m.status, score1: m.score1, score2: m.score2, start: m.start } } : r; });
+}
 
 /** GET /api/admin/tg-sources/:handle/posts — the channel's newest posts with what we made of them. */
 tg.get('/admin/tg-sources/:handle/posts', requireAuth, requireAdmin, async (c) => {
   const { rows } = await pool.query(`SELECT ${postCols} FROM tg_posts WHERE handle = $1 ORDER BY posted_at DESC LIMIT 30`, [c.req.param('handle')]);
-  return c.json({ posts: rows });
+  return c.json({ posts: withLive(rows) });
 });
 
 /** GET /api/admin/tg-posts/unrecognized — posts that look like tips but were not understood (not sorted yet, newest 100). */
 tg.get('/admin/tg-posts/unrecognized', requireAuth, requireAdmin, async (c) => {
   const { rows } = await pool.query(
-    `SELECT ${postCols.replace(/(^|, )(?!COALESCE)(\w+)/g, '$1p.$2').replace('COALESCE(photos', 'COALESCE(p.photos')}, ch.title FROM tg_posts p LEFT JOIN tg_channels ch ON ch.handle = p.handle
-     WHERE p.kind = 'unknown' AND p.fixed_by IS NULL ORDER BY p.posted_at DESC LIMIT 100`);
+    `SELECT ${postCols.replace(/(^|, )(?!COALESCE)(\w+)/g, '$1p.$2').replace('COALESCE(photos', 'COALESCE(p.photos').replace(/(^|, )(our_result|settled_by|is_live|deleted_at|edited_at)/g, '$1p.$2')}, ch.title FROM tg_posts p LEFT JOIN tg_channels ch ON ch.handle = p.handle
+     WHERE (p.kind = 'unknown' AND p.fixed_by IS NULL) OR (p.kind = 'bet' AND p.mismatch) ORDER BY p.mismatch DESC, p.posted_at DESC LIMIT 100`);
   return c.json({ posts: rows });
 });
 
-/** GET /api/admin/tg-posts/matches?q= — matches a post can be tied to (feed + last 3 days). */
+/** GET /api/admin/tg-posts/matches?q= — matches a post can be tied to: today, tomorrow, live (feed) and the last 30 days. */
 tg.get('/admin/tg-posts/matches', requireAuth, requireAdmin, async (c) => {
   const q = (c.req.query('q') || '').trim().toLowerCase();
-  const all = await tgCandidates();
+  const since = new Date(Date.now() - 30 * 86_400_000).toISOString();
+  const all = await tgCandidates(since);
+  const feed = new Map(feedMatches().map((m) => [m.id, m]));
   const list = all.filter((m) => !q || `${m.team1} ${m.team2} ${(m.aliases1 || []).join(' ')} ${(m.aliases2 || []).join(' ')}`.toLowerCase().includes(q))
     .sort((a, b) => Math.abs(Date.parse(a.start) - Date.now()) - Math.abs(Date.parse(b.start) - Date.now())).slice(0, 20)
-    .map(({ id, game, team1, team2, start }) => ({ id, game, team1, team2, start }));
+    .map(({ id, game, team1, team2, start }) => ({ id, game, team1, team2, start, status: feed.get(id)?.status || (Date.parse(start) < Date.now() - 6 * 3_600_000 ? 'finished' : 'upcoming') }));
   return c.json({ matches: list });
 });
 
@@ -152,7 +174,7 @@ tg.post('/admin/tg-posts/:handle/:postId', requireAuth, requireAdmin, async (c) 
   const pick = mk === 'Total' ? '' : b.side === 2 ? m.team2 : m.team1;
   const odds = b.odds != null && Number(b.odds) > 1 ? Number(b.odds) : null;
   await pool.query(
-    `UPDATE tg_posts SET kind = 'bet', reason = NULL, game = $3, match_id = $4, team1 = $5, team2 = $6, market = $7, pick = $8, odds = $9, result = CASE slip WHEN 'won' THEN 'Win' WHEN 'lost' THEN 'Loss' ELSE NULL END, score = NULL, fixed_by = $10 WHERE handle = $1 AND post_id = $2`,
+    `UPDATE tg_posts SET kind = 'bet', reason = NULL, game = $3, match_id = $4, team1 = $5, team2 = $6, market = $7, pick = $8, odds = $9, result = CASE slip WHEN 'won' THEN 'Win' WHEN 'lost' THEN 'Loss' ELSE NULL END, score = NULL, our_result = NULL, mismatch = false, settled_by = NULL, fixed_by = $10 WHERE handle = $1 AND post_id = $2`,
     [handle, postId, m.game, m.id, m.team1, m.team2, market, pick, odds, actor.username]);
   if (b.remember && mk === 'Match Winner') await pool.query(`UPDATE tg_channels SET rules = rules || jsonb_build_object('oddsOnly', $2::text) WHERE handle = $1`, [handle, b.side === 2 ? 'p2' : 'p1']);
   void settleTgTips().catch(() => {});
