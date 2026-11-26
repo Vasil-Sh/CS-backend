@@ -103,6 +103,12 @@ async function findFinished(matchId: string | null, team1: string, team2: string
   }
   const rows = (await pool.query<Hist>(`SELECT match_id, team1, team2, score1, score2, to_char(date, 'YYYY-MM-DD') AS date FROM matches_history WHERE status = 'finished' AND date BETWEEN $1::date - 1 AND $1::date + 3 ORDER BY date`, [day])).rows;
   for (const r of rows) { const o = pairOf(team1, team2, r.team1, r.team2); if (o) return { h: r, flip: o === -1 }; }
+  // just finished: the feed knows the final score before the history has the match
+  for (const m of feedMatches()) {
+    if (m.status !== 'finished' || m.score1 == null || m.score2 == null) continue;
+    const o = m.id === matchId ? (pairOf(team1, team2, m.team1, m.team2) || 1) : pairOf(team1, team2, m.team1, m.team2);
+    if (o && Math.abs(Date.parse(m.start) - Date.parse(`${day}T12:00:00Z`)) < 4 * 86_400_000) return { h: { match_id: m.id, team1: m.team1, team2: m.team2, score1: m.score1, score2: m.score2, date: m.start.slice(0, 10) }, flip: o === -1 };
+  }
   return null;
 }
 
