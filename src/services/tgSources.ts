@@ -14,8 +14,10 @@ import { closeOcr, ocrImage } from './tgOcr';
 import { feedMatches, placedLive, sameName, verifyTips, type FeedMatch, type Leg } from './tgVerify';
 import { recordServerError } from './serverErrors';
 import { abbreviations } from '../utils/teamAbbrev';
-import { aiLine, aiReadPost, currencyCode, type AiTip } from './tgAi';
+import { aiLine, aiReadBatch, aiReadPost, currencyCode, loadImages, type AiRead, type AiTip } from './tgAi';
+import { channelExamples, countTemplate, fullTip, loadReaderAccuracy, sameTip, surelyNotTip, templateTrusted, type Template } from './tgLearn';
 import { normalizeTeam } from '../utils/matchUtils';
+import { accountEnabled, fetchPrivatePage, inviteHash, inviteInfo, privateHandle, privateId } from './tgAccount';
 
 export const TG_EVERY_MS = 10 * 60_000, TG_NIGHT_MS = 60 * 60_000;
 const GAP_MS = 1500;
@@ -30,6 +32,8 @@ export function publicHandle(link: string | null | undefined): string | null {
 
 /** The channel's page: its last ~20 posts, or the ~20 before post `before` (the archive). */
 export async function fetchChannelPage(handle: string, before?: number) {
+  const pid = privateId(handle);
+  if (pid) return fetchPrivatePage(pid, before); // a private channel: through our Telegram account
   const res = await fetch(`https://t.me/s/${handle}${before ? `?before=${before}` : ''}`, { headers: { 'user-agent': 'Mozilla/5.0 (compatible; MatchIQ/1.0)', 'accept-language': 'en' }, signal: AbortSignal.timeout(10_000), redirect: 'follow' });
   if (!res.ok) throw new Error(`t.me відповів ${res.status}`);
   return parseTgPage(await res.text());
@@ -73,21 +77,56 @@ type PagePost = { id: number; at: string; text: string; photos: string[]; poll?:
 export interface Slip { status: NonNullable<AiTip['status']>; stake: number | null; currency: string | null; payout: number | null }
 const STATUS_UA: Record<string, string> = { won: 'виграш', lost: 'програш', pending: 'очікується', cashout: 'продано', void: 'повернення' };
 
-async function readPost(post: PagePost, hint = ''): Promise<{ ocr: string; full: string; ai?: boolean; slip?: Slip | null; tip?: AiTip & { doubt?: string } }> {
-  // the model first (when GEMINI_API_KEY is set): it tells a tip from news and reads the slip; its answer becomes a plain tip line
-  const ai = await aiReadPost(post.text, post.photos, hint);
+type Read = { ocr: string; full: string; ai?: boolean; slip?: Slip | null; tip?: AiRead; readBy: 'ai' | 'rules' | 'template' | 'cache' | 'ocr'; hash?: string | null };
+/** What one post says, the cheapest way that is still right:
+ *  surely not a tip by plain rules → no request; a channel whose text template the parser knows → no request;
+ *  the same screenshot read before → its answer; else the reader (with the channel's corrected examples) — or OCR when no reader answers. */
+async function readPost(ctx: Ctx, post: PagePost): Promise<Read> {
+  const hint = profileHint(ctx.ch.profile);
+  if (!post.photos.length) {
+    const cap = parseTgPost(post.text, post.at, ctx.list, ctx.ch.rules || {});
+    if (surelyNotTip(post.text, cap)) { saved.rules++; return { ocr: 'Правила: не прогноз (без кф і слів про ставку)', full: '', ai: true, readBy: 'rules' }; }
+    if (templateTrusted(ctx.ch.template) && fullTip(cap)) { saved.template++; return { ocr: 'Шаблон каналу: прочитано без ШІ', full: post.text, readBy: 'template' }; }
+  }
+  let hash: string | null = null, ai: AiRead | null = ctx.pre.get(post.id) ?? null, readBy: Read['readBy'] = 'ai';
+  if (!ai) {
+    const { imgs, hash: h } = post.photos.length ? await loadImages(post.photos) : { imgs: [], hash: null };
+    hash = h;
+    if (hash) {
+      // the same slip posted again (here or in another channel): its answer, not a new request — unless the admin found it wrong
+      const hit = (await pool.query<{ ai_raw: AiTip }>(`SELECT ai_raw FROM tg_posts WHERE img_hash = $1 AND ai_raw IS NOT NULL AND NOT ai_wrong AND read_by = 'ai' ORDER BY posted_at DESC LIMIT 1`, [hash])).rows[0];
+      if (hit) { ai = { ...hit.ai_raw, by: 'вже читали цей скрін' }; readBy = 'cache'; saved.cache++; }
+    }
+    if (!ai) ai = await aiReadPost(post.text, post.photos, hint, { imgs, examples: ctx.examples });
+  }
   if (ai) {
     const line = aiLine(ai);
     const slip: Slip | null = ai.isTip && ai.status ? { status: ai.status, stake: ai.stake && ai.stake > 0 ? ai.stake : null, currency: currencyCode(ai.currency), payout: ai.payout && ai.payout > 0 ? ai.payout : null } : null;
     const money = slip ? ` · квиток: ${STATUS_UA[slip.status]}${slip.stake ? `, ставка ${slip.stake}${slip.currency ? ` ${slip.currency}` : ''}` : ''}${slip.payout ? `, виплата ${slip.payout}` : ''}` : '';
     const legsTxt = ai.market === 'express' && ai.legs?.length ? ` · ${ai.legs.map((l) => `${l.team1} — ${l.team2}: ${l.pick || ''}${l.odds ? ` @${l.odds}` : ''}`).join('; ')}` : '';
     const who = ai.by ? ` (${ai.by})` : '', doubt = ai.doubt ? ` · РОЗБІЖНІСТЬ: ${ai.doubt}` : '';
-    return { ocr: `ШІ${who}: ${line ? line.replace(/\n/g, ' · ') : 'не прогноз'}${legsTxt}${money}${doubt}`, full: line, ai: true, slip, tip: ai };
+    return { ocr: `ШІ${who}: ${line ? line.replace(/\n/g, ' · ') : 'не прогноз'}${legsTxt}${money}${doubt}`, full: line, ai: true, slip, tip: ai, readBy, hash };
   }
   const parts: string[] = [];
   for (const url of post.photos.slice(0, 2)) { const t = await ocrImage(url); if (t) parts.push(t); }
   const ocr = parts.join('\n\n');
-  return { ocr, full: [post.text, ocr].filter(Boolean).join('\n') };
+  return { ocr, full: [post.text, ocr].filter(Boolean).join('\n'), readBy: 'ocr', hash };
+}
+/** Requests not spent since the start: posts sorted by rules, by a channel's template, slips read before (shown in the admin). */
+export const saved = { rules: 0, template: 0, cache: 0, since: new Date().toISOString() };
+
+/** Text-only posts the reader has to read: up to 5 in one request (photos are read one by one). */
+async function prereadTexts(ctx: Ctx, posts: PagePost[]): Promise<void> {
+  const need = posts.filter((p) => !p.photos.length && !p.poll && p.text.trim()).filter((p) => {
+    const cap = parseTgPost(p.text, p.at, ctx.list, ctx.ch.rules || {});
+    return !surelyNotTip(p.text, cap) && !(templateTrusted(ctx.ch.template) && fullTip(cap));
+  });
+  for (let i = 0; i + 1 < need.length; i += 5) {
+    const chunk = need.slice(i, i + 5);
+    if (chunk.length < 2) break;
+    const got = await aiReadBatch(chunk.map((p) => p.text), profileHint(ctx.ch.profile), ctx.examples);
+    if (got) chunk.forEach((p, k) => ctx.pre.set(p.id, got[k]));
+  }
 }
 
 const norm = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
@@ -202,7 +241,7 @@ export async function collectChannel(handle: string, cands?: TgCandidate[]): Pro
   busy.add(handle);
   try { return await collectChannel1(handle, cands); } finally { busy.delete(handle); }
 }
-interface Ctx { handle: string; ch: { last_post_id: number; game: string; rules: TgRules; profile: Profile }; list: TgCandidate[]; feed: FeedMatch[] }
+interface Ctx { handle: string; ch: { last_post_id: number; game: string; rules: TgRules; profile: Profile; template: Template }; list: TgCandidate[]; feed: FeedMatch[]; examples: string; pre: Map<number, AiRead> }
 type Profile = { bookmakers?: Record<string, number>; markets?: Record<string, number> };
 
 /** What the channel usually posts, for the reader: «slips of BC.GAME; mostly map winners». */
@@ -216,8 +255,14 @@ function profileHint(p: Profile): string {
 async function handlePost(ctx: Ctx, post: PagePost, backfill: boolean): Promise<void> {
   const { handle, ch, list, feed } = ctx;
   if (post.poll && !post.photos.length) { await savePost(handle, post, '', { kind: 'other', reason: 'Опитування' }, backfill); return; }
-  const { ocr, full, ai, slip, tip } = await readPost(post, profileHint(ch.profile));
+  const rd = await readPost(ctx, post);
+  const { ocr, full, ai, slip, tip } = rd;
   let parsed: TgParsed = ai && !full ? { kind: 'other' } : parseTgPost(full, post.at, list, ch.rules || {});
+  // a text tip the reader read: did the parser alone read the caption the same? (a channel whose template it knows skips the reader later)
+  if (rd.readBy === 'ai' && !post.photos.length && tip) {
+    const cap = parseTgPost(post.text, post.at, list, ch.rules || {});
+    if (fullTip(cap) || parsed.kind === 'bet') await countTemplate(handle, fullTip(cap) && sameTip(cap, parsed));
+  }
   // a results summary («вчора 5/6»): kept as the channel's claim, compared with our results in the sheet
   if (tip?.report && (tip.report.won != null || tip.report.total != null) && !tip.isTip) parsed = { kind: 'other', reason: 'Підсумок' };
   // map totals / handicaps in rounds: the match from the parser, the market from the answer
@@ -241,13 +286,18 @@ async function handlePost(ctx: Ctx, post: PagePost, backfill: boolean): Promise<
   if (!gameOk(ch.game, parsed)) parsed = { kind: 'other' };
   // two readers read a slip with money on it differently: the admin decides
   if (tip?.doubt && (parsed.kind === 'bet' || tip.isTip)) parsed = { kind: 'unknown', reason: 'Моделі прочитали квиток по-різному', match: 'match' in parsed ? parsed.match : undefined, odds: 'odds' in parsed ? parsed.odds : undefined };
+  // our odds for the pick when the match is in the feed: a tip far above them (≥ 15 %) is marked; 2.5 times off is a misread — the admin looks
+  const pm = parsed.kind === 'bet' ? parsed.match.id : null, fm = pm ? feed.find((x) => x.id === pm) : undefined;
+  const ourOdds = fm && parsed.kind === 'bet' && parsed.market === 'Match Winner' && parsed.pick ? (sameName(parsed.pick, fm.team1) ? fm.coeff1 : sameName(parsed.pick, fm.team2) ? fm.coeff2 : null) : null;
+  if (parsed.kind === 'bet' && ourOdds && parsed.odds && (parsed.odds > ourOdds * 2.5 || parsed.odds * 2.5 < ourOdds))
+    parsed = { kind: 'unknown', reason: `Коефіцієнт ${parsed.odds} не схожий на справжній (у нас ${ourOdds})`, match: parsed.match, odds: parsed.odds };
   parsed = await repeatOf(handle, post, parsed, slip);
   await savePost(handle, post, ocr, parsed, backfill);
+  const raw = tip ? Object.fromEntries(Object.entries(tip).filter(([k]) => !['by', 'byId', 'doubt'].includes(k))) : null;
+  await pool.query('UPDATE tg_posts SET ai_raw = $3, ai_by = $4, read_by = $5, img_hash = COALESCE($6, img_hash), ai_wrong = false WHERE handle = $1 AND post_id = $2 AND fixed_by IS NULL',
+    [handle, post.id, raw ? JSON.stringify(raw) : null, rd.readBy === 'ai' ? tip?.byId ?? null : null, rd.readBy, rd.hash ?? null]);
   if (tip?.report && parsed.kind === 'other' && parsed.reason === 'Підсумок') await pool.query('UPDATE tg_posts SET claim = $3 WHERE handle = $1 AND post_id = $2', [handle, post.id, JSON.stringify(tip.report)]);
   if (parsed.kind === 'bet') {
-    // our odds for the pick when the match is in the feed: a tip far above them (≥ 15 %) is marked
-    const fm = feed.find((x) => x.id === parsed.match.id);
-    const ourOdds = fm && parsed.market === 'Match Winner' && parsed.pick ? (sameName(parsed.pick, fm.team1) ? fm.coeff1 : sameName(parsed.pick, fm.team2) ? fm.coeff2 : null) : null;
     const high = !!(ourOdds && parsed.odds && parsed.odds > ourOdds * 1.15);
     await pool.query('UPDATE tg_posts SET legs = $3, is_live = $4, our_odds = $5, odds_high = $6, our_result = NULL, mismatch = false, settled_by = NULL WHERE handle = $1 AND post_id = $2 AND fixed_by IS NULL',
       [handle, post.id, legs ? JSON.stringify(legs) : null, placedLive(parsed.match.id, post.at, feed), ourOdds ?? null, high]);
@@ -265,9 +315,9 @@ async function handlePost(ctx: Ctx, post: PagePost, backfill: boolean): Promise<
 }
 
 async function channelCtx(handle: string, cands: TgCandidate[] | undefined, since?: string): Promise<Ctx | null> {
-  const ch = (await pool.query<Ctx['ch']>('SELECT last_post_id, game, rules, profile FROM tg_channels WHERE handle = $1', [handle])).rows[0];
+  const ch = (await pool.query<Ctx['ch']>('SELECT last_post_id, game, rules, profile, template FROM tg_channels WHERE handle = $1', [handle])).rows[0];
   if (!ch) return null;
-  return { handle, ch, list: cands && !since ? cands : await tgCandidates(since), feed: feedMatches() };
+  return { handle, ch, list: cands && !since ? cands : await tgCandidates(since), feed: feedMatches(), examples: await channelExamples(handle), pre: new Map() };
 }
 
 /** A read of the channel page failed: counted; the 3rd failure in a row goes to «Помилки сервера». */
@@ -296,7 +346,7 @@ async function collectChannel1(handle: string, cands?: TgCandidate[]): Promise<n
   try {
     const oldest = todo.reduce((a, p) => (a && a < p.at ? a : p.at), '');
     const ctx = await channelCtx(handle, cands, unread.size ? oldest || undefined : undefined);
-    if (ctx) for (const post of todo) await handlePost(ctx, post, post.id <= ch0.last_post_id);
+    if (ctx) { await prereadTexts(ctx, todo); for (const post of todo) await handlePost(ctx, post, post.id <= ch0.last_post_id); }
   } finally { if (own) progress.delete(handle); }
   const last = page.posts.reduce((a, p) => (p.id > a.id ? p : a), { id: ch0.last_post_id, at: '' } as { id: number; at: string });
   await pool.query(
@@ -326,7 +376,7 @@ export async function collectArchive(handle: string, pages = 5): Promise<number>
   progress.set(handle, { total: sorted.length, done: 0, kind: 'archive' });
   try {
     const ctx = await channelCtx(handle, undefined, sorted[0].at);
-    if (ctx) for (const post of sorted) await handlePost(ctx, post, false);
+    if (ctx) { await prereadTexts(ctx, sorted); for (const post of sorted) await handlePost(ctx, post, false); }
     await settleTgTips().catch(() => 0);
   } finally { progress.delete(handle); }
   return sorted.length;
@@ -364,6 +414,7 @@ export async function tgCycle(): Promise<void> {
   try {
     await syncUserChannels().catch(() => {});
     await pauseSilent().catch(() => 0);
+    await loadReaderAccuracy();
     const { rows } = await pool.query<{ handle: string }>(
       `SELECT c.handle FROM tg_channels c WHERE NOT c.paused AND NOT EXISTS (
          SELECT 1 FROM telegram_groups g WHERE g.moderation_status = 'rejected' AND lower(g.link) LIKE '%' || c.handle || '%') ORDER BY c.checked_at NULLS FIRST`);
@@ -384,7 +435,18 @@ export function startTgSources(): void {
 /** «Додати канал»: what the channel looks like before we start reading it. */
 export async function previewChannel(link: string) {
   const handle = publicHandle(link);
-  if (!handle) return { ok: false as const, error: /\+|joinchat/.test(link) ? 'Це запрошення в приватну групу — поки збираємо лише публічні канали' : 'Не схоже на посилання t.me/… або @нікнейм' };
+  const inv = handle ? null : inviteHash(link);
+  if (inv) {
+    // a private channel: what the invite shows (posts are read after the account joins it)
+    if (!accountEnabled()) return { ok: false as const, error: 'Це запрошення в приватний канал — щоб його читати, підключіть акаунт Telegram (ключі TG_API_ID, TG_API_HASH, TG_SESSION у Railway)' };
+    try {
+      const i = await inviteInfo(inv);
+      const h = i.id ? privateHandle(i.id) : null;
+      const exists = h ? (await pool.query('SELECT 1 FROM tg_channels WHERE handle = $1', [h])).rowCount! > 0 : false;
+      return { ok: true as const, handle: h || `+${inv}`, title: i.title, subscribers: i.subscribers, posts: 0, tipLike: 0, recognized: 0, exists, private: true, joined: i.joined };
+    } catch (e) { return { ok: false as const, error: `Telegram: ${(e as Error).message.slice(0, 160)}` }; }
+  }
+  if (!handle) return { ok: false as const, error: 'Не схоже на посилання t.me/… або @нікнейм' };
   let page;
   try { page = await fetchChannelPage(handle); } catch (e) { return { ok: false as const, error: (e as Error).message }; }
   if (!page.isPublic) return { ok: false as const, error: 'Канал не знайдено або він приватний' };

@@ -4,7 +4,9 @@
  * The answer is written back as a plain tip line («A vs B / Перемога X @1.72») and goes through the same parser,
  * so matching to our feed, synthetic matches and settlement stay in one place.
  */
+import { createHash } from 'crypto';
 import { pool } from '../db/client';
+import { accountMedia } from './tgAccount';
 
 const MODEL = () => process.env.GEMINI_MODEL || 'gemini-flash-latest'; // Flash reads slips better than Flash-Lite; Lite is the fallback
 export const aiEnabled = () => ['GEMINI_API_KEY', 'GITHUB_MODELS_TOKEN'].some((k) => !!process.env[k]);
@@ -92,17 +94,17 @@ const SCHEMA = {
 
 /** The post read by the model, or null (no key, quota, network) — then OCR + rules take over. */
 // ── the readers, in order: Gemini Flash → GitHub Models → Gemini Flash-Lite (each on its own key) ──
-type Img = { mime: string; b64: string };
-interface Provider { id: string; label: string; key: () => string | undefined; keyName: string; model: () => string; call: (prompt: string, imgs: Img[], model: string, key: string) => Promise<Response> }
+export type Img = { mime: string; b64: string };
+interface Provider { id: string; label: string; key: () => string | undefined; keyName: string; model: () => string; call: (prompt: string, imgs: Img[], model: string, key: string, schema?: object) => Promise<Response> }
 const openAi = (url: string, json = true) => (prompt: string, imgs: Img[], model: string, key: string) => fetch(url, {
   method: 'POST', signal: AbortSignal.timeout(90_000),
   headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
   body: JSON.stringify({ model, temperature: 0, max_tokens: 1200, ...(json ? { response_format: { type: 'json_object' } } : {}),
     messages: [{ role: 'user', content: [{ type: 'text', text: prompt }, ...imgs.map((i) => ({ type: 'image_url', image_url: { url: `data:${i.mime};base64,${i.b64}` } }))] }] }),
 });
-const gemini = (prompt: string, imgs: Img[], model: string, key: string) => fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+const gemini = (prompt: string, imgs: Img[], model: string, key: string, schema: object = SCHEMA) => fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
   method: 'POST', signal: AbortSignal.timeout(90_000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-  body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }, ...imgs.map((i) => ({ inline_data: { mime_type: i.mime, data: i.b64 } }))] }], generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: SCHEMA } }),
+  body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }, ...imgs.map((i) => ({ inline_data: { mime_type: i.mime, data: i.b64 } }))] }], generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: schema } }),
 });
 export const PROVIDERS: Provider[] = [
   { id: 'gemini', label: 'Gemini Flash', keyName: 'GEMINI_API_KEY', key: () => process.env.GEMINI_API_KEY, model: () => MODEL(), call: gemini },
@@ -123,7 +125,7 @@ function answerText(body: unknown): string {
 }
 
 /** One reader on one post: the parsed answer, or why not. */
-async function ask(p: Provider, prompt: string, imgs: Img[]): Promise<{ tip?: AiTip; why?: string }> {
+async function ask(p: Provider, prompt: string, imgs: Img[], schema: object = SCHEMA, check: (txt: string) => string = (t) => answerProblem({ candidates: [{ content: { parts: [{ text: t }] } }] })): Promise<{ tip?: AiTip; raw?: unknown; why?: string }> {
   const key = p.key(), s = st(p.id), model = p.model();
   if (!key) return { why: 'немає ключа' };
   if (Date.now() < s.restUntil) return { why: 'відпочиває' };
@@ -131,16 +133,17 @@ async function ask(p: Provider, prompt: string, imgs: Img[]): Promise<{ tip?: Ai
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt) await new Promise((ok) => setTimeout(ok, 5_000));
     let res: Response;
-    try { res = await p.call(prompt, imgs, p.model(), key); } catch (e) {
+    try { res = await p.call(prompt, imgs, p.model(), key, schema); } catch (e) {
       s.failed++; s.lastError = (e as Error).name === 'TimeoutError' ? 'не відповів за 90 с' : (e as Error).message.slice(0, 120); return { why: s.lastError };
     }
     aiStats.calls++; aiStats.lastAt = new Date().toISOString(); count(p.id === 'gemini' || p.id === 'gemini-lite' ? model : p.id);
     if (res.ok) {
       const txt = answerText(await res.json());
-      const why = answerProblem({ candidates: [{ content: { parts: [{ text: txt }] } }] });
+      const why = check(txt);
       if (why) { s.failed++; s.lastError = why; return { why }; }
       s.ok++; aiStats.model = `${p.label}`;
-      return { tip: JSON.parse(txt) as AiTip };
+      const raw = JSON.parse(txt) as unknown;
+      return { tip: raw as AiTip, raw };
     }
     const raw = await res.text();
     let msg = raw;
@@ -165,25 +168,67 @@ export function disagree(a: AiTip, b: AiTip): boolean {
   return a.market !== b.market || (a.map ?? null) !== (b.map ?? null) || !pickSame || (a.odds != null && b.odds != null && Math.abs(a.odds - b.odds) > 0.02);
 }
 
-/** The post read by the first reader that answers well; a slip with money is read by a second one too — they must agree. */
-export async function aiReadPost(caption: string, photos: string[], hint = ''): Promise<(AiTip & { by?: string; doubt?: string }) | null> {
-  if (!PROVIDERS.some((p) => p.key())) return null;
+/** How often the admin corrected each reader (last 30 days) — set by tgSources; a reader that is clearly more accurate goes first. */
+export const readerAccuracy: Record<string, { read: number; wrong: number }> = {};
+const acc = (id: string) => { const a = readerAccuracy[id]; return a && a.read >= 30 ? 1 - a.wrong / a.read : null; };
+/** The readers in the order to ask: as listed, but one with ≥ 30 reads and ≥ 5 points more accurate than the one before it swaps ahead. */
+export function readerOrder(): Provider[] {
+  const list = [...PROVIDERS];
+  for (let i = 1; i < list.length; i++) for (let j = i; j > 0; j--) {
+    const a = acc(list[j].id), b = acc(list[j - 1].id);
+    if (a != null && b != null && a - b >= 0.05) [list[j - 1], list[j]] = [list[j], list[j - 1]]; else break;
+  }
+  return list;
+}
+
+/** Screenshots of a post: downloaded, small ones scaled up and sharpened (t.me/s gives ≈380 px), and one hash of the originals (the same slip posted again is not read twice). */
+export async function loadImages(photos: string[]): Promise<{ imgs: Img[]; hash: string | null }> {
+  const imgs: Img[] = [], h = createHash('sha1');
+  let any = false;
+  for (const url of photos.slice(0, 4)) { // an album: up to 4 screenshots
+    let buf: Buffer | null = null, mime = 'image/jpeg';
+    if (url.startsWith('tgacc://')) buf = await accountMedia(url); // a private channel: through our Telegram account
+    else {
+      const r = await fetch(url, { signal: AbortSignal.timeout(15_000) }).catch(() => null);
+      if (r?.ok) { buf = Buffer.from(await r.arrayBuffer()); mime = r.headers.get('content-type') || mime; }
+    }
+    if (!buf?.length || buf.length > 4 * 1024 * 1024) continue;
+    h.update(buf); any = true;
+    imgs.push(await sharpen(buf, mime));
+  }
+  return { imgs, hash: any ? h.digest('hex') : null };
+}
+async function sharpen(buf: Buffer, mime: string): Promise<Img> {
+  try {
+    const sharp = (await import('sharp')).default;
+    const w = (await sharp(buf).metadata()).width || 0;
+    if (!w || w >= 700) return { mime, b64: buf.toString('base64') };
+    const out = await sharp(buf).resize({ width: Math.min(1400, w * 2), kernel: 'lanczos3' }).normalise().sharpen({ sigma: 0.8 }).jpeg({ quality: 90 }).toBuffer();
+    return { mime: 'image/jpeg', b64: out.toString('base64') };
+  } catch { return { mime, b64: buf.toString('base64') }; }
+}
+
+const buildPrompt = (caption: string, hint: string, examples: string) =>
+  `${PROMPT}${hint ? `\n\nAbout this channel: ${hint}` : ''}${examples ? `\n\n${examples}` : ''}\n\n${FIELDS}\n\nCaption:\n${caption || '(no caption)'}`;
+async function pace(): Promise<void> {
   const wait = nextAt - Date.now();
   if (wait > 0) await new Promise((ok) => setTimeout(ok, wait));
   nextAt = Date.now() + 6_000;
   await loadUsage();
+}
+export type AiRead = AiTip & { by?: string; byId?: string; doubt?: string };
+
+/** The post read by the first reader that answers well; a slip with money is read by a second one too — they must agree.
+ *  `imgs` — screenshots already loaded (loadImages); `examples` — earlier posts of the channel the admin corrected. */
+export async function aiReadPost(caption: string, photos: string[], hint = '', opts: { imgs?: Img[]; examples?: string } = {}): Promise<AiRead | null> {
+  if (!PROVIDERS.some((p) => p.key())) return null;
+  await pace();
   try {
-    const prompt = `${PROMPT}${hint ? `\n\nAbout this channel: ${hint}` : ''}\n\n${FIELDS}\n\nCaption:\n${caption || '(no caption)'}`;
-    const imgs: Img[] = [];
-    for (const url of photos.slice(0, 4)) { // an album: up to 4 screenshots
-      const r = await fetch(url, { signal: AbortSignal.timeout(15_000) }).catch(() => null);
-      if (!r?.ok) continue;
-      const buf = Buffer.from(await r.arrayBuffer());
-      if (buf.length <= 4 * 1024 * 1024) imgs.push({ mime: r.headers.get('content-type') || 'image/jpeg', b64: buf.toString('base64') });
-    }
+    const prompt = buildPrompt(caption, hint, opts.examples || '');
+    const imgs = opts.imgs ?? (await loadImages(photos)).imgs;
     let first: { tip: AiTip; p: Provider } | null = null;
     const whys: string[] = [];
-    for (const p of PROVIDERS) {
+    for (const p of readerOrder()) {
       const r = await ask(p, prompt, imgs);
       if (!r.tip) { if (r.why !== 'немає ключа') whys.push(`${p.label}: ${r.why}`); continue; }
       if (!first) {
@@ -194,11 +239,11 @@ export async function aiReadPost(caption: string, photos: string[], hint = ''): 
       }
       if (disagree(first.tip, r.tip)) {
         const show = (t: AiTip) => t.isTip ? `${t.market}${t.map ? ` ${t.map}` : ''} · ${t.pick || '—'} @${t.odds ?? '—'}` : 'не прогноз';
-        return { ...first.tip, by: first.p.label, doubt: `${first.p.label}: ${show(first.tip)} | ${p.label}: ${show(r.tip)}` };
+        return { ...first.tip, by: first.p.label, byId: first.p.id, doubt: `${first.p.label}: ${show(first.tip)} | ${p.label}: ${show(r.tip)}` };
       }
-      return { ...first.tip, by: `${first.p.label} + ${p.label}` };
+      return { ...first.tip, by: `${first.p.label} + ${p.label}`, byId: first.p.id };
     }
-    if (first) return { ...first.tip, by: first.p.label };
+    if (first) return { ...first.tip, by: first.p.label, byId: first.p.id };
     throw new Error(whys.join(' · ') || 'жоден читач не відповів');
   } catch (e) {
     aiStats.failed++; aiStats.lastError = (e as Error).message.slice(0, 300);
@@ -207,12 +252,49 @@ export async function aiReadPost(caption: string, photos: string[], hint = ''): 
   }
 }
 
+/** Several text-only posts in one request (up to 5): an answer per post, in order — or null, then each is read on its own. */
+export async function aiReadBatch(captions: string[], hint = '', examples = ''): Promise<AiRead[] | null> {
+  if (!PROVIDERS.some((p) => p.key()) || captions.length < 2) return null;
+  await pace();
+  const prompt = `${PROMPT}${hint ? `\n\nAbout this channel: ${hint}` : ''}${examples ? `\n\n${examples}` : ''}
+
+You get ${captions.length} separate posts (text only, no screenshots). Read each on its own and answer with ONE JSON object {"posts": [...]} — exactly ${captions.length} items, in the same order, each item as described:
+${FIELDS.replace('Answer with ONE JSON object: ', '')}
+
+${captions.map((c, i) => `Post ${i + 1}:\n${c.slice(0, 1500)}`).join('\n\n')}`;
+  const schema = { type: 'OBJECT', properties: { posts: { type: 'ARRAY', items: SCHEMA } }, required: ['posts'] };
+  const check = (txt: string) => {
+    let j: { posts?: unknown[] };
+    try { j = JSON.parse(txt) as { posts?: unknown[] }; } catch { return 'відповідь не JSON'; }
+    if (!Array.isArray(j.posts) || j.posts.length !== captions.length) return 'не та кількість відповідей';
+    for (const x of j.posts) { const w = answerProblem({ candidates: [{ content: { parts: [{ text: JSON.stringify(x) }] } }] }); if (w) return w; }
+    return '';
+  };
+  for (const p of readerOrder()) {
+    const r = await ask(p, prompt, [], schema, check);
+    if (r.raw) { batchStats.requests++; batchStats.posts += captions.length; return ((r.raw as { posts: AiTip[] }).posts).map((t) => ({ ...t, by: `${p.label} · пакетом`, byId: p.id })); }
+  }
+  return null;
+}
+export const batchStats = { requests: 0, posts: 0 };
+
+/** One reader on one post, for the reference check: its answer or why not. */
+export async function askOne(id: string, caption: string, imgs: Img[]): Promise<{ tip?: AiTip; why?: string }> {
+  const p = PROVIDERS.find((x) => x.id === id);
+  if (!p) return { why: 'немає такого читача' };
+  await pace();
+  const r = await ask(p, buildPrompt(caption, '', ''), imgs);
+  return { tip: r.tip, why: r.why };
+}
+
 /** Every reader for the admin: key present, today's requests, resting until, last error. */
 export function readersInfo() {
   const by = aiQuota().byModel;
   return PROVIDERS.map((p) => {
     const s = st(p.id), today = p.id === 'gemini' || p.id === 'gemini-lite' ? by[p.model()] || 0 : by[p.id] || 0;
+    const a = readerAccuracy[p.id];
     return { id: p.id, label: p.label, model: p.model(), hasKey: !!p.key(), keyName: p.keyName, today, ok: s.ok, failed: s.failed,
+      read30: a?.read ?? 0, wrong30: a?.wrong ?? 0, accuracy: a && a.read ? Math.round((1 - a.wrong / a.read) * 100) : null,
       restUntil: s.restUntil > Date.now() ? new Date(s.restUntil).toISOString() : null, lastError: s.lastError };
   });
 }
@@ -226,6 +308,8 @@ export function answerProblem(r: Resp): string {
   if (bad(a.team1) || bad(a.team2) || bad(a.pick)) return 'зіпсована назва команди у відповіді';
   if (a.isTip && !a.market) return 'прогноз без ринку';
   if (a.isTip && a.market !== 'express' && a.market !== 'total_maps' && a.market !== 'map_total' && !a.pick) return 'прогноз без вибору';
+  // a decimal odd is 1.01…50: «152» or «0.52» is a misread «1.52» — the next reader reads it again
+  if (a.isTip && a.odds != null && (a.odds < 1.01 || a.odds > 50)) return 'неправдоподібний коефіцієнт';
   return '';
 }
 

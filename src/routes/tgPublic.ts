@@ -16,7 +16,7 @@ const VERIFIED = `
          sum(CASE WHEN p.kind = 'bet' AND p.odds IS NOT NULL THEN CASE COALESCE(p.our_result, p.result) WHEN 'Win' THEN (p.odds - 1) * 100 WHEN 'Loss' THEN -100 END END) AS profit,
          count(*) FILTER (WHERE p.kind = 'bet' AND p.odds IS NOT NULL AND COALESCE(p.our_result, p.result) IN ('Win', 'Loss')) AS priced
     FROM tg_channels c JOIN tg_posts p ON p.handle = c.handle
-   WHERE NOT c.is_test AND NOT EXISTS (SELECT 1 FROM telegram_groups g WHERE g.moderation_status = 'rejected' AND lower(g.link) LIKE '%' || c.handle || '%')
+   WHERE NOT c.is_test AND c.private_id IS NULL AND NOT EXISTS (SELECT 1 FROM telegram_groups g WHERE g.moderation_status = 'rejected' AND lower(g.link) LIKE '%' || c.handle || '%')
    GROUP BY c.handle, c.title, c.subscribers`;
 type Row = { handle: string; title: string | null; subscribers: number | null; settled: string; won: string; confirmed: string; mismatches: string; profit: string | null; priced: string };
 const verified = (rows: Row[]) => rows.map((r) => {

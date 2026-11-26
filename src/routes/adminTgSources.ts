@@ -1,10 +1,12 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { pool } from '../db/client';
-import { collectArchive, collectChannel, fetchChannelPage, rereadChannel, firstRead, progress, previewChannel, publicHandle, settleTgTips, tgCandidates, tgCycle, tgNextAt } from '../services/tgSources';
+import { collectArchive, collectChannel, fetchChannelPage, rereadChannel, firstRead, progress, previewChannel, publicHandle, saved, settleTgTips, tgCandidates, tgCycle, tgNextAt } from '../services/tgSources';
 import { isNight } from '../services/nightMode';
 import { ocrStats } from '../services/tgOcr';
-import { aiEnabled, aiQuota, aiStats, readersInfo } from '../services/tgAi';
+import { aiEnabled, aiQuota, aiStats, batchStats, readersInfo } from '../services/tgAi';
+import { accountEnabled, accountMedia, accountStats, inviteHash, joinInvite, mediaLink, mediaSig, privateHandle } from '../services/tgAccount';
+import { goldenRun, lastGolden, learnFromFix, runGolden } from '../services/tgLearn';
 import { diag, explainTip, feedMatches, verifyErrors, verifyTips } from '../services/tgVerify';
 
 /** «Telegram-джерела» in the admin: channels we read, their posts, the queue of posts we did not understand. */
@@ -20,7 +22,7 @@ const kyivDay = (t: number) => new Intl.DateTimeFormat('sv-SE', { timeZone: 'Eur
 /** GET /api/admin/tg-sources — channels with their week, totals, invites users added (not readable yet). */
 tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
   const [chs, posts, groups, all, again, money, byDay] = await Promise.all([
-    pool.query(`SELECT handle, title, subscribers, game, is_test AS "isTest", paused, added_by AS "addedBy", last_post_at AS "lastPostAt", checked_at AS "checkedAt", error, created_at AS "createdAt", auto_paused AS "autoPaused", fails, profile FROM tg_channels ORDER BY created_at`),
+    pool.query(`SELECT handle, title, subscribers, game, is_test AS "isTest", paused, added_by AS "addedBy", last_post_at AS "lastPostAt", checked_at AS "checkedAt", error, created_at AS "createdAt", auto_paused AS "autoPaused", fails, profile, invite FROM tg_channels ORDER BY created_at`),
     pool.query<{ handle: string; posted_at: string; kind: string; result: string | null; odds: string | null }>(
       `SELECT handle, posted_at, kind, result, odds FROM tg_posts WHERE posted_at > now() - interval '30 days'`),
     pool.query<{ name: string; link: string; status: string; username: string | null }>(
@@ -123,7 +125,8 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
     // the channel of the week: the best ROI (ours where we checked) of the last 7 days, at least 3 settled tips
     best: (() => { const c = channels.filter((x: any) => x.all.week.won + x.all.week.lost >= 3 && x.all.week.roi != null).sort((x: any, y: any) => y.all.week.roi - x.all.week.roi)[0]; return c ? { handle: c.handle, title: c.title, roi: c.all.week.roi, won: c.all.week.won, lost: c.all.week.lost } : null; })(),
     alerts: { unknown: all.rows.reduce((x, r) => x + Number(r.unknown || 0), 0), mismatches: all.rows.reduce((x, r) => x + Number(r.mismatches || 0), 0) },
-    reader: { ai: aiEnabled(), model: aiStats.model || null, quota: aiQuota(), readers: readersInfo(), aiCalls: aiStats.calls, aiFailed: aiStats.failed, aiError: aiStats.lastError,
+    account: { enabled: accountEnabled(), connectedAt: accountStats.connectedAt, error: accountStats.lastError },
+    reader: { ai: aiEnabled(), model: aiStats.model || null, quota: aiQuota(), readers: readersInfo(), saved: { ...saved, batch: Math.max(0, batchStats.posts - batchStats.requests) }, golden: { ...(await lastGolden()), running: goldenRun.running, done: goldenRun.done, total: goldenRun.total }, aiCalls: aiStats.calls, aiFailed: aiStats.failed, aiError: aiStats.lastError,
       ocrImages: ocrStats.images, ocrFailed: ocrStats.failed, ocrAvgMs: ocrStats.images ? Math.round(ocrStats.ms / ocrStats.images) : null, ocrError: ocrStats.lastError },
     night: isNight(), nextAt: tgNextAt.at ? new Date(tgNextAt.at).toISOString() : null,
   });
@@ -131,6 +134,21 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
 
 const postCols = `handle, post_id AS "postId", posted_at AS "postedAt", text, kind, reason, game, match_id AS "matchId", team1, team2, market, pick, odds::float AS odds, result, score, fixed_by AS "fixedBy", COALESCE(photos, '{}') AS photos, ocr, slip, stake::float AS stake, currency, payout::float AS payout, our_odds::float AS "ourOdds", odds_high AS "oddsHigh", claim, our_result AS "ourResult", settled_by AS "settledBy", mismatch, is_live AS "isLive", deleted_at AS "deletedAt", edited_at AS "editedAt", legs`;
 /** A tip on a match of our feed that is on now / ahead: its live state and score. */
+/** Screenshots of private channels («tgacc://…») as signed links to /api/tg-media (the admin's browser opens them). */
+const media = (c: { req: { url: string; header: (k: string) => string | undefined } }) => {
+  const u = new URL(c.req.url), proto = c.req.header('x-forwarded-proto') || u.protocol.replace(':', ''), origin = `${proto}://${c.req.header('x-forwarded-host') || u.host}`;
+  return <T extends { photos?: string[] }>(r: T): T => (r.photos?.some((x) => x.startsWith('tgacc://')) ? { ...r, photos: r.photos.map((x) => mediaLink(x, origin)) } : r);
+};
+
+/** GET /api/tg-media/:id/:msg?s= — a private channel's screenshot (the link is signed, no login: an <img> can't send the token). */
+tg.get('/tg-media/:id/:msg', async (c) => {
+  const id = c.req.param('id') || '', msg = c.req.param('msg') || '';
+  if (!/^\d+$/.test(id) || !/^\d+$/.test(msg) || c.req.query('s') !== mediaSig(id, msg)) return c.json({ error: 'Not found' }, 404);
+  const buf = await accountMedia(`tgacc://${id}/${msg}`);
+  if (!buf) return c.json({ error: 'Not found' }, 404);
+  return new Response(new Uint8Array(buf), { headers: { 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=86400' } });
+});
+
 function withLive<T extends { matchId?: string | null; kind?: string }>(rows: T[]): (T & { live?: { status: string; score1: number | null; score2: number | null; start: string } })[] {
   const feed = feedMatches();
   return rows.map((r) => { const m = r.kind === 'bet' && r.matchId ? feed.find((x) => x.id === r.matchId) : undefined; return m ? { ...r, live: { status: m.status, score1: m.score1, score2: m.score2, start: m.start } } : r; });
@@ -139,7 +157,7 @@ function withLive<T extends { matchId?: string | null; kind?: string }>(rows: T[
 /** GET /api/admin/tg-sources/:handle/posts — the channel's newest posts with what we made of them. */
 tg.get('/admin/tg-sources/:handle/posts', requireAuth, requireAdmin, async (c) => {
   const { rows } = await pool.query(`SELECT ${postCols} FROM tg_posts WHERE handle = $1 ORDER BY posted_at DESC LIMIT 30`, [c.req.param('handle')]);
-  return c.json({ posts: withLive(rows) });
+  return c.json({ posts: withLive(rows.map(media(c))) });
 });
 
 /** GET /api/admin/tg-posts/unrecognized — posts that look like tips but were not understood (not sorted yet, newest 100). */
@@ -147,7 +165,7 @@ tg.get('/admin/tg-posts/unrecognized', requireAuth, requireAdmin, async (c) => {
   const { rows } = await pool.query(
     `SELECT ${postCols.replace(/(^|, )(?!COALESCE)(\w+)/g, '$1p.$2').replace('COALESCE(photos', 'COALESCE(p.photos').replace(/(^|, )(our_result|settled_by|is_live|deleted_at|edited_at|our_odds|odds_high)/g, '$1p.$2')}, ch.title FROM tg_posts p LEFT JOIN tg_channels ch ON ch.handle = p.handle
      WHERE (p.kind = 'unknown' AND p.fixed_by IS NULL) OR (p.kind = 'bet' AND p.mismatch) ORDER BY p.mismatch DESC, p.posted_at DESC LIMIT 100`);
-  return c.json({ posts: rows });
+  return c.json({ posts: rows.map(media(c)) });
 });
 
 /** GET /api/admin/tg-posts/matches?q= — matches a post can be tied to: today, tomorrow, live (feed) and the last 30 days. */
@@ -172,6 +190,7 @@ tg.post('/admin/tg-posts/:handle/:postId', requireAuth, requireAdmin, async (c) 
     // the admin's status for a post that is not a tip: info, a repeat, a poll, a results summary
     const reason = ['Повтор', 'Опитування', 'Підсумок', 'Результат'].includes(String(b.reason)) ? String(b.reason) : null;
     await pool.query(`UPDATE tg_posts SET kind = 'other', reason = $4, result = NULL, our_result = NULL, mismatch = false, settled_by = NULL, fixed_by = $3 WHERE handle = $1 AND post_id = $2`, [handle, postId, actor.username, reason]);
+    await learnFromFix(handle, postId, { kind: 'other' }, actor.username).catch(() => {});
     audit(actor, 'POST', `/admin/tg-posts/${handle}/${postId}`, { kind: 'other', reason });
     return c.json({ ok: true });
   }
@@ -196,10 +215,19 @@ tg.post('/admin/tg-posts/:handle/:postId', requireAuth, requireAdmin, async (c) 
         score = NULL, our_result = NULL, mismatch = false, fixed_by = $10 WHERE handle = $1 AND post_id = $2`,
     // result: 'auto' (from the slip, then our check), 'pending' (open — our check closes it), or the admin's Win / Loss / Void
     [handle, postId, m.game, m.id, m.team1, m.team2, market, pick, odds, actor.username, ['Win', 'Loss', 'Void', 'pending'].includes(String(b.result)) ? 'set' : 'auto', ['Win', 'Loss', 'Void'].includes(String(b.result)) ? String(b.result) : null]);
+  await learnFromFix(handle, postId, { kind: 'bet', game: m.game, team1: m.team1, team2: m.team2, market, pick: pick || null, odds }, actor.username).catch(() => {});
   if (b.remember && mk === 'Match Winner') await pool.query(`UPDATE tg_channels SET rules = rules || jsonb_build_object('oddsOnly', $2::text) WHERE handle = $1`, [handle, b.side === 2 ? 'p2' : 'p1']);
   void settleTgTips().catch(() => {});
   audit(actor, 'POST', `/admin/tg-posts/${handle}/${postId}`, { kind: 'bet', match: `${m.team1} — ${m.team2}`, market, pick, odds, remember: !!b.remember });
   return c.json({ ok: true });
+});
+
+/** POST /api/admin/tg-sources/golden — every reader reads again the posts the admin sorted (≈6 s a request): who reads right. */
+tg.post('/admin/tg-sources/golden', requireAuth, requireAdmin, async (c) => {
+  if (goldenRun.running) return c.json({ ok: true, running: true });
+  void runGolden().catch((e) => console.warn('[tg] golden:', (e as Error).message));
+  audit(c.get('user'), 'POST', '/admin/tg-sources/golden', {});
+  return c.json({ ok: true, running: true });
 });
 
 /** POST /api/admin/tg-sources/preview {link} — what the channel looks like before adding it. */
@@ -212,11 +240,18 @@ tg.post('/admin/tg-sources/preview', requireAuth, requireAdmin, async (c) => {
 tg.post('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
   const actor = c.get('user');
   const b = await c.req.json().catch(() => null) as { link?: string; game?: string; test?: boolean } | null;
-  const handle = publicHandle(b?.link);
-  if (!handle) return c.json({ error: 'Потрібне публічне посилання t.me/… або @нікнейм' }, 400);
+  let handle = publicHandle(b?.link), priv: { id: string; invite: string; title: string; subscribers: number | null } | null = null;
+  const inv = handle ? null : inviteHash(b?.link);
+  if (inv) {
+    // a private channel: our Telegram account joins it by the invite, then it is read like any other
+    if (!accountEnabled()) return c.json({ error: 'Для приватних каналів підключіть акаунт Telegram (TG_API_ID, TG_API_HASH, TG_SESSION)' }, 400);
+    try { const j = await joinInvite(inv); priv = { id: j.id, invite: inv, title: j.title, subscribers: j.subscribers }; handle = privateHandle(j.id); } catch (e) { return c.json({ error: `Telegram: ${(e as Error).message.slice(0, 160)}` }, 400); }
+  }
+  if (!handle) return c.json({ error: 'Потрібне посилання t.me/…, @нікнейм або запрошення t.me/+…' }, 400);
   const game = b?.game === 'cs2' || b?.game === 'dota2' ? b.game : 'both';
   await pool.query(`INSERT INTO tg_channels(handle, game, is_test, added_by) VALUES($1,$2,$3,$4)
     ON CONFLICT (handle) DO UPDATE SET game = EXCLUDED.game, is_test = tg_channels.is_test AND EXCLUDED.is_test, paused = false`, [handle, game, b?.test !== false, `@${actor.username}`]);
+  if (priv) await pool.query('UPDATE tg_channels SET private_id = $2, invite = $3, title = COALESCE(title, $4), subscribers = COALESCE(subscribers, $5) WHERE handle = $1', [handle, priv.id, priv.invite, priv.title, priv.subscribers]);
   audit(actor, 'POST', '/admin/tg-sources', { handle, game, test: b?.test !== false });
   // reading takes a while (screenshots, ≈6 s a post with the AI reader): it runs on, the list shows the progress
   void firstRead(handle).catch((e) => console.warn(`[tg] add ${handle}:`, (e as Error).message));

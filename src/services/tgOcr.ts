@@ -5,6 +5,7 @@
  */
 import { join } from 'path';
 import { mkdirSync } from 'fs';
+import { accountMedia } from './tgAccount';
 
 type Worker = { recognize: (img: Buffer) => Promise<{ data: { text: string } }>; setParameters: (p: Record<string, string>) => Promise<unknown>; terminate: () => Promise<unknown> };
 const LANGS = process.env.TG_OCR_LANGS || 'eng+rus+ukr';
@@ -35,9 +36,12 @@ export function ocrImage(url: string): Promise<string> {
   const run = async () => {
     const t0 = Date.now();
     try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-      if (!res.ok) return '';
-      const buf = Buffer.from(await res.arrayBuffer());
+      let buf: Buffer;
+      if (url.startsWith('tgacc://')) { const b = await accountMedia(url); if (!b) return ''; buf = b; } else {
+        const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+        if (!res.ok) return '';
+        buf = Buffer.from(await res.arrayBuffer());
+      }
       if (!buf.length || buf.length > MAX_BYTES) return '';
       const img = await prepare(buf), bw = await prepare(buf, true);
       const w = await getWorker();
