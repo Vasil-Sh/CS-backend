@@ -160,7 +160,8 @@ const n2 = (x: number) => String(x).replace(',', '.');
 /** The model's answer as a tip line for the parser; '' for «not a tip». */
 export function aiLine(a: AiTip): string {
   if (!a.isTip || a.game === 'other') return '';
-  const pick = (a.pick || '').replace(/\([^)]*\)/g, '').replace(/[+\-−]?\d+(?:[.,]\d+)?/g, '').replace(/\s+/g, ' ').trim() || null;
+  // the team only: «Chinggis Warriors (+1.5)», «MOUZ -1.5» → the name; digits inside a name stay («M80», «G2», «9z»)
+  const pick = (a.pick || '').replace(/\([^)]*\)/g, '').replace(/(^|\s)[+\-−]?\d+[.,]\d+(?=\s|$)/g, ' ').replace(/(^|\s)[+\-−]\d+(?=\s|$)/g, ' ').replace(/\s+/g, ' ').trim() || null;
   a = { ...a, pick };
   const head = a.team1 && a.team2 ? `${a.team1} vs ${a.team2}` : a.team1 || a.team2 || '';
   const kf = a.odds ? ` @${n2(a.odds)}` : '';

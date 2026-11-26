@@ -15,6 +15,7 @@ describe('the model answer → the parser', () => {
     expect(parseTgPost(aiLine({ isTip: true, game: 'cs2', team1: 'NAVI', team2: 'G2', market: 'total_maps', line: 2.5, over: true, odds: 1.9 }), at, [])).toMatchObject({ kind: 'bet', market: 'Total Maps Over 2.5', odds: 1.9 });
     expect(parseTgPost(aiLine({ isTip: true, game: 'cs2', team1: 'MOUZ', team2: 'G2', market: 'handicap', pick: 'MOUZ', line: -1.5, odds: 2.4 }), at, [])).toMatchObject({ kind: 'bet', market: 'Handicap -1.5', pick: 'MOUZ' });
     expect(aiLine({ isTip: false })).toBe('');
+    expect(parseTgPost(aiLine({ isTip: true, game: 'cs2', team1: 'M80', team2: 'Eternal Fire', market: 'map_winner', map: 1, pick: 'M80', odds: 1.9 }), at, [])).toMatchObject({ kind: 'bet', market: 'Map 1 Winner', pick: 'M80' });
     expect([currencyCode('₴'), currencyCode('грн'), currencyCode('₽'), currencyCode('USDT'), currencyCode('$')]).toEqual(['UAH', 'UAH', 'RUB', 'USDT', 'USD']);
   });
 });
