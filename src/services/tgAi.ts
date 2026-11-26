@@ -93,7 +93,7 @@ const SCHEMA = {
 };
 
 /** The post read by the model, or null (no key, quota, network) — then OCR + rules take over. */
-// ── the readers, in order: Gemini Flash → GitHub Models → Gemini Flash-Lite (each on its own key) ──
+// ── the readers, in order: Gemini Flash → GitHub Models → Cloudflare AI → Gemini Flash-Lite (each on its own key) ──
 export type Img = { mime: string; b64: string };
 interface Provider { id: string; label: string; key: () => string | undefined; keyName: string; model: () => string; call: (prompt: string, imgs: Img[], model: string, key: string, schema?: object) => Promise<Response> }
 const openAi = (url: string, json = true) => (prompt: string, imgs: Img[], model: string, key: string) => fetch(url, {
@@ -109,6 +109,10 @@ const gemini = (prompt: string, imgs: Img[], model: string, key: string, schema:
 export const PROVIDERS: Provider[] = [
   { id: 'gemini', label: 'Gemini Flash', keyName: 'GEMINI_API_KEY', key: () => process.env.GEMINI_API_KEY, model: () => MODEL(), call: gemini },
   { id: 'github', label: 'GitHub Models', keyName: 'GITHUB_MODELS_TOKEN', key: () => process.env.GITHUB_MODELS_TOKEN, model: () => process.env.GITHUB_VISION_MODEL || 'openai/gpt-4o-mini', call: openAi('https://models.github.ai/inference/chat/completions') },
+  // Cloudflare Workers AI: a free daily allocation (10 000 neurons ≈ a few hundred screenshots); the token and the account id
+  { id: 'cloudflare', label: 'Cloudflare AI', keyName: 'CLOUDFLARE_AI_TOKEN + CLOUDFLARE_ACCOUNT_ID', key: () => (process.env.CLOUDFLARE_ACCOUNT_ID ? process.env.CLOUDFLARE_AI_TOKEN : undefined),
+    model: () => process.env.CLOUDFLARE_VISION_MODEL || '@cf/meta/llama-4-scout-17b-16e-instruct',
+    call: (prompt, imgs, model, key) => openAi(`https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/ai/v1/chat/completions`, false)(prompt, imgs, model, key) },
   { id: 'gemini-lite', label: 'Gemini Flash-Lite', keyName: 'GEMINI_API_KEY', key: () => process.env.GEMINI_API_KEY, model: () => 'gemini-flash-lite-latest', call: gemini },
 ];
 /** Per reader: today's requests, its last error, and until when it rests (a daily quota → the next Pacific day, a minute limit / overload → a few minutes). */
@@ -119,7 +123,8 @@ const nextPacificMidnight = () => { const d = new Date(Date.now() - 8 * 3_600_00
 /** The text of an answer (Gemini or OpenAI-style), its JSON object only. */
 function answerText(body: unknown): string {
   const b = body as Resp & { choices?: { message?: { content?: string } }[] };
-  const t = b.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || b.choices?.[0]?.message?.content || '';
+  const c = b.choices?.[0]?.message?.content as unknown;
+  const t = b.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || (c && typeof c === 'object' ? JSON.stringify(c) : (c as string)) || '';
   const m = /\{[\s\S]*\}/.exec(t.replace(/<think>[\s\S]*?<\/think>/g, ''));
   return m ? m[0] : t;
 }
@@ -149,6 +154,8 @@ async function ask(p: Provider, prompt: string, imgs: Img[], schema: object = SC
     let msg = raw;
     try { const j = JSON.parse(raw) as { error?: { message?: string } | string; message?: string }; msg = (typeof j.error === 'string' ? j.error : j.error?.message) || j.message || raw; } catch { /* not JSON */ }
     s.failed++; s.lastError = `${res.status}: ${msg.replace(/\s+/g, ' ').slice(0, 140)}`;
+    // Cloudflare's free allocation used up for the day (it resets at 00:00 UTC)
+    if (/neurons|free allocation/i.test(msg)) { const d = new Date(); d.setUTCHours(24, 0, 0, 0); s.restUntil = d.getTime(); return { why: `${s.lastError} — денний безкоштовний ліміт` }; }
     if (res.status === 429) { s.restUntil = /day|daily|per.?day|quota/i.test(msg) ? nextPacificMidnight() : Date.now() + 10 * 60_000; return { why: s.lastError }; }
     if (res.status === 401 || res.status === 403) { s.restUntil = Date.now() + 6 * 3_600_000; return { why: s.lastError }; }
     if (res.status === 402) { s.restUntil = nextPacificMidnight(); return { why: `${s.lastError} — потрібна платна підписка` }; } // not free on this account

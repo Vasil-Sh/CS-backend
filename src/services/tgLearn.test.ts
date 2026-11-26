@@ -42,10 +42,10 @@ describe('tg learning', () => {
     expect(privateId('cs_2_bets')).toBe(null);
   });
   it('a clearly more accurate reader goes first', () => {
-    expect(readerOrder().map((p) => p.id)).toEqual(['gemini', 'github', 'gemini-lite']);
+    expect(readerOrder().map((p) => p.id)).toEqual(['gemini', 'github', 'cloudflare', 'gemini-lite']);
     readerAccuracy.gemini = { read: 100, wrong: 20 }; readerAccuracy.github = { read: 50, wrong: 2 };
-    expect(readerOrder().map((p) => p.id)).toEqual(['github', 'gemini', 'gemini-lite']);
+    expect(readerOrder().map((p) => p.id)).toEqual(['github', 'gemini', 'cloudflare', 'gemini-lite']);
     readerAccuracy.github = { read: 10, wrong: 0 }; // too few reads to judge
-    expect(readerOrder().map((p) => p.id)).toEqual(['gemini', 'github', 'gemini-lite']);
+    expect(readerOrder().map((p) => p.id)).toEqual(['gemini', 'github', 'cloudflare', 'gemini-lite']);
   });
 });
