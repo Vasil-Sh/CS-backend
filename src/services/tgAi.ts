@@ -7,7 +7,7 @@
 import { pool } from '../db/client';
 
 const MODEL = () => process.env.GEMINI_MODEL || 'gemini-flash-latest'; // Flash reads slips better than Flash-Lite; Lite is the fallback
-export const aiEnabled = () => ['GEMINI_API_KEY', 'OPENROUTER_API_KEY', 'GITHUB_MODELS_TOKEN'].some((k) => !!process.env[k]);
+export const aiEnabled = () => ['GEMINI_API_KEY', 'GITHUB_MODELS_TOKEN'].some((k) => !!process.env[k]);
 export const aiStats = { calls: 0, failed: 0, lastError: null as string | null, lastAt: null as string | null, model: '' };
 
 // ── the free tier's daily quota (Google resets it at midnight Pacific): requests per model today, kept across restarts ──
@@ -91,7 +91,7 @@ const SCHEMA = {
 };
 
 /** The post read by the model, or null (no key, quota, network) — then OCR + rules take over. */
-// ── the readers, in order: Gemini Flash → OpenRouter → GitHub Models → Gemini Flash-Lite (each on its own key) ──
+// ── the readers, in order: Gemini Flash → GitHub Models → Gemini Flash-Lite (each on its own key) ──
 type Img = { mime: string; b64: string };
 interface Provider { id: string; label: string; key: () => string | undefined; keyName: string; model: () => string; call: (prompt: string, imgs: Img[], model: string, key: string) => Promise<Response> }
 const openAi = (url: string, json = true) => (prompt: string, imgs: Img[], model: string, key: string) => fetch(url, {
@@ -106,8 +106,6 @@ const gemini = (prompt: string, imgs: Img[], model: string, key: string) => fetc
 });
 export const PROVIDERS: Provider[] = [
   { id: 'gemini', label: 'Gemini Flash', keyName: 'GEMINI_API_KEY', key: () => process.env.GEMINI_API_KEY, model: () => MODEL(), call: gemini },
-  // json mode: the free router then picks only models that can answer in JSON
-  { id: 'openrouter', label: 'OpenRouter', keyName: 'OPENROUTER_API_KEY', key: () => process.env.OPENROUTER_API_KEY, model: () => process.env.OPENROUTER_VISION_MODEL || 'openrouter/free', call: openAi('https://openrouter.ai/api/v1/chat/completions') },
   { id: 'github', label: 'GitHub Models', keyName: 'GITHUB_MODELS_TOKEN', key: () => process.env.GITHUB_MODELS_TOKEN, model: () => process.env.GITHUB_VISION_MODEL || 'openai/gpt-4o-mini', call: openAi('https://models.github.ai/inference/chat/completions') },
   { id: 'gemini-lite', label: 'Gemini Flash-Lite', keyName: 'GEMINI_API_KEY', key: () => process.env.GEMINI_API_KEY, model: () => 'gemini-flash-lite-latest', call: gemini },
 ];
