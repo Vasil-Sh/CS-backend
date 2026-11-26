@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { pool } from '../db/client';
-import { collectArchive, collectChannel, fetchChannelPage, rereadChannel, firstRead, progress, previewChannel, publicHandle, saved, settleTgTips, tgCandidates, tgCycle, tgNextAt } from '../services/tgSources';
+import { moneyFromOcr, collectArchive, collectChannel, fetchChannelPage, rereadChannel, firstRead, progress, previewChannel, publicHandle, saved, settleTgTips, tgCandidates, tgCycle, tgNextAt } from '../services/tgSources';
 import { isNight } from '../services/nightMode';
 import { ocrStats } from '../services/tgOcr';
 import { aiEnabled, aiQuota, aiStats, batchStats, readersInfo } from '../services/tgAi';
@@ -156,6 +156,7 @@ function withLive<T extends { matchId?: string | null; kind?: string }>(rows: T[
 
 /** GET /api/admin/tg-sources/:handle/slips — every post with money on a slip: what it shows and whether it is in «Гроші каналу» (a tip, once). */
 tg.get('/admin/tg-sources/:handle/slips', requireAuth, requireAdmin, async (c) => {
+  await moneyFromOcr().catch(() => 0); // the money and odds from saved OCR text, right now — not only on the next pass
   const { rows } = await pool.query<{ postId: number; postedAt: string; kind: string; reason: string | null; result: string | null; slip: string | null; stake: string; currency: string | null; payout: string | null; odds: string | null; team1: string | null; team2: string | null; pick: string | null; market: string | null; readBy: string | null }>(
     `SELECT post_id AS "postId", posted_at AS "postedAt", kind, reason, result, slip, stake, currency, payout, odds, team1, team2, pick, market, read_by AS "readBy"
        FROM tg_posts WHERE handle = $1 AND stake IS NOT NULL ORDER BY posted_at DESC LIMIT 200`, [c.req.param('handle')]);

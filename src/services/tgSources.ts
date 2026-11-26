@@ -192,6 +192,9 @@ export async function moneyFromOcr(): Promise<number> {
     await applySlip(r.handle, r.post_id, { status: s0.status, stake: s0.stake, currency: s0.currency, payout: s0.status === 'pending' ? null : s0.payout, odds: s0.odds }, true);
     n++;
   }
+  // a slip with both numbers saved: its payout ÷ stake is the odds
+  await pool.query(`UPDATE tg_posts SET odds = round(payout / stake, 2) WHERE kind = 'bet' AND fixed_by IS NULL AND stake > 0 AND payout > stake
+      AND COALESCE(slip, '') NOT IN ('cashout', 'void') AND payout / stake BETWEEN 1.01 AND 50 AND (odds IS NULL OR abs(odds - payout / stake) > 0.05)`);
   return n;
 }
 
