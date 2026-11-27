@@ -451,13 +451,13 @@ tg.get('/admin/tg-sources/:handle/stats', requireAuth, requireAdmin, async (c) =
     summaries.push({ at: cl.posted_at, period: cl.claim.period || null, claimed: { won: cl.claim.won ?? null, total: cl.claim.total ?? null }, ours: { won: ours.filter((x) => x === 'Win').length, total: ours.length } });
   }
   // the channel's money slip by slip (its main currency): the balance after each settled slip
-  const mrows = (await pool.query<{ at: string; currency: string; result: string; stake: number; payout: number | null; odds: number | null }>(
-    `SELECT posted_at AS at, currency, result, stake::float AS stake, payout::float AS payout, odds::float AS odds FROM tg_posts
+  const mrows = (await pool.query<{ post_id: number; at: string; currency: string; result: string; stake: number; payout: number | null; odds: number | null }>(
+    `SELECT post_id, posted_at AS at, currency, result, stake::float AS stake, payout::float AS payout, odds::float AS odds FROM tg_posts
       WHERE handle = $1 AND kind = 'bet' AND stake IS NOT NULL AND currency IS NOT NULL AND result IN ('Win', 'Loss', 'Void') ORDER BY posted_at`, [handle])).rows;
   const cnt = new Map<string, number>(); for (const r of mrows) cnt.set(r.currency, (cnt.get(r.currency) || 0) + 1);
   const mainCur = [...cnt.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
   let bal = 0;
-  const money = mainCur ? { currency: mainCur, points: mrows.filter((r) => r.currency === mainCur).map((r) => ({ at: r.at, balance: Math.round((bal += r.result === 'Win' ? (r.payout ?? r.stake * (r.odds ?? 1)) - r.stake : r.result === 'Loss' ? -r.stake : 0) * 100) / 100 })) } : null;
+  const money = mainCur ? { currency: mainCur, points: mrows.filter((r) => r.currency === mainCur).map((r) => ({ postId: Number(r.post_id), at: r.at, balance: Math.round((bal += r.result === 'Win' ? (r.payout ?? r.stake * (r.odds ?? 1)) - r.stake : r.result === 'Loss' ? -r.stake : 0) * 100) / 100 })) } : null;
   return c.json({ money, chart, byGame: group((r) => (r.game === 'dota2' ? 'Dota 2' : 'CS2')), byMarket: group((r) => kindOf(r.market)), streaks: { best, worst, current: cur }, summaries });
 });
 
