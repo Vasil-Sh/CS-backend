@@ -104,7 +104,7 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
       posts7d: wk.length, tips7d: tips, unknown7d: unk, recognized: tips + unk ? Math.round((tips / (tips + unk)) * 100) : null,
       settled: settled.length, wins, winrate: settled.length ? Math.round((wins / settled.length) * 100) : null,
       roi: priced.length ? Math.round((profit / priced.length) * 100) : null, pending: ps.filter((p) => p.kind === 'bet' && !p.result).length,
-      users, rereading: rereading.get(ch.handle) || 0, money: moneyOf(ch.handle), daysDetail: days.map((d) => dayOf(ch.handle, d)), progress: progress.get(ch.handle) || null,
+      users, bookmakers: Object.entries(((ch as { profile?: { bookmakers?: Record<string, number> } }).profile?.bookmakers) || {}).sort((x, y) => y[1] - x[1]).slice(0, 4).map(([k]) => k), rereading: rereading.get(ch.handle) || 0, money: moneyOf(ch.handle), daysDetail: days.map((d) => dayOf(ch.handle, d)), progress: progress.get(ch.handle) || null,
       all: { posts: n(a?.total), tips: tipsAll, unknown: unkAll, other: n(a?.other), repeats: n(a?.repeats), won: wonAll, lost: lostAll, pending: n(a?.pending),
         recognized: tipsAll + unkAll ? Math.round((tipsAll / (tipsAll + unkAll)) * 100) : null, winrate: wonAll + lostAll ? Math.round((wonAll / (wonAll + lostAll)) * 100) : null,
         profit: pricedAll ? profitAll : null, roi: pricedAll ? Math.round(profitAll / pricedAll) : null, firstAt: a?.first_at ?? null,
