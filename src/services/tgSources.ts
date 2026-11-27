@@ -123,7 +123,12 @@ async function readPost(ctx: Ctx, post: PagePost): Promise<Read> {
   if (ai) {
     const line = aiLine(ai);
     const st0 = ai.status || 'pending', so = ai.stake && ai.payout && ai.payout > ai.stake && st0 !== 'cashout' && st0 !== 'void' ? Math.round((ai.payout / ai.stake) * 100) / 100 : null;
-    const slip: Slip | null = ai.status || (ai.isTip && ai.stake) ? { status: st0, stake: ai.stake && ai.stake > 0 ? ai.stake : null, currency: currencyCode(ai.currency), payout: ai.payout && ai.payout > 0 ? ai.payout : null, odds: so && so <= 50 ? so : null } : null;
+    let slip: Slip | null = ai.status || (ai.isTip && ai.stake) ? { status: st0, stake: ai.stake && ai.stake > 0 ? ai.stake : null, currency: currencyCode(ai.currency), payout: ai.payout && ai.payout > 0 ? ai.payout : null, odds: so && so <= 50 ? so : null } : null;
+    // a tip with a screenshot whose money the reader missed (a weaker reader, «Сумма ставки 350,00 USDT» on the slip): the money from OCR
+    if (ai.isTip && post.photos.length && !(slip?.stake && slip.currency)) {
+      const o = ocrSlip(await ocrAll());
+      if (o?.stake && o.currency) slip = { ...o, status: slip?.status && slip.status !== 'pending' ? slip.status : o.status };
+    }
     const money = slip ? ` · квиток: ${STATUS_UA[slip.status]}${slip.stake ? `, ставка ${slip.stake}${slip.currency ? ` ${slip.currency}` : ''}` : ''}${slip.payout ? `, виплата ${slip.payout}` : ''}` : '';
     const legsTxt = ai.market === 'express' && ai.legs?.length ? ` · ${ai.legs.map((l) => `${l.team1} — ${l.team2}: ${l.pick || ''}${l.odds ? ` @${l.odds}` : ''}`).join('; ')}` : '';
     const who = ai.by ? ` (${ai.by})` : '', doubt = ai.doubt ? ` · РОЗБІЖНІСТЬ: ${ai.doubt}` : '';
