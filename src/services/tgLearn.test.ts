@@ -57,3 +57,12 @@ describe('JSON in a model text', () => {
     expect(jsonIn('no json')).toBe(null);
   });
 });
+
+describe('readerScore', () => {
+  it('uses the checked posts once there are 10', async () => {
+    const { readerScore } = await import('./tgLearn');
+    expect(readerScore(100, 2, 5, 2)).toEqual({ read: 100, wrong: 2 }); // too few checks: corrections only
+    expect(readerScore(100, 2, 20, 2)).toEqual({ read: 100, wrong: 10 }); // 10% wrong of what was checked
+    expect(readerScore(100, 0, 20, 0)).toEqual({ read: 100, wrong: 0 }); // all confirmed right
+  });
+});

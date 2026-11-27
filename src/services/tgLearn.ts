@@ -24,12 +24,12 @@ export function marketToAi(market: string | null, pick: string | null, odds: num
   return r;
 }
 
-/** Up to 3 posts of the channel the admin sorted (the reader's mistakes first): a short «caption → the right answer» list for the prompt. */
+/** Up to 3 posts of the channel the admin sorted or confirmed in «Перевірити 10» (the reader's mistakes first, then the fixes): a short «caption → the right answer» list for the prompt. */
 export async function channelExamples(handle: string): Promise<string> {
   const { rows } = await pool.query<{ text: string; photos: string[] | null; kind: string; reason: string | null; team1: string | null; team2: string | null; market: string | null; pick: string | null; odds: string | null; ai_wrong: boolean; ai_raw: AiTip | null }>(
     `SELECT text, photos, kind, reason, team1, team2, market, pick, odds, ai_wrong, ai_raw FROM tg_posts
-      WHERE handle = $1 AND fixed_by IS NOT NULL AND kind <> 'unknown' AND coalesce(text, '') <> ''
-      ORDER BY ai_wrong DESC, posted_at DESC LIMIT 3`, [handle]).catch(() => ({ rows: [] }));
+      WHERE handle = $1 AND (fixed_by IS NOT NULL OR read_wrong IS FALSE) AND kind <> 'unknown' AND coalesce(text, '') <> ''
+      ORDER BY ai_wrong DESC, (fixed_by IS NOT NULL) DESC, posted_at DESC LIMIT 3`, [handle]).catch(() => ({ rows: [] }));
   if (!rows.length) return '';
   const lines = rows.map((r) => {
     const right = r.kind === 'bet'
@@ -67,13 +67,20 @@ export async function countTemplate(handle: string, agree: boolean): Promise<voi
   await pool.query(`UPDATE tg_channels SET template = template || jsonb_build_object($2::text, COALESCE((template->>$2)::int, 0) + 1) WHERE handle = $1`, [handle, k]).catch(() => {});
 }
 
-/** Each reader's last 30 days: posts it read first and how many of them the admin corrected. */
+/** A reader's score: with 10+ posts the admin looked at (fixed, or «Правильно» / «Ні» in «Перевірити 10») its error rate is theirs,
+ *  spread over everything it read; with fewer — the corrections alone over everything it read (an unchecked post counts as right). */
+export function readerScore(read: number, wrong: number, checked: number, checkedWrong: number): { read: number; wrong: number } {
+  if (checked >= 10 && read > 0) return { read, wrong: Math.round((checkedWrong / checked) * read) };
+  return { read, wrong };
+}
+/** Each reader's last 30 days: posts it read first, the ones the admin corrected and the ones it confirmed. */
 export async function loadReaderAccuracy(): Promise<void> {
-  const { rows } = await pool.query<{ ai_by: string; read: number; wrong: number }>(
-    `SELECT ai_by, count(*)::int AS read, count(*) FILTER (WHERE ai_wrong)::int AS wrong FROM tg_posts
+  const { rows } = await pool.query<{ ai_by: string; read: number; wrong: number; checked: number; checked_wrong: number }>(
+    `SELECT ai_by, count(*)::int AS read, count(*) FILTER (WHERE ai_wrong OR read_wrong IS TRUE)::int AS wrong,
+            count(*) FILTER (WHERE read_wrong IS NOT NULL OR ai_wrong)::int AS checked, count(*) FILTER (WHERE read_wrong IS TRUE OR ai_wrong)::int AS checked_wrong FROM tg_posts
       WHERE ai_by IS NOT NULL AND read_by = 'ai' AND posted_at > now() - interval '30 days' GROUP BY ai_by`).catch(() => ({ rows: [] }));
   for (const k of Object.keys(readerAccuracy)) delete readerAccuracy[k];
-  for (const r of rows) readerAccuracy[r.ai_by] = { read: r.read, wrong: r.wrong };
+  for (const r of rows) readerAccuracy[r.ai_by] = readerScore(r.read, r.wrong, r.checked, r.checked_wrong);
 }
 
 const same = (a?: string | null, b?: string | null) => { const x = normalizeTeam(a || ''), y = normalizeTeam(b || ''); return !!x && !!y && (x === y || (Math.min(x.length, y.length) >= 4 && (x.includes(y) || y.includes(x)))); };
@@ -122,12 +129,12 @@ export async function lastGolden(): Promise<Golden | null> {
   try { return r ? JSON.parse(r.value) as Golden : null; } catch { return null; }
 }
 
-/** Up to `n` sorted posts × every reader with a key: right / wrong, saved for the admin. Runs ≈6 s a request. */
-export async function runGolden(n = 15): Promise<void> {
+/** Up to `n` posts the admin sorted or confirmed × every reader with a key: right / wrong, saved for the admin. Runs ≈6 s a request. */
+export async function runGolden(n = 20): Promise<void> {
   if (goldenRun.running) return;
   const { rows } = await pool.query<{ handle: string; post_id: number; text: string; photos: string[] | null; kind: string; team1: string | null; team2: string | null; market: string | null; pick: string | null; odds: string | null }>(
-    `SELECT handle, post_id, text, photos, kind, team1, team2, market, pick, odds FROM tg_posts WHERE fixed_by IS NOT NULL AND kind <> 'unknown' AND photos IS NOT NULL
-      ORDER BY posted_at DESC LIMIT $1`, [n]);
+    `SELECT handle, post_id, text, photos, kind, team1, team2, market, pick, odds FROM tg_posts WHERE (fixed_by IS NOT NULL OR read_wrong IS FALSE) AND kind <> 'unknown' AND photos IS NOT NULL
+      ORDER BY (fixed_by IS NOT NULL) DESC, posted_at DESC LIMIT $1`, [n]);
   const readers = PROVIDERS.filter((p) => p.key());
   if (!rows.length || !readers.length) return;
   goldenRun.running = true; goldenRun.done = 0; goldenRun.total = rows.length * readers.length;
