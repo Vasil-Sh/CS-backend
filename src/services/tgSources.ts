@@ -7,7 +7,7 @@ import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { pool } from '../db/client';
 import { cleanHandle, validHandle } from './telegramAvatar';
-import { parseTgPage, parseTgPost, type TgCandidate, type TgParsed, type TgRules } from './tgPostParser';
+import { parseTgPage, parseTgPost, resultMark, type TgCandidate, type TgParsed, type TgRules } from './tgPostParser';
 import { teamKey } from './matchFeed';
 import { isNight } from './nightMode';
 import { closeOcr, ocrImage, slipFromOcr } from './tgOcr';
@@ -71,14 +71,14 @@ export async function tgCandidates(since?: string): Promise<TgCandidate[]> {
 
 const gameOk = (chGame: string, p: TgParsed) => chGame === 'both' || !('match' in p) || !p.match || p.match.game === chGame;
 
-type PagePost = { id: number; at: string; text: string; photos: string[]; poll?: boolean };
+type PagePost = { id: number; at: string; text: string; photos: string[]; poll?: boolean; replyTo?: number };
 
 /** The caption + what OCR read on its screenshots (up to 2) — what the parser sees. */
 /** What a bet slip on the screenshot shows: its state and money. */
 export interface Slip { status: NonNullable<AiTip['status']>; stake: number | null; currency: string | null; payout: number | null; /** payout ÷ stake as the slip shows it — the true odds of the bet */ odds?: number | null }
 const STATUS_UA: Record<string, string> = { won: 'виграш', lost: 'програш', pending: 'очікується', cashout: 'продано', void: 'повернення' };
 
-type Read = { ocr: string; full: string; ai?: boolean; slip?: Slip | null; tip?: AiRead; readBy: 'ai' | 'rules' | 'template' | 'cache' | 'ocr' | 'slip' | 'caption'; hash?: string | null; parsed?: TgParsed };
+type Read = { ocr: string; full: string; ai?: boolean; slip?: Slip | null; tip?: AiRead; readBy: 'ai' | 'rules' | 'template' | 'cache' | 'ocr' | 'slip' | 'caption'; hash?: string | null; parsed?: TgParsed; ocrBy?: Map<string, string> };
 /** What one post says, the cheapest way that is still right:
  *  surely not a tip by plain rules → no request; a channel whose text template the parser knows → no request;
  *  the same screenshot read before → its answer; else the reader (with the channel's corrected examples) — or OCR when no reader answers. */
@@ -91,7 +91,8 @@ async function readPost(ctx: Ctx, post: PagePost): Promise<Read> {
   }
   let hash: string | null = null, ai: AiRead | null = ctx.pre.get(post.id) ?? null, readBy: Read['readBy'] = 'ai';
   let ocrText: string | null = null;
-  const ocrAll = async () => { if (ocrText == null) { const parts: string[] = []; for (const url of post.photos.slice(0, 2)) { const t = await ocrImage(url); if (t) parts.push(t); } ocrText = parts.join('\n\n'); } return ocrText; };
+  const ocrBy = new Map<string, string>();
+  const ocrAll = async () => { if (ocrText == null) { const parts: string[] = []; for (const url of post.photos.slice(0, 2)) { const t = await ocrImage(url); ocrBy.set(url, t); if (t) parts.push(t); } ocrText = parts.join('\n\n'); } return ocrText; };
   const ocrSlip = (t: string): Slip | null => { const s0 = slipFromOcr(t); return s0 ? { status: s0.status, stake: s0.stake, currency: s0.currency, payout: s0.payout, odds: s0.odds } : null; };
   if (!ai) {
     const { imgs, hash: h } = post.photos.length ? await loadImages(post.photos) : { imgs: [], hash: null };
@@ -107,7 +108,7 @@ async function readPost(ctx: Ctx, post: PagePost): Promise<Read> {
       if (fullTip(cap)) {
         const t = await ocrAll(), slip = ocrSlip(t);
         saved.caption++;
-        return { ocr: `Прогноз з підпису, гроші з OCR${slip?.stake ? `: ставка ${slip.stake}${slip.currency ? ` ${slip.currency}` : ''}` : ''}\n${t}`, full: post.text, slip, readBy: 'caption', hash };
+        return { ocr: `Прогноз з підпису, гроші з OCR${slip?.stake ? `: ставка ${slip.stake}${slip.currency ? ` ${slip.currency}` : ''}` : ''}\n${t}`, full: post.text, slip, readBy: 'caption', hash, ocrBy };
       }
       // a bookmaker's slip OCR reads in full (teams, market, pick, odds): no request
       const t = await ocrAll(), sb = slipBet(t, post.at, ctx.list);
@@ -115,7 +116,7 @@ async function readPost(ctx: Ctx, post: PagePost): Promise<Read> {
         const slip = ocrSlip(t);
         saved.slip++;
         const tip: AiRead = { ...marketToAi(sb.market, sb.pick || null, sb.odds), team1: sb.match.team1, team2: sb.match.team2, status: slip?.status ?? null, stake: slip?.stake ?? null, currency: slip?.currency ?? null, payout: slip?.payout ?? null };
-        return { ocr: `Квиток прочитано OCR без ШІ: ${sb.market}${sb.pick ? ` · ${sb.pick}` : ''} @${sb.odds}${slip?.stake ? ` · ставка ${slip.stake}${slip.currency ? ` ${slip.currency}` : ''}` : ''}\n${t}`, full: '', slip, tip, readBy: 'slip', hash, parsed: sb };
+        return { ocr: `Квиток прочитано OCR без ШІ: ${sb.market}${sb.pick ? ` · ${sb.pick}` : ''} @${sb.odds}${slip?.stake ? ` · ставка ${slip.stake}${slip.currency ? ` ${slip.currency}` : ''}` : ''}\n${t}`, full: '', slip, tip, readBy: 'slip', hash, parsed: sb, ocrBy };
       }
     }
     if (!ai) ai = await aiReadPost(post.text, post.photos, hint, { imgs, examples: ctx.examples });
@@ -132,18 +133,58 @@ async function readPost(ctx: Ctx, post: PagePost): Promise<Read> {
     const money = slip ? ` · квиток: ${STATUS_UA[slip.status]}${slip.stake ? `, ставка ${slip.stake}${slip.currency ? ` ${slip.currency}` : ''}` : ''}${slip.payout ? `, виплата ${slip.payout}` : ''}` : '';
     const legsTxt = ai.market === 'express' && ai.legs?.length ? ` · ${ai.legs.map((l) => `${l.team1} — ${l.team2}: ${l.pick || ''}${l.odds ? ` @${l.odds}` : ''}`).join('; ')}` : '';
     const who = ai.by ? ` (${ai.by})` : '', doubt = ai.doubt ? ` · РОЗБІЖНІСТЬ: ${ai.doubt}` : '';
-    return { ocr: `ШІ${who}: ${line ? line.replace(/\n/g, ' · ') : 'не прогноз'}${legsTxt}${money}${doubt}`, full: line, ai: true, slip, tip: ai, readBy, hash };
+    return { ocr: `ШІ${who}: ${line ? line.replace(/\n/g, ' · ') : 'не прогноз'}${legsTxt}${money}${doubt}`, full: line, ai: true, slip, tip: ai, readBy, hash, ocrBy };
   }
   // no reader answered: what OCR read, with the slip's money (the AI reads it again when a reader is back — readerReady in the cycle)
   const ocr = await ocrAll();
   const slip = ocrSlip(ocr);
   // no reader: a bookmaker's slip OCR reads in full is still a tip (the AI reads it again later)
   const sb = post.photos.length ? slipBet(ocr, post.at, ctx.list) : null;
-  if (sb) return { ocr: `Квиток прочитано OCR без ШІ: ${sb.market}${sb.pick ? ` · ${sb.pick}` : ''} @${sb.odds}\n${ocr}`, full: '', slip, readBy: 'slip', hash, parsed: sb };
-  return { ocr, full: [post.text, ocr].filter(Boolean).join('\n'), readBy: 'ocr', hash, slip };
+  if (sb) return { ocr: `Квиток прочитано OCR без ШІ: ${sb.market}${sb.pick ? ` · ${sb.pick}` : ''} @${sb.odds}\n${ocr}`, full: '', slip, readBy: 'slip', hash, parsed: sb, ocrBy };
+  return { ocr, full: [post.text, ocr].filter(Boolean).join('\n'), readBy: 'ocr', hash, slip, ocrBy };
 }
 /** Requests not spent since the start: posts sorted by rules, by a channel's template, slips read before (shown in the admin). */
 export const saved = { rules: 0, template: 0, cache: 0, slip: 0, caption: 0, since: new Date().toISOString() };
+
+/** The second, third … bet of one post: an album of slips (each OCR reads in full) or several bet lines in the caption («1 карта NAVI 1.8, 2 карта Spirit 2.1»).
+ *  Each is a row of its own (post id × 1000 + n, part_of = the post), counted and settled like any tip; rebuilt when the post is read again. */
+async function saveExtras(ctx: Ctx, post: PagePost, main: Extract<TgParsed, { kind: 'bet' }>, ocrBy?: Map<string, string>): Promise<void> {
+  const { handle, list, ch } = ctx;
+  await pool.query('DELETE FROM tg_posts WHERE handle = $1 AND part_of = $2 AND fixed_by IS NULL', [handle, post.id]);
+  const key = (b: Extract<TgParsed, { kind: 'bet' }>) => `${b.match.id}|${b.market}|${normalizeTeam(b.pick || '')}`;
+  const seen = new Set([key(main)]);
+  const found: { bet: Extract<TgParsed, { kind: 'bet' }>; text: string; slip: Slip | null }[] = [];
+  // an album: each screenshot a slip of its own
+  if (post.photos.length >= 2) {
+    for (const url of post.photos.slice(0, 4)) {
+      const t = ocrBy?.get(url) ?? await ocrImage(url);
+      const b = t ? slipBet(t, post.at, list) : null;
+      if (!b || seen.has(key(b))) continue;
+      seen.add(key(b));
+      const o = slipFromOcr(t);
+      found.push({ bet: b, text: `Квиток з альбому: ${b.match.team1} — ${b.match.team2}`, slip: o ? { status: o.status, stake: o.stake, currency: o.currency, payout: o.payout, odds: o.odds } : null });
+    }
+  }
+  // the caption: several bet lines, each read with the lines that are not bets (the match)
+  const lines = post.text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const betLine = (l: string) => /(?:^|[^\d])[1-9]\d?[.,]\d{1,3}(?!\d)|(?<![\p{L}])(карт[аеуы]|map|фора|тотал|п[12])(?![\p{L}])/iu.test(l);
+  const bets = lines.filter(betLine), rest = lines.filter((l) => !betLine(l));
+  if (bets.length >= 2 && bets.length <= 6) {
+    for (const l of bets) {
+      const b = parseTgPost([...rest, l].join('\n'), post.at, list, ch.rules || {});
+      if (b.kind !== 'bet' || !b.pick && !/Total/.test(b.market) || seen.has(key(b))) continue;
+      seen.add(key(b));
+      found.push({ bet: b, text: l, slip: null });
+    }
+  }
+  let k = 0;
+  for (const f of found.slice(0, 5)) {
+    const id = post.id * 1000 + ++k;
+    await savePost(handle, { id, at: post.at, text: f.text, photos: [] }, '', f.bet, true);
+    await pool.query(`UPDATE tg_posts SET part_of = $3, read_by = 'slip', is_live = $4 WHERE handle = $1 AND post_id = $2`, [handle, id, post.id, placedLive(f.bet.match.id, post.at, ctx.feed)]);
+    if (f.slip) await applySlip(handle, id, f.slip);
+  }
+}
 
 /** Text-only posts the reader has to read: up to 5 in one request (photos are read one by one). */
 async function prereadTexts(ctx: Ctx, posts: PagePost[]): Promise<void> {
@@ -208,12 +249,13 @@ export async function moneyFromOcr(): Promise<number> {
 
 /** One post read again from what is saved (its text and screenshots), the admin's sorting dropped. */
 export async function rereadPost(handle: string, postId: number): Promise<boolean> {
-  const r = (await pool.query<{ posted_at: string; text: string | null; photos: string[] | null }>('SELECT posted_at, text, photos FROM tg_posts WHERE handle = $1 AND post_id = $2', [handle, postId])).rows[0];
+  const r = (await pool.query<{ posted_at: string; text: string | null; photos: string[] | null; reply_to: number | null; part_of: number | null }>('SELECT posted_at, text, photos, reply_to, part_of FROM tg_posts WHERE handle = $1 AND post_id = $2', [handle, postId])).rows[0];
   if (!r) return false;
+  if (r.part_of) return rereadPost(handle, r.part_of); // a second bet of a post: the whole post is read again
   const ctx = await channelCtx(handle, undefined);
   if (!ctx) return false;
   await pool.query(`UPDATE tg_posts SET fixed_by = NULL, ai_wrong = false, photos = NULL WHERE handle = $1 AND post_id = $2`, [handle, postId]);
-  await handlePost(ctx, { id: postId, at: new Date(r.posted_at).toISOString(), text: r.text || '', photos: r.photos || [] }, true);
+  await handlePost(ctx, { id: postId, at: new Date(r.posted_at).toISOString(), text: r.text || '', photos: r.photos || [], ...(r.reply_to ? { replyTo: r.reply_to } : {}) }, true);
   await settleTgTips().catch(() => 0);
   return true;
 }
@@ -369,6 +411,19 @@ async function handlePost(ctx: Ctx, post: PagePost, backfill: boolean): Promise<
   if (parsed.kind === 'bet' && ourOdds && parsed.odds && (parsed.odds > ourOdds * 2.5 || parsed.odds * 2.5 < ourOdds))
     parsed = { kind: 'unknown', reason: `Коефіцієнт ${parsed.odds} не схожий на справжній (у нас ${ourOdds})`, match: parsed.match, odds: parsed.odds };
   parsed = await repeatOf(handle, post, parsed, slip);
+  // a reply to a tip of the channel («✅✅✅», a won slip): the result and the money go to exactly that tip
+  let replyMark: 'Win' | 'Loss' | 'Void' | null = null;
+  if (post.replyTo && parsed.kind !== 'bet') {
+    const parent = (await pool.query<{ kind: string }>('SELECT kind FROM tg_posts WHERE handle = $1 AND post_id = $2', [handle, post.replyTo])).rows[0];
+    if (parent?.kind === 'bet') {
+      replyMark = slip && slip.status !== 'pending' ? null : resultMark(post.text);
+      if ((slip && slip.status !== 'pending') || replyMark) parsed = { kind: 'other', reason: 'Результат', repeatOf: post.replyTo };
+    }
+  }
+  // an edited tip: the line the channel added («✅ зашло», «❌») is its result
+  const before = backfill && parsed.kind === 'bet' ? (await pool.query<{ text: string | null; edited_at: string | null }>('SELECT text, edited_at FROM tg_posts WHERE handle = $1 AND post_id = $2', [handle, post.id])).rows[0] : undefined;
+  const added = before?.edited_at && before.text ? post.text.split('\n').filter((l) => l.trim() && !before.text!.includes(l.trim())).join(' ') : '';
+  const editMark = added ? resultMark(added) : null;
   // a settled slip the reader did not take for a tip («Выиграна · Ординар … 243 USDT»): the result and the money of the tip it belongs to
   if (parsed.kind === 'other' && !parsed.reason && slip && slip.status !== 'pending') parsed = await resultSlip(handle, post, tip ?? { isTip: false }, slip, full) ?? parsed;
   await savePost(handle, post, ocr, parsed, backfill);
@@ -386,6 +441,13 @@ async function handlePost(ctx: Ctx, post: PagePost, backfill: boolean): Promise<
         '{bookmakers}', COALESCE(profile->'bookmakers', '{}'::jsonb) || CASE WHEN $3::text IS NULL THEN '{}'::jsonb ELSE jsonb_build_object($3::text, COALESCE((profile->'bookmakers'->>$3)::int, 0) + 1) END) WHERE handle = $1`,
       [handle, mk, tip?.bookmaker ? tip.bookmaker.trim().slice(0, 30) : null]).catch(() => {});
   }
+  if (post.replyTo) await pool.query('UPDATE tg_posts SET reply_to = $3 WHERE handle = $1 AND post_id = $2', [handle, post.id, post.replyTo]);
+  if (parsed.kind === 'other' && parsed.reason === 'Результат' && post.replyTo && parsed.repeatOf === post.replyTo) {
+    if (slip && slip.status !== 'pending') await applySlip(handle, post.replyTo, slip, true, true);
+    else if (replyMark) await pool.query(`UPDATE tg_posts SET result = $3 WHERE handle = $1 AND post_id = $2 AND kind = 'bet' AND fixed_by IS NULL`, [handle, post.replyTo, replyMark]);
+  }
+  if (editMark && parsed.kind === 'bet') await pool.query(`UPDATE tg_posts SET result = $3 WHERE handle = $1 AND post_id = $2 AND fixed_by IS NULL`, [handle, post.id, editMark]);
+  if (parsed.kind === 'bet' && !post.poll) await saveExtras(ctx, post, parsed, rd.ocrBy).catch((e) => console.warn('[tg] extras:', (e as Error).message));
   if (slip && parsed.kind === 'bet') await applySlip(handle, post.id, slip);
   // «Результат»: the post shows its own slip (won / lost), the tip and its money stay counted once — on the first post
   else if (slip && parsed.kind === 'other' && parsed.reason === 'Результат') await pool.query('UPDATE tg_posts SET slip = $3, stake = $4, currency = $5, payout = $6 WHERE handle = $1 AND post_id = $2', [handle, post.id, slip.status, slip.stake, slip.currency, slip.payout]);

@@ -31,7 +31,7 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
     // all time: what the channel posted and how its tips went (a tip = 100 on the odds; repeats are not counted)
     pool.query<{ handle: string; total: string; tips: string; unknown: string; other: string; repeats: string; won: string; lost: string; pending: string; profit: string | null; priced: string; first_at: string | null;
       o_won: string; o_lost: string; o_profit: string | null; o_priced: string; confirmed: string; mismatches: string; ours_only: string; live: string; live_won: string; live_lost: string; deleted: string; edited: string; deleted_lost: string; odds_high: string; w_won: string; w_lost: string; w_profit: string | null; w_priced: string }>(
-      `SELECT handle, count(*) AS total, count(*) FILTER (WHERE kind = 'bet') AS tips, count(*) FILTER (WHERE kind = 'unknown') AS unknown,
+      `SELECT handle, count(*) FILTER (WHERE part_of IS NULL) AS total, count(*) FILTER (WHERE kind = 'bet') AS tips, count(*) FILTER (WHERE kind = 'unknown') AS unknown,
               count(*) FILTER (WHERE kind = 'other' AND reason IS DISTINCT FROM 'Повтор' AND reason IS DISTINCT FROM 'Результат') AS other, count(*) FILTER (WHERE reason IN ('Повтор', 'Результат')) AS repeats,
               count(*) FILTER (WHERE kind = 'bet' AND result = 'Win') AS won, count(*) FILTER (WHERE kind = 'bet' AND result = 'Loss') AS lost,
               count(*) FILTER (WHERE kind = 'bet' AND result IS NULL) AS pending,
@@ -134,7 +134,7 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
   });
 });
 
-const postCols = `handle, post_id AS "postId", posted_at AS "postedAt", text, kind, reason, game, match_id AS "matchId", team1, team2, market, pick, odds::float AS odds, result, score, fixed_by AS "fixedBy", COALESCE(photos, '{}') AS photos, ocr, slip, stake::float AS stake, currency, payout::float AS payout, our_odds::float AS "ourOdds", odds_high AS "oddsHigh", claim, our_result AS "ourResult", settled_by AS "settledBy", mismatch, is_live AS "isLive", deleted_at AS "deletedAt", edited_at AS "editedAt", legs, read_by AS "readBy"`;
+const postCols = `handle, post_id AS "postId", posted_at AS "postedAt", text, kind, reason, game, match_id AS "matchId", team1, team2, market, pick, odds::float AS odds, result, score, fixed_by AS "fixedBy", COALESCE(photos, '{}') AS photos, ocr, slip, stake::float AS stake, currency, payout::float AS payout, our_odds::float AS "ourOdds", odds_high AS "oddsHigh", claim, our_result AS "ourResult", settled_by AS "settledBy", mismatch, is_live AS "isLive", deleted_at AS "deletedAt", edited_at AS "editedAt", legs, read_by AS "readBy", part_of AS "partOf", reply_to AS "replyTo"`;
 /** A tip on a match of our feed that is on now / ahead: its live state and score. */
 /** Screenshots of private channels («tgacc://…») as signed links to /api/tg-media (the admin's browser opens them). */
 const media = (c: { req: { url: string; header: (k: string) => string | undefined } }) => {

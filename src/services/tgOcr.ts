@@ -43,13 +43,15 @@ export function ocrImage(url: string): Promise<string> {
         buf = Buffer.from(await res.arrayBuffer());
       }
       if (!buf.length || buf.length > MAX_BYTES) return '';
-      const img = await prepare(buf), bw = await prepare(buf, true);
+      const img = await prepare(buf), bw = await prepare(buf, true), inv = await darkPass(buf);
       const w = await getWorker();
       // four passes: page layout, one uniform block (keeps «Карта 1: Переможець карти: X 1.58» on one line), sparse text (small labels: «3DMAX», «1.90»)
       const passes: string[] = [];
       for (const psm of ['3', '6', '11']) { await w.setParameters({ tessedit_pageseg_mode: psm }); passes.push((await w.recognize(img)).data.text); }
       await w.setParameters({ tessedit_pageseg_mode: '6' });
       passes.push((await w.recognize(bw)).data.text); // + black-and-white: faint grey labels
+      // a dark slip (1win, BC.Game: light print on navy): inverted to dark-on-white, the way tesseract reads best
+      if (inv) { await w.setParameters({ tessedit_pageseg_mode: '6' }); passes.push((await w.recognize(inv)).data.text); }
       ocrStats.images++; ocrStats.ms += Date.now() - t0; ocrStats.lastAt = new Date().toISOString();
       return passes.reduce((acc, x) => mergeOcr(acc, x));
     } catch (e) {
@@ -77,6 +79,19 @@ async function prepare(buf: Buffer, light = false): Promise<Buffer> {
   } catch { return buf; }
 }
 
+/** A dark screenshot (mean brightness under 110): inverted, scaled up, contrast-stretched and made black-and-white; null for a light one. */
+async function darkPass(buf: Buffer): Promise<Buffer | null> {
+  try {
+    const sharp = (await import('sharp')).default;
+    const st = await sharp(buf).grayscale().stats();
+    if ((st.channels[0]?.mean ?? 255) >= 110) return null;
+    const w = (await sharp(buf).metadata()).width || 0, k = w && w < 700 ? Math.min(4, 1600 / w) : 1;
+    let img = sharp(buf).grayscale().negate({ alpha: false });
+    if (k > 1.05) img = img.resize({ width: Math.round(w * k), kernel: 'lanczos3' });
+    return await img.normalise().sharpen({ sigma: 1 }).threshold(150).png().toBuffer();
+  } catch { return null; }
+}
+
 /** Lines of the first pass, then lines only the second pass found. */
 export function mergeOcr(a: string, b: string): string {
   const A = cleanOcr(a), seen = new Set(A.split('\n').map((l) => l.toLowerCase()));
@@ -93,7 +108,8 @@ export async function closeOcr(): Promise<void> {
 
 /** Drops OCR noise: empty lines and lines with no letters or digits. */
 export function cleanOcr(s: string): string {
-  return s.split('\n').map((l) => l.replace(/\s+/g, ' ').trim()).filter((l) => /[\p{L}\d]{2}/u.test(l)).join('\n').slice(0, 3000);
+  // money split by OCR («1 55,00 USDT», «2 43,35») joined back — a lone digit before «dd,dd»
+  return s.split('\n').map((l) => l.replace(/\s+/g, ' ').trim().replace(/(^|[^\d.,])(\d) (\d{2}[.,]\d{2})(?!\d)/g, '$1$2$3')).filter((l) => /[\p{L}\d]{2}/u.test(l)).join('\n').slice(0, 3000);
 }
 
 /** The money on a bookmaker's slip from OCR text: «Сумма ставки 1 55,00 USDT», «Возможный выигрыш 2 43,35», «Открыта / Выиграна / Проиграна».

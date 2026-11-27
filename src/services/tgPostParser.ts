@@ -210,7 +210,7 @@ export function parseTgPost(text: string, postedAt: string, cands: TgCandidate[]
 }
 
 /** Text of a t.me/s/<handle> page: channel info and its last ~20 posts (newest last). */
-export interface TgPage { title: string | null; subscribers: number | null; posts: { id: number; at: string; text: string; photos: string[]; poll?: boolean }[]; isPublic: boolean }
+export interface TgPage { title: string | null; subscribers: number | null; posts: { id: number; at: string; text: string; photos: string[]; poll?: boolean; replyTo?: number }[]; isPublic: boolean }
 const ENT: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", nbsp: ' ' };
 export function htmlText(h: string): string {
   return h.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '').replace(/&(#\d+|#x[0-9a-f]+|\w+);/gi, (m, e: string) =>
@@ -234,7 +234,23 @@ export function parseTgPage(html: string): TgPage {
     for (const ph of block.matchAll(/class="tgme_widget_message_photo_wrap[^"]*"[^>]*?style="[^"]*background-image:url\('([^']+)'\)/g)) if (!photos.includes(ph[1])) photos.push(ph[1]);
     const poll = /class="tgme_widget_message_poll/.test(block);
     const pollQ = poll ? (/class="tgme_widget_message_poll_question"[^>]*>([\s\S]*?)<\/div>/.exec(block) || [])[1] : undefined;
-    posts.push({ id: Number(m[1]), at: new Date(dt[1]).toISOString(), text: tm ? htmlText(tm[1]) : pollQ ? htmlText(pollQ) : '', photos: photos.slice(0, 6), ...(poll ? { poll: true } : {}) });
+    // a reply to another post of the channel: <a class="tgme_widget_message_reply" href="https://t.me/<handle>/<id>">
+    const rp = /class="tgme_widget_message_reply"[^>]*href="https?:\/\/t\.me\/[^/"]+\/(\d+)/.exec(block) || /href="https?:\/\/t\.me\/[^/"]+\/(\d+)"[^>]*class="tgme_widget_message_reply"/.exec(block);
+    posts.push({ id: Number(m[1]), at: new Date(dt[1]).toISOString(), text: tm ? htmlText(tm[1]) : pollQ ? htmlText(pollQ) : '', photos: photos.slice(0, 6), ...(poll ? { poll: true } : {}), ...(rp ? { replyTo: Number(rp[1]) } : {}) });
   }
   return { title: title ? htmlText(title) : null, subscribers, posts, isPublic: /tgme_channel_info|tgme_widget_message/.test(html) };
+}
+
+/** The result a channel writes about its tip («✅✅✅», «зашло», «❌ минус», «возврат»): Win / Loss / Void, or null.
+ *  Only a short post (or the added line of an edited one) — a long text with a ✅ in it is a new tip. */
+export function resultMark(text: string): 'Win' | 'Loss' | 'Void' | null {
+  const t = (text || '').trim();
+  if (!t || t.length > 160) return null;
+  const win = (t.match(/✅|✔️|☑️|🟢|💚/gu) || []).length, loss = (t.match(/❌|✖️|🔴|⛔|🚫/gu) || []).length;
+  const wWords = /(?<![\p{L}])(зашл[оа]|заход|зайшл[оа]|выиграл[аи]?|виграл[аи]?|плюс(?:ом|ик)?|win|won|победа|перемога)(?![\p{L}])/iu.test(t);
+  const lWords = /(?<![\p{L}])(не\s*зашл[оа]|не\s*зайшл[оа]|проиграл[аи]?|програл[аи]?|минус|мінус|lose|lost|loss|слив|не\s*зашёл)(?![\p{L}])/iu.test(t);
+  if (/(?<![\p{L}])(возврат|повернення|рефанд|refund|void)(?![\p{L}])/iu.test(t)) return 'Void';
+  if ((loss > win && loss > 0) || (lWords && !win)) return 'Loss';
+  if ((win > loss && win > 0) || (wWords && !loss)) return 'Win';
+  return null;
 }

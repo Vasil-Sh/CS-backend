@@ -76,3 +76,9 @@ describe('slip money from OCR', () => {
   });
   it('no stake — no slip', () => { expect(slipFromOcr('NAVI — Spirit 1.85')).toBe(null); });
 });
+
+describe('OCR money split by spaces', () => {
+  it('is joined back', () => {
+    expect(cleanOcr('Сумма ставки 1 55,00 USDT\nВыигрыш 2 43,35 USDT\nWildcard 13 1')).toBe('Сумма ставки 155,00 USDT\nВыигрыш 243,35 USDT\nWildcard 13 1');
+  });
+});

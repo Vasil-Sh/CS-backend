@@ -77,3 +77,20 @@ describe('«Фора по картам» without a sign', () => {
     expect(parseTgPost('M80 - 100 Thieves\nФора по картам, M80 1.5 1.56', '2026-11-27T11:52:00Z', c)).toMatchObject({ kind: 'bet', market: 'Handicap +1.5', pick: 'M80', odds: 1.56 });
   });
 });
+
+import { parseTgPage, resultMark } from './tgPostParser';
+describe('replies and result marks', () => {
+  it('a reply link on t.me/s', () => {
+    const html = '<div class="tgme_widget_message" data-post="smatikbet/15700"><a class="tgme_widget_message_reply" href="https://t.me/smatikbet/15688"><div class="tgme_widget_message_reply_text js-message_reply_text">Прогноз</div></a><div class="tgme_widget_message_text js-message_text" dir="auto">✅✅✅</div><time datetime="2026-11-27T15:00:00+00:00"></time></div>';
+    expect(parseTgPage(html).posts[0]).toMatchObject({ id: 15700, text: '✅✅✅', replyTo: 15688 });
+  });
+  it('the result a channel writes', () => {
+    expect(resultMark('✅✅✅')).toBe('Win');
+    expect(resultMark('Зашло 🔥')).toBe('Win');
+    expect(resultMark('❌ минус, бывает')).toBe('Loss');
+    expect(resultMark('не зашло')).toBe('Loss');
+    expect(resultMark('Возврат')).toBe('Void');
+    expect(resultMark('Сегодня стрим в 20:00')).toBe(null);
+    expect(resultMark('✅ '.repeat(3) + 'Длинный текст прогноза на матч '.repeat(8))).toBe(null);
+  });
+});
