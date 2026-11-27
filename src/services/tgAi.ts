@@ -130,17 +130,34 @@ export const PROVIDERS: Provider[] = [
   { id: 'gemini-lite', label: 'Gemini Flash-Lite', keyName: 'GEMINI_API_KEY', key: () => process.env.GEMINI_API_KEY, model: () => 'gemini-flash-lite-latest', call: gemini },
 ];
 /** Per reader: today's requests, its last error, and until when it rests (a daily quota → the next Pacific day, a minute limit / overload → a few minutes). */
-export const readerState: Record<string, { ok: number; failed: number; lastError: string | null; restUntil: number }> = {};
-const st = (id: string) => (readerState[id] ||= { ok: 0, failed: 0, lastError: null, restUntil: 0 });
+export const readerState: Record<string, { ok: number; failed: number; lastError: string | null; restUntil: number; streak: number }> = {};
+const st = (id: string) => (readerState[id] ||= { ok: 0, failed: 0, lastError: null, restUntil: 0, streak: 0 });
 const nextPacificMidnight = () => { const d = new Date(Date.now() - 8 * 3_600_000); d.setUTCHours(24, 0, 0, 0); return d.getTime() + 8 * 3_600_000; };
 
 /** The text of an answer (Gemini or OpenAI-style), its JSON object only. */
 function answerText(body: unknown): string {
   const b = body as Resp & { choices?: { message?: { content?: string } }[] };
   const c = b.choices?.[0]?.message?.content as unknown;
-  const t = b.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || (c && typeof c === 'object' ? JSON.stringify(c) : (c as string)) || '';
-  const m = /\{[\s\S]*\}/.exec(t.replace(/<think>[\s\S]*?<\/think>/g, ''));
-  return m ? m[0] : t;
+  const t = (b.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || (c && typeof c === 'object' ? JSON.stringify(c) : (c as string)) || '')
+    .replace(/<think>[\s\S]*?<\/think>/g, '').replace(/```(?:json)?/gi, '');
+  return jsonIn(t) ?? t;
+}
+/** The first JSON object in a model's text («Here is the answer: {…} Hope it helps»): balanced braces, trailing commas dropped. */
+export function jsonIn(t: string): string | null {
+  for (let i = t.indexOf('{'); i >= 0; i = t.indexOf('{', i + 1)) {
+    let depth = 0, inStr = false, esc = false;
+    for (let j = i; j < t.length; j++) {
+      const ch = t[j];
+      if (inStr) { if (esc) esc = false; else if (ch === '\\') esc = true; else if (ch === '"') inStr = false; continue; }
+      if (ch === '"') inStr = true;
+      else if (ch === '{') depth++;
+      else if (ch === '}' && --depth === 0) {
+        const cand = t.slice(i, j + 1).replace(/,\s*([}\]])/g, '$1');
+        try { JSON.parse(cand); return cand; } catch { break; }
+      }
+    }
+  }
+  return null;
 }
 
 /** One reader on one post: the parsed answer, or why not. */
@@ -160,13 +177,18 @@ async function ask(p: Provider, prompt: string, imgs: Img[], schema: object = SC
       // a 200 whose body is not JSON («OK …» from a proxy or a model page): this reader failed, the next one reads
       const body = await res.text();
       let parsed: unknown;
-      try { parsed = JSON.parse(body); } catch { s.failed++; s.lastError = `відповідь не JSON: ${body.replace(/\s+/g, ' ').slice(0, 80)}`; return { why: s.lastError }; }
+      try { parsed = JSON.parse(body); } catch {
+        s.failed++; s.lastError = `відповідь не JSON (${res.status}, ${res.headers.get('content-type') || 'без типу'}): ${body.replace(/\s+/g, ' ').slice(0, 80) || 'порожньо'}`;
+        if (++s.streak >= 3) { s.restUntil = Date.now() + 30 * 60_000; s.streak = 0; } // three in a row: it rests half an hour, the next reader reads
+        return { why: s.lastError };
+      }
       const txt = answerText(parsed);
       const why = check(txt);
       if (why) { s.failed++; s.lastError = why; return { why }; }
       s.ok++; aiStats.model = `${p.label}`;
       let raw: unknown;
-      try { raw = JSON.parse(txt); } catch { s.failed++; s.lastError = 'відповідь не JSON'; return { why: s.lastError }; }
+      try { raw = JSON.parse(txt); } catch { s.failed++; s.lastError = `відповідь не JSON: ${txt.replace(/\s+/g, ' ').slice(0, 80)}`; if (++s.streak >= 3) { s.restUntil = Date.now() + 30 * 60_000; s.streak = 0; } return { why: s.lastError }; }
+      s.streak = 0;
       return { tip: raw as AiTip, raw };
     }
     const raw = await res.text();

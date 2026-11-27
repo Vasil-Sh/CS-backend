@@ -25,8 +25,14 @@ describe('a bookmaker slip read by OCR', () => {
     expect(slipBet(s2(['Wildcard 13 11 1', 'Chinggis Warriors 7 13 1', 'Карта 3. Фора, Chinggis Warriors 4.5 1.57']), at, cands)).toMatchObject({ market: 'Map 3 Handicap +4.5', pick: 'Chinggis Warriors', odds: 1.57 });
   });
   it('odds that disagree, an express, an unknown match — left to the AI', () => {
-    expect(slipBet(slip(['Natus Vincere', 'Team Spirit', 'Победитель, Team Spirit 2.40']), at, cands)).toBe(null);
     expect(slipBet(slip(['Экспресс', 'Natus Vincere', 'Team Spirit', 'Победитель, Team Spirit 1.52']), at, cands)).toBe(null);
     expect(slipBet(slip(['Vitality', 'MOUZ', 'Победитель, MOUZ 1.52']), at, cands)).toBe(null);
+  });
+});
+
+describe('a slip OCR of 1win «Фора по картам»', () => {
+  const t = ['27 ноября 2026 г. в 13:50', 'Открыта • Ординар 1.56', 'Сумма ставки 350,00 USDT', 'Возможный выигрыш', '546,00 USDT', 'Событие 1', 'M80', '100 Thieves', 'Фора по картам, M80 1.5 1.56'].join('\n');
+  it('a feed match', () => {
+    expect(slipBet(t, '2026-11-27T11:52:00Z', [{ id: 'm', game: 'cs2', team1: 'M80', team2: '100 Thieves', start: '2026-11-27T12:00:00Z' }])).toMatchObject({ market: 'Handicap +1.5', pick: 'M80', odds: 1.56 });
   });
 });

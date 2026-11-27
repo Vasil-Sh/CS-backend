@@ -20,12 +20,12 @@ const BARE_ODDS = /(?:^|\s)([1-9][.,]\d{1,3})(?=\s|$|[^\d])/;
 const EXPRESS = re(String.raw`экспресс|експрес|<BexpressB>|<BparlayB>`);
 const INDIVIDUAL = re(String.raw`<B[иі]т[бм]|індивідуальн|индивидуальн`);
 const TOTAL = re(String.raw`(?:<B(тб|тм|tb|tm)B>|<Bтотал\s*(больше|більше|меньше|менше|over|under)|<B(over|under)B>)\s*\(?\s*(\d+[.,]5)`);
-const HCP = re(String.raw`(?:<Bф(?:ора)?|<Bhandicap|<Bhcp)\s*(?:([12])|([^\d+\-−–@\n]{0,30}?))\s*\(?\s*([+\-−–]\s?\d+[.,]5)`);
+const HCP = re(String.raw`(?:<Bф(?:ора)?|<Bhandicap|<Bhcp)\s*(?:([12])|([^+\-−–@\n]{0,30}?))\s*\(?\s*([+\-−–]\s?\d+[.,]5)`);
 const P12 = re(String.raw`<B(п|w|p)\s?([12])(?![${L}]|[.,]\d)`);
 // «1 карта», «1-ая карта», «на 2карту», «Карта 2:», «карте #2», «map 2» — a bet on one map, not the series
 const MAP = re(String.raw`(?:перш|перв|друг|втор|трет|четв|п.?ят)\S*\s+карт|(?<![\d.,])[1-5]\s*-?(?:[ая]{1,2}|ша|га|тя|я|й)?\s*карт(?:а|у|е|і)(?![${L}])|<Bкарт(?:а|е|і|ы)\s*(?:#|№)?\s*[1-5](?!\d|[.,]\d)|<Bmap\s*(?:#|№)?\s*[1-5](?!\d|[.,]\d)|(?<![\d.,])[1-5]\s*-?\s*map(?![${L}])`);
 // a handicap on one map is in rounds; bookmakers print it without «+» («Карта 3. Фора, Chinggis Warriors 4.5»)
-const MAP_HCP = re(String.raw`(?:<Bф(?:ора)?|<Bhandicap|<Bhcp)\s*[,:]?\s*(?:([12])(?![\d.,])|([^\d+\-−–@\n]{0,40}?))\s*\(?\s*([+\-−–]?\s?\d{1,2}[.,]5)`);
+const MAP_HCP = re(String.raw`(?:<Bф(?:ора)?|<Bhandicap|<Bhcp)\s*[,:]?\s*(?:([12])(?![\d.,])|([^+\-−–@\n]{0,40}?))\s*\(?\s*(?<![\d.,])([+\-−–]?\s?\d{1,2}[.,]5)`);
 // other sports in the same channels (football screenshots): not ours
 const NOT_ESPORTS = re(String.raw`<Bуефа|<Bфутбол|<Bfootball|<Bsoccer|<Bnba|<Bnhl|<Bтайм|<Bполовин|<Bhalf\s?time|<Btotal in time period|<Bтеніс|<Bтеннис|<Bхокей|<Bхоккей|<Bбаскетбол|<B(фк|fc)B>`);
 const WIN = re(String.raw`перемо[гж]|побед|<BwinB>|<Bwinner|виграє|выиграет|забира|візьм|возьм|ставка на|ставлю на|<BберуB>`);
@@ -92,7 +92,8 @@ const slug = (s: string) => foldLatin(s).replace(/[^a-z0-9а-яіїєґё]+/g, '
 const num = (s: string) => Number(s.replace(',', '.').replace(/[−–]/, '-').replace(/\s/g, ''));
 
 export function parseTgPost(text: string, postedAt: string, cands: TgCandidate[], rules: TgRules = {}): TgParsed {
-  const t = text.replace(/\u00a0/g, ' ');
+  // «Фора по картам, M80 1.5» (a bookmaker's slip): a maps handicap printed without «+»
+  const t = text.replace(/\u00a0/g, ' ').replace(/(ф(?:ора)?|handicap)\s*(?:по\s*картам|на\s*карты|maps?)\s*[,:]?\s*([^\n+\-−–]{1,40}?)\s+(\d[.,]5)(?![\d])/gi, '$1 $2 +$3');
   const oddsM = ODDS.exec(t) || null;
   let odds = oddsM ? num(oddsM[1]) : null;
   const marketWords = TOTAL.test(t) || HCP.test(t) || P12.test(t) || WIN.test(t) || EXPRESS.test(t) || MAP.test(t);

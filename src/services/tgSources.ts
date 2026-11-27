@@ -132,6 +132,9 @@ async function readPost(ctx: Ctx, post: PagePost): Promise<Read> {
   // no reader answered: what OCR read, with the slip's money (the AI reads it again when a reader is back — readerReady in the cycle)
   const ocr = await ocrAll();
   const slip = ocrSlip(ocr);
+  // no reader: a bookmaker's slip OCR reads in full is still a tip (the AI reads it again later)
+  const sb = post.photos.length ? slipBet(ocr, post.at, ctx.list) : null;
+  if (sb) return { ocr: `Квиток прочитано OCR без ШІ: ${sb.market}${sb.pick ? ` · ${sb.pick}` : ''} @${sb.odds}\n${ocr}`, full: '', slip, readBy: 'slip', hash, parsed: sb };
   return { ocr, full: [post.text, ocr].filter(Boolean).join('\n'), readBy: 'ocr', hash, slip };
 }
 /** Requests not spent since the start: posts sorted by rules, by a channel's template, slips read before (shown in the admin). */

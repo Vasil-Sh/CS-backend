@@ -38,12 +38,12 @@ export function slipBet(ocr: string, postedAt: string, cands: TgCandidate[]): Ex
   // the match: both teams of a feed match in the text (the generic parser finds it)
   const p = parseTgPost(`${ocr}\nставка на`, postedAt, cands); // «ставка на» — so the parser looks for the match even when it does not know the market words
   const match = p.kind === 'bet' || p.kind === 'unknown' ? p.match : undefined;
-  if (!match || match.id.startsWith('tg:')) return null; // only matches of our feed: their names are known exactly
+  if (!match) return null; // a match of our feed, or the pair the post names («M80 - 100 Thieves»: linked to the feed by our check later)
   const money = slipFromOcr(ocr);
   const fromMoney = money?.payout && money.stake ? Math.round((money.payout / money.stake) * 100) / 100 : null;
-  const odds = b.odds ?? fromMoney;
+  const odds = b.odds != null && b.odds >= 1.01 && b.odds <= 20 ? b.odds : fromMoney;
   if (odds == null || odds < 1.01 || odds > 50) return null;
-  if (b.odds != null && fromMoney != null && Math.abs(b.odds - fromMoney) > 0.03) return null; // OCR misread one of them
+  // the printed odds and payout ÷ stake disagree: OCR misread one of them — the printed odds win when they look real
   const side = (s: string) => {
     const one = [match.team1, ...(match.aliases1 || [])].some((n) => near(s, n)), two = [match.team2, ...(match.aliases2 || [])].some((n) => near(s, n));
     return one === two ? 0 : one ? 1 : 2;

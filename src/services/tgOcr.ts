@@ -106,7 +106,7 @@ export function slipFromOcr(text: string): { status: 'won' | 'lost' | 'pending' 
   };
   const stake = num(/(?:сумм?а ставки|ставка|stake|bet amount)/);
   if (!stake || !(stake.n > 0)) return null;
-  const pay = num(/(?:возможный выигрыш|потенциальный выигрыш|можливий виграш|выигрыш|виграш|выплата|виплата|payout|to win|win)/);
+  const pay = num(/(?:возможный выигрыш|потенциальный выигрыш|можливий виграш|выигрыш|виграш|выплата|виплата|payout|to win|(?<![\da-z])win(?![a-z]))/); // not the «1win» logo
   const status = /выигран|виграно|выигрыш зачислен|\bwon\b/i.test(t) ? 'won' : /проигран|програно|\blost\b/i.test(t) ? 'lost' : /возврат|повернен|\bvoid\b/i.test(t) ? 'void' : /продан|cash ?out/i.test(t) ? 'cashout' : 'pending';
   const cur = (stake.cur || pay?.cur || (/USDT/i.test(t) ? 'USDT' : null));
   const c = !cur ? null : /USDT/i.test(cur) ? 'USDT' : /USD|\$/.test(cur) ? 'USD' : /RUB|₽|руб/i.test(cur) ? 'RUB' : /UAH|₴|грн/i.test(cur) ? 'UAH' : /EUR|€/.test(cur) ? 'EUR' : /KZT|₸/.test(cur) ? 'KZT' : null;

@@ -70,3 +70,10 @@ describe('rounds on one map', () => {
     expect(parseTgPost('Wildcard vs Chinggis Warriors\n2 карта тотал больше 26.5 @1.85', at, c)).toMatchObject({ market: 'Map 2 Total Over 26.5', odds: 1.85 });
   });
 });
+
+describe('«Фора по картам» without a sign', () => {
+  it('is a maps handicap +1.5', () => {
+    const c = [{ id: 'm', game: 'cs2' as const, team1: 'M80', team2: '100 Thieves', start: '2026-11-27T12:00:00Z' }];
+    expect(parseTgPost('M80 - 100 Thieves\nФора по картам, M80 1.5 1.56', '2026-11-27T11:52:00Z', c)).toMatchObject({ kind: 'bet', market: 'Handicap +1.5', pick: 'M80', odds: 1.56 });
+  });
+});

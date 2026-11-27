@@ -49,3 +49,11 @@ describe('tg learning', () => {
     expect(readerOrder().map((p) => p.id)).toEqual(['gemini', 'github', 'cloudflare', 'gemini-lite']);
   });
 });
+
+import { jsonIn } from './tgAi';
+describe('JSON in a model text', () => {
+  it('finds the object among words, braces in strings and a trailing comma', () => {
+    expect(jsonIn('Here is it: {"isTip": true, "pick": "a{b}", "odds": 1.5,} hope it helps {x}')).toBe('{"isTip": true, "pick": "a{b}", "odds": 1.5}');
+    expect(jsonIn('no json')).toBe(null);
+  });
+});
