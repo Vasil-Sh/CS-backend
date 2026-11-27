@@ -31,3 +31,21 @@ describe('channel trust', () => {
     expect(linkedHandles('Наш вип: t.me/smatikvip и @cs2_insider, бот @smatik_bot, сами мы @smatikbet', 'smatikbet')).toEqual(['smatikvip', 'cs2_insider']);
   });
 });
+
+describe('odd stake and chasing', () => {
+  it('flags a stake 10× off the usual', async () => {
+    const { oddStake } = await import('./tgSources');
+    expect(oddStake(200000, 20000, 'RUB')).toMatch(/більша/);
+    expect(oddStake(1500, 20000, 'RUB')).toMatch(/менша/);
+    expect(oddStake(14370, 20000, 'RUB')).toBeNull();
+    expect(oddStake(500, null, 'RUB')).toBeNull();
+  });
+  it('sees a bigger stake after losses', async () => {
+    const { chaseOf } = await import('./tgHonesty');
+    const s = [100, 'Loss', 200, 'Win', 100, 'Loss', 200, 'Win', 100, 'Loss', 200, 'Win', 100, 'Win'] as const;
+    const slips = []; for (let i = 0; i < s.length; i += 2) slips.push({ stake: s[i] as number, result: s[i + 1] as string });
+    const c = chaseOf(slips)!;
+    expect(c.afterLoss).toBe(200); expect(c.afterWin).toBe(100); expect(c.chasing).toBe(true);
+    expect(chaseOf(slips.slice(0, 3))).toBeNull();
+  });
+});

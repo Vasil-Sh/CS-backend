@@ -1,13 +1,14 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { pool } from '../db/client';
+import { normalizeTeam } from '../utils/matchUtils';
 import { doubtRun, rereadDoubtful, tme, rereadPost, moneyFromOcr, collectArchive, collectChannel, fetchChannelPage, rereadChannel, firstRead, progress, previewChannel, publicHandle, saved, settleTgTips, tgCandidates, tgCycle, tgNextAt } from '../services/tgSources';
 import { isNight } from '../services/nightMode';
 import { ocrStats } from '../services/tgOcr';
 import { aiEnabled, aiQuota, aiStats, batchStats, readersInfo } from '../services/tgAi';
 import { accountEnabled, accountMedia, accountStats, inviteHash, joinInvite, mediaLink, mediaSig, privateHandle } from '../services/tgAccount';
 import { toUsd } from '../services/fxRates';
-import { honestyOf } from '../services/tgHonesty';
+import { chaseOf, honestyOf } from '../services/tgHonesty';
 import { goldenRun, lastGolden, learnFromFix, runGolden } from '../services/tgLearn';
 import { diag, explainTip, feedMatches, verifyErrors, verifyTips } from '../services/tgVerify';
 
@@ -22,6 +23,36 @@ function audit(actor: { userId: number; username: string }, action: string, targ
 const kyivDay = (t: number) => new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Kyiv' }).format(new Date(t));
 
 /** GET /api/admin/tg-sources — channels with their week, totals, invites users added (not readable yet). */
+/** The admin is about to sort a post: did its reader get it wrong? (a post the admin already called wrong stays wrong) */
+async function markRead(handle: string, postId: number, admin: { kind: 'bet' | 'other'; reason?: string | null; matchId?: string; market?: string; pick?: string | null; odds?: number | null }, who: string): Promise<void> {
+  const o = (await pool.query<{ kind: string; reason: string | null; match_id: string | null; market: string | null; pick: string | null; odds: number | null }>(
+    'SELECT kind, reason, match_id, market, pick, odds::float AS odds FROM tg_posts WHERE handle = $1 AND post_id = $2', [handle, postId])).rows[0];
+  if (!o) return;
+  const wrong = admin.kind === 'other' ? o.kind !== 'other'
+    : o.kind !== 'bet' || o.match_id !== admin.matchId || o.market !== admin.market || normalizeTeam(o.pick || '') !== normalizeTeam(admin.pick || '')
+      || (admin.odds != null && o.odds != null && Math.abs(admin.odds - o.odds) > 0.015);
+  await pool.query(`UPDATE tg_posts SET read_wrong = CASE WHEN read_wrong THEN true ELSE $3 END, checked_by = $4, checked_at = now() WHERE handle = $1 AND post_id = $2`, [handle, postId, wrong, who]);
+}
+
+/** How right the readers were in the last 7 days: posts read, the ones the admin corrected or found wrong, the ones not read at all. */
+const READ_LABEL: Record<string, string> = { slip: 'OCR квитка', caption: 'Підпис і OCR', template: 'Шаблон каналу', rules: 'Правила: не прогноз', ocr: 'OCR і правила', cache: 'Той самий скрін', ai: 'ШІ' };
+async function readAccuracy() {
+  const { rows } = await pool.query<{ by: string; posts: number; wrong: number; missed: number; checked: number; checked_ok: number }>(
+    `SELECT CASE WHEN read_by = 'ai' THEN COALESCE(ai_by, 'ai') ELSE read_by END AS by, count(*)::int AS posts,
+            count(*) FILTER (WHERE read_wrong IS TRUE)::int AS wrong,
+            count(*) FILTER (WHERE kind = 'unknown' AND fixed_by IS NULL AND read_wrong IS NOT TRUE)::int AS missed,
+            count(*) FILTER (WHERE read_wrong IS NOT NULL)::int AS checked, count(*) FILTER (WHERE read_wrong IS FALSE)::int AS checked_ok
+       FROM tg_posts WHERE read_by IS NOT NULL AND part_of IS NULL AND posted_at > now() - interval '7 days' GROUP BY 1 ORDER BY 2 DESC`);
+  const names = new Map(readersInfo().map((r) => [r.id, r.label] as [string, string]));
+  const sum = (k: 'posts' | 'wrong' | 'missed' | 'checked' | 'checked_ok') => rows.reduce((x, r) => x + r[k], 0);
+  const pct = (posts: number, bad: number) => (posts ? Math.round(((posts - bad) / posts) * 100) : null);
+  return {
+    posts: sum('posts'), wrong: sum('wrong'), missed: sum('missed'), checked: sum('checked'), checkedOk: sum('checked_ok'),
+    percent: pct(sum('posts'), sum('wrong') + sum('missed')), checkedPercent: pct(sum('checked'), sum('checked') - sum('checked_ok')),
+    readers: rows.map((r) => ({ id: r.by, label: names.get(r.by) || READ_LABEL[r.by] || r.by, posts: r.posts, wrong: r.wrong, missed: r.missed, checked: r.checked, percent: pct(r.posts, r.wrong + r.missed) })),
+  };
+}
+
 tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
   const [chs, posts, groups, all, again, money, byDay, skill, copies] = await Promise.all([
     pool.query(`SELECT handle, title, subscribers, game, is_test AS "isTest", paused, added_by AS "addedBy", last_post_at AS "lastPostAt", checked_at AS "checkedAt", error, created_at AS "createdAt", auto_paused AS "autoPaused", fails, profile, invite FROM tg_channels ORDER BY created_at`),
@@ -153,6 +184,7 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
     // the channel of the week: the best ROI (ours where we checked) of the last 7 days, at least 3 settled tips
     best: (() => { const c = channels.filter((x: any) => x.all.week.won + x.all.week.lost >= 3 && x.all.week.roi != null).sort((x: any, y: any) => y.all.week.roi - x.all.week.roi)[0]; return c ? { handle: c.handle, title: c.title, roi: c.all.week.roi, won: c.all.week.won, lost: c.all.week.lost } : null; })(),
     alerts: { unknown: all.rows.reduce((x, r) => x + Number(r.unknown || 0), 0), mismatches: all.rows.reduce((x, r) => x + Number(r.mismatches || 0), 0) },
+    accuracy: await readAccuracy().catch(() => null),
     doubts: { ...doubtRun, open: Number((await pool.query<{ n: string }>(`SELECT count(*) AS n FROM tg_posts WHERE doubt IS NOT NULL AND fixed_by IS NULL`)).rows[0]?.n || 0) },
     tme: { limitedUntil: tme.limitedUntil > Date.now() ? new Date(tme.limitedUntil).toISOString() : null, limitedCount: tme.limitedCount, lastStatus: tme.lastStatus || null },
     account: { enabled: accountEnabled(), connectedAt: accountStats.connectedAt, error: accountStats.lastError },
@@ -242,6 +274,24 @@ tg.get('/admin/tg-posts/matches', requireAuth, requireAdmin, async (c) => {
 });
 
 /** POST /api/admin/tg-posts/:handle/:postId — the admin's decision: «Не прогноз» or the tip (match, market, pick, odds); «remember» adds a channel rule. */
+/** GET /api/admin/tg-posts/sample — 10 random posts of the last 7 days nobody checked yet: «Перевірити 10 постів». */
+tg.get('/admin/tg-posts/sample', requireAuth, requireAdmin, async (c) => {
+  const { rows } = await pool.query(
+    `SELECT x.*, ch.title FROM (SELECT ${postCols} FROM tg_posts WHERE read_by IS NOT NULL AND part_of IS NULL AND read_wrong IS NULL AND fixed_by IS NULL
+        AND kind IN ('bet', 'other') AND deleted_at IS NULL AND posted_at > now() - interval '7 days' ORDER BY random() LIMIT 10) x
+      LEFT JOIN tg_channels ch ON ch.handle = x.handle ORDER BY x."postedAt" DESC`);
+  return c.json(rows);
+});
+
+/** POST /api/admin/tg-posts/:handle/:postId/check {ok} — the admin says the post was read right or wrong. */
+tg.post('/admin/tg-posts/:handle/:postId/check', requireAuth, requireAdmin, async (c) => {
+  const actor = c.get('user'), handle = c.req.param('handle') || '', postId = Number(c.req.param('postId'));
+  const b = await c.req.json().catch(() => ({})) as { ok?: boolean };
+  const { rowCount } = await pool.query('UPDATE tg_posts SET read_wrong = $3, checked_by = $4, checked_at = now() WHERE handle = $1 AND post_id = $2', [handle, postId, b.ok === false, actor.username]);
+  audit(actor, 'POST', `/admin/tg-posts/${handle}/${postId}/check`, { ok: b.ok !== false });
+  return rowCount ? c.json({ ok: true }) : c.json({ error: 'Пост не знайдено' }, 404);
+});
+
 /** POST /api/admin/tg-posts/reread-doubtful — every «Сумнівно» post read again, in the background. */
 tg.post('/admin/tg-posts/reread-doubtful', requireAuth, requireAdmin, async (c) => {
   void rereadDoubtful().catch((e) => console.warn('[tg] doubtful:', (e as Error).message));
@@ -257,6 +307,7 @@ tg.post('/admin/tg-posts/bulk', requireAuth, requireAdmin, async (c) => {
   if (!items.length) return c.json({ error: 'Немає постів' }, 400);
   const reason = ['Повтор', 'Опитування', 'Підсумок'].includes(String(b?.reason)) ? String(b!.reason) : null;
   for (const x of items) {
+    await markRead(x.handle, Number(x.postId), { kind: 'other' }, actor.username).catch(() => {});
     await pool.query(`UPDATE tg_posts SET kind = 'other', reason = $4, result = NULL, our_result = NULL, mismatch = false, settled_by = NULL, fixed_by = $3 WHERE handle = $1 AND post_id = $2`, [x.handle, Number(x.postId), actor.username, reason]);
     await learnFromFix(x.handle, Number(x.postId), { kind: 'other' }, actor.username).catch(() => {});
   }
@@ -281,6 +332,7 @@ tg.post('/admin/tg-posts/:handle/:postId', requireAuth, requireAdmin, async (c) 
   if (b.kind === 'other') {
     // the admin's status for a post that is not a tip: info, a repeat, a poll, a results summary
     const reason = ['Повтор', 'Опитування', 'Підсумок', 'Результат'].includes(String(b.reason)) ? String(b.reason) : null;
+    await markRead(handle, postId, { kind: 'other' }, actor.username).catch(() => {});
     await pool.query(`UPDATE tg_posts SET kind = 'other', reason = $4, result = NULL, our_result = NULL, mismatch = false, settled_by = NULL, fixed_by = $3 WHERE handle = $1 AND post_id = $2`, [handle, postId, actor.username, reason]);
     await learnFromFix(handle, postId, { kind: 'other' }, actor.username).catch(() => {});
     audit(actor, 'POST', `/admin/tg-posts/${handle}/${postId}`, { kind: 'other', reason });
@@ -303,6 +355,7 @@ tg.post('/admin/tg-posts/:handle/:postId', requireAuth, requireAdmin, async (c) 
   if (!market) return c.json({ error: 'Невідомий ринок' }, 400);
   const pick = mk === 'Total' || mk === 'MapTotal' ? '' : b.side === 2 ? m.team2 : m.team1;
   const odds = b.odds != null && Number(b.odds) > 1 ? Number(b.odds) : null;
+  await markRead(handle, postId, { kind: 'bet', matchId: m.id, market, pick: pick || null, odds }, actor.username).catch(() => {});
   await pool.query(
     `UPDATE tg_posts SET kind = 'bet', reason = NULL, game = $3, match_id = $4, team1 = $5, team2 = $6, market = $7, pick = $8, odds = $9,
         result = CASE WHEN $11::text = 'auto' THEN CASE slip WHEN 'won' THEN 'Win' WHEN 'lost' THEN 'Loss' ELSE NULL END ELSE $12::text END,
@@ -458,7 +511,10 @@ tg.get('/admin/tg-sources/:handle/stats', requireAuth, requireAdmin, async (c) =
   const mainCur = [...cnt.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
   let bal = 0;
   const money = mainCur ? { currency: mainCur, points: mrows.filter((r) => r.currency === mainCur).map((r) => ({ postId: Number(r.post_id), at: r.at, balance: Math.round((bal += r.result === 'Win' ? (r.payout ?? r.stake * (r.odds ?? 1)) - r.stake : r.result === 'Loss' ? -r.stake : 0) * 100) / 100 })) } : null;
-  return c.json({ money, chart, byGame: group((r) => (r.game === 'dota2' ? 'Dota 2' : 'CS2')), byMarket: group((r) => kindOf(r.market)), streaks: { best, worst, current: cur }, summaries });
+  // «Відіграш»: the stake after a lost slip against the stake after a won one (its main currency, 3+ of each)
+  const cm = mrows.filter((r) => r.currency === mainCur);
+  const chase = chaseOf(cm.map((r) => ({ stake: r.stake, result: r.result })));
+  return c.json({ money, chase, chart, byGame: group((r) => (r.game === 'dota2' ? 'Dota 2' : 'CS2')), byMarket: group((r) => kindOf(r.market)), streaks: { best, worst, current: cur }, summaries });
 });
 
 /** POST /api/admin/tg-sources/verify — run our check now; returns how many tips it closed and its last errors / notes. */

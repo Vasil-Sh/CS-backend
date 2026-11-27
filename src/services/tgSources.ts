@@ -301,7 +301,7 @@ export async function rereadPost(handle: string, postId: number): Promise<boolea
   if (r.part_of) return rereadPost(handle, r.part_of); // a second bet of a post: the whole post is read again
   const ctx = await channelCtx(handle, undefined);
   if (!ctx) return false;
-  await pool.query(`UPDATE tg_posts SET fixed_by = NULL, ai_wrong = false, photos = NULL WHERE handle = $1 AND post_id = $2`, [handle, postId]);
+  await pool.query(`UPDATE tg_posts SET fixed_by = NULL, ai_wrong = false, read_wrong = NULL, checked_by = NULL, checked_at = NULL, photos = NULL WHERE handle = $1 AND post_id = $2`, [handle, postId]);
   await handlePost(ctx, { id: postId, at: new Date(r.posted_at).toISOString(), text: r.text || '', photos: r.photos || [], ...(r.reply_to ? { replyTo: r.reply_to } : {}) }, true);
   await settleTgTips().catch(() => 0);
   return true;
@@ -320,6 +320,23 @@ async function resultSlip(handle: string, post: PagePost, tip: AiTip, slip: Slip
   if (!hit) return null;
   await applySlip(handle, hit.post_id, slip, true, true);
   return { kind: 'other', reason: 'Результат', repeatOf: hit.post_id };
+}
+
+/** A stake 10× above or below the channel's usual one (5+ slips in that currency): why it is doubtful, or null. */
+export function oddStake(stake: number, usual: number | null, currency: string): string | null {
+  if (!(stake > 0) || !usual || !(usual > 0)) return null;
+  if (stake < usual * 10 && stake * 10 > usual) return null;
+  const n = (v: number) => v.toLocaleString('uk-UA', { maximumFractionDigits: 2 });
+  return `Сума ${n(stake)} ${currency} — у 10+ разів ${stake > usual ? 'більша' : 'менша'}, ніж зазвичай у каналу (${n(usual)})`;
+}
+/** «Дивна сума»: a misread stake or a made-up slip shows in the queue as «Сумнівно». */
+async function markOddStake(handle: string, postId: number): Promise<void> {
+  const r = (await pool.query<{ stake: number | null; currency: string | null; usual: number | null }>(
+    `SELECT p.stake::float AS stake, p.currency, (SELECT CASE WHEN count(*) >= 5 THEN percentile_cont(0.5) WITHIN GROUP (ORDER BY o.stake) END FROM tg_posts o
+        WHERE o.handle = p.handle AND o.currency = p.currency AND o.kind = 'bet' AND o.stake > 0 AND o.post_id <> p.post_id)::float AS usual
+       FROM tg_posts p WHERE p.handle = $1 AND p.post_id = $2 AND p.kind = 'bet' AND p.doubt IS NULL AND p.fixed_by IS NULL`, [handle, postId])).rows[0];
+  const why = r?.stake && r.currency ? oddStake(r.stake, r.usual, r.currency) : null;
+  if (why) await pool.query('UPDATE tg_posts SET doubt = $3 WHERE handle = $1 AND post_id = $2 AND doubt IS NULL', [handle, postId, why]);
 }
 
 /** The slip's money and, when it shows one, its result (won → Win, lost → Loss, returned/sold → Void) on a tip. */
@@ -507,7 +524,7 @@ async function handlePost(ctx: Ctx, post: PagePost, backfill: boolean): Promise<
     if (book && !tip?.bookmaker) await pool.query(`UPDATE tg_channels SET profile = jsonb_set(profile, '{bookmakers}', COALESCE(profile->'bookmakers', '{}'::jsonb) || jsonb_build_object($2::text, COALESCE((profile->'bookmakers'->>$2)::int, 0) + 1)) WHERE handle = $1`, [handle, book]).catch(() => {});
   }
   if (parsed.kind === 'bet' && !post.poll) await saveExtras(ctx, post, parsed, rd.ocrBy).catch((e) => console.warn('[tg] extras:', (e as Error).message));
-  if (slip && parsed.kind === 'bet') await applySlip(handle, post.id, slip);
+  if (slip && parsed.kind === 'bet') { await applySlip(handle, post.id, slip); await markOddStake(handle, post.id).catch(() => {}); }
   // «Результат»: the post shows its own slip (won / lost), the tip and its money stay counted once — on the first post
   else if (slip && parsed.kind === 'other' && parsed.reason === 'Результат') await pool.query('UPDATE tg_posts SET slip = $3, stake = $4, currency = $5, payout = $6 WHERE handle = $1 AND post_id = $2', [handle, post.id, slip.status, slip.stake, slip.currency, slip.payout]);
   const pr = progress.get(handle);
