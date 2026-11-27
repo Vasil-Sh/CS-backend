@@ -163,7 +163,7 @@ export const saved = { rules: 0, template: 0, cache: 0, slip: 0, caption: 0, sin
 /** Channels a post points to (t.me/<name>, @name): candidates to add, counted. Bots, the channel itself and channels already added are skipped. */
 export function linkedHandles(text: string, own: string): string[] {
   const out = new Set<string>();
-  for (const m of (text || '').matchAll(/(?:t(?:elegram)?\.me\/(?:s\/)?|(?<![\w.])@)([a-z][\w]{4,31})(?![\w\/]*\?start)/gi)) {
+  for (const m of (text || '').matchAll(/(?:t(?:elegram)?\.me\/(?:s\/)?|(?<![\w.])@)([a-z][\w]{4,31})(?![\w/]*\?start)/gi)) {
     const h = m[1].toLowerCase();
     if (h === own || /bot$/.test(h) || ['joinchat', 'share', 'addstickers', 'proxy', 'iv', 'c'].includes(h)) continue;
     out.add(h);
