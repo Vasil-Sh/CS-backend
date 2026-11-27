@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { pool } from '../db/client';
-import { tme, rereadPost, moneyFromOcr, collectArchive, collectChannel, fetchChannelPage, rereadChannel, firstRead, progress, previewChannel, publicHandle, saved, settleTgTips, tgCandidates, tgCycle, tgNextAt } from '../services/tgSources';
+import { doubtRun, rereadDoubtful, tme, rereadPost, moneyFromOcr, collectArchive, collectChannel, fetchChannelPage, rereadChannel, firstRead, progress, previewChannel, publicHandle, saved, settleTgTips, tgCandidates, tgCycle, tgNextAt } from '../services/tgSources';
 import { isNight } from '../services/nightMode';
 import { ocrStats } from '../services/tgOcr';
 import { aiEnabled, aiQuota, aiStats, batchStats, readersInfo } from '../services/tgAi';
@@ -23,7 +23,7 @@ const kyivDay = (t: number) => new Intl.DateTimeFormat('sv-SE', { timeZone: 'Eur
 
 /** GET /api/admin/tg-sources — channels with their week, totals, invites users added (not readable yet). */
 tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
-  const [chs, posts, groups, all, again, money, byDay] = await Promise.all([
+  const [chs, posts, groups, all, again, money, byDay, skill, copies] = await Promise.all([
     pool.query(`SELECT handle, title, subscribers, game, is_test AS "isTest", paused, added_by AS "addedBy", last_post_at AS "lastPostAt", checked_at AS "checkedAt", error, created_at AS "createdAt", auto_paused AS "autoPaused", fails, profile, invite FROM tg_channels ORDER BY created_at`),
     pool.query<{ handle: string; posted_at: string; kind: string; result: string | null; odds: string | null }>(
       `SELECT handle, posted_at, kind, result, odds FROM tg_posts WHERE posted_at > now() - interval '30 days'`),
@@ -67,13 +67,37 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
     pool.query<{ handle: string; day: string; kind: string; reason: string | null; n: string }>(
       `SELECT handle, to_char(posted_at AT TIME ZONE 'Europe/Kyiv', 'YYYY-MM-DD') AS day, kind, reason, count(*) AS n FROM tg_posts
         WHERE posted_at > now() - interval '8 days' GROUP BY 1, 2, 3, 4`),
+    // skill: CLV (the tip's odds against the closing odds of the match), and payoff by kind of bet
+    pool.query<{ handle: string; grp: string; n: string; priced: string; profit: string | null; clv_n: string; clv: string | null }>(
+      `SELECT handle, CASE WHEN market = 'Match Winner' THEN 'match' WHEN market ~ '^Map \\d Winner$' THEN 'map' WHEN market ~ 'Handicap' THEN 'hcp' WHEN market ~ 'Total' THEN 'total' ELSE 'other' END AS grp,
+              count(*) FILTER (WHERE COALESCE(our_result, result) IN ('Win', 'Loss')) AS n,
+              count(*) FILTER (WHERE odds IS NOT NULL AND COALESCE(our_result, result) IN ('Win', 'Loss')) AS priced,
+              sum(CASE WHEN odds IS NOT NULL THEN CASE COALESCE(our_result, result) WHEN 'Win' THEN (odds - 1) * 100 WHEN 'Loss' THEN -100 END END) AS profit,
+              count(*) FILTER (WHERE closing_odds > 1 AND odds > 1) AS clv_n, avg(odds / closing_odds - 1) FILTER (WHERE closing_odds > 1 AND odds > 1) AS clv
+         FROM tg_posts WHERE kind = 'bet' GROUP BY 1, 2`),
+    // copies: a tip another channel posted earlier (same match, bet and side, within 2 days)
+    pool.query<{ handle: string; src: string; n: string }>(
+      `SELECT a.handle, b.handle AS src, count(DISTINCT a.post_id) AS n FROM tg_posts a JOIN tg_posts b
+          ON b.match_id = a.match_id AND b.market = a.market AND lower(COALESCE(b.pick, '')) = lower(COALESCE(a.pick, '')) AND b.handle <> a.handle
+         AND b.kind = 'bet' AND b.posted_at < a.posted_at - interval '1 minute' AND b.posted_at > a.posted_at - interval '2 days'
+       WHERE a.kind = 'bet' AND a.match_id NOT LIKE 'tg:express%' GROUP BY 1, 2`),
   ]);
+  const GRP: Record<string, string> = { match: 'на матч', map: 'на карту', hcp: 'на фору', total: 'на тотал' };
+  const skillOf = (h: string) => {
+    const rs = skill.rows.filter((r) => r.handle === h);
+    const clvN = rs.reduce((x, r) => x + Number(r.clv_n), 0), clvSum = rs.reduce((x, r) => x + Number(r.clv || 0) * Number(r.clv_n), 0);
+    const kinds = rs.filter((r) => GRP[r.grp] && Number(r.priced) >= 3).map((r) => ({ kind: GRP[r.grp], n: Number(r.priced), roi: Math.round(Number(r.profit || 0) / Number(r.priced)) })).sort((a, b) => b.roi - a.roi);
+    const cp = copies.rows.filter((r) => r.handle === h).sort((a, b) => Number(b.n) - Number(a.n))[0];
+    return { clv: clvN ? { avg: Math.round((clvSum / clvN) * 1000) / 10, n: clvN } : null, best: kinds[0] ?? null, worst: kinds.length > 1 ? kinds[kinds.length - 1] : null, copies: cp && Number(cp.n) >= 3 ? { from: cp.src, n: Number(cp.n) } : null };
+  };
   const agg = new Map(all.rows.map((r) => [r.handle, r]));
   const rereading = new Map(again.rows.map((r) => [r.handle, Number(r.n)]));
   const r2 = (x: string | null) => Math.round(Number(x || 0) * 100) / 100;
   const moneyOf = (h: string) => money.rows.filter((r) => r.handle === h && (Number(r.n) > 0 || Number(r.open_n) > 0))
     .map((r) => ({ currency: r.currency, profit: r2(r.profit), staked: r2(r.staked), bets: Number(r.n), won: r2(r.won), lost: r2(r.lost), wins: Number(r.wins), losses: Number(r.losses), open: r2(r.open), openBets: Number(r.open_n),
-      profitUsd: toUsd(r2(r.profit), r.currency), stakedUsd: toUsd(r2(r.staked), r.currency) }))
+      profitUsd: toUsd(r2(r.profit), r.currency), stakedUsd: toUsd(r2(r.staked), r.currency),
+      // payoff of the money: profit on what was staked — big stakes weigh more than small ones
+      roi: Number(r.staked) > 0 ? Math.round((Number(r.profit) / Number(r.staked)) * 100) : null }))
     .sort((a, b) => Math.abs(b.profit) - Math.abs(a.profit));
   const dayOf = (h: string, d: string) => {
     const rs = byDay.rows.filter((r) => r.handle === h && r.day === d), cnt = (f: (r: typeof rs[number]) => boolean) => rs.filter(f).reduce((x, r) => x + Number(r.n), 0);
@@ -104,7 +128,7 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
       posts7d: wk.length, tips7d: tips, unknown7d: unk, recognized: tips + unk ? Math.round((tips / (tips + unk)) * 100) : null,
       settled: settled.length, wins, winrate: settled.length ? Math.round((wins / settled.length) * 100) : null,
       roi: priced.length ? Math.round((profit / priced.length) * 100) : null, pending: ps.filter((p) => p.kind === 'bet' && !p.result).length,
-      users, bookmakers: Object.entries(((ch as { profile?: { bookmakers?: Record<string, number> } }).profile?.bookmakers) || {}).sort((x, y) => y[1] - x[1]).slice(0, 4).map(([k]) => k), rereading: rereading.get(ch.handle) || 0, money: moneyOf(ch.handle), daysDetail: days.map((d) => dayOf(ch.handle, d)), progress: progress.get(ch.handle) || null,
+      users, skill: skillOf(ch.handle), bookmakers: Object.entries(((ch as { profile?: { bookmakers?: Record<string, number> } }).profile?.bookmakers) || {}).sort((x, y) => y[1] - x[1]).slice(0, 4).map(([k]) => k), rereading: rereading.get(ch.handle) || 0, money: moneyOf(ch.handle), daysDetail: days.map((d) => dayOf(ch.handle, d)), progress: progress.get(ch.handle) || null,
       all: { posts: n(a?.total), tips: tipsAll, unknown: unkAll, other: n(a?.other), repeats: n(a?.repeats), won: wonAll, lost: lostAll, pending: n(a?.pending),
         recognized: tipsAll + unkAll ? Math.round((tipsAll / (tipsAll + unkAll)) * 100) : null, winrate: wonAll + lostAll ? Math.round((wonAll / (wonAll + lostAll)) * 100) : null,
         profit: pricedAll ? profitAll : null, roi: pricedAll ? Math.round(profitAll / pricedAll) : null, firstAt: a?.first_at ?? null,
@@ -129,6 +153,7 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
     // the channel of the week: the best ROI (ours where we checked) of the last 7 days, at least 3 settled tips
     best: (() => { const c = channels.filter((x: any) => x.all.week.won + x.all.week.lost >= 3 && x.all.week.roi != null).sort((x: any, y: any) => y.all.week.roi - x.all.week.roi)[0]; return c ? { handle: c.handle, title: c.title, roi: c.all.week.roi, won: c.all.week.won, lost: c.all.week.lost } : null; })(),
     alerts: { unknown: all.rows.reduce((x, r) => x + Number(r.unknown || 0), 0), mismatches: all.rows.reduce((x, r) => x + Number(r.mismatches || 0), 0) },
+    doubts: { ...doubtRun, open: Number((await pool.query<{ n: string }>(`SELECT count(*) AS n FROM tg_posts WHERE doubt IS NOT NULL AND fixed_by IS NULL`)).rows[0]?.n || 0) },
     tme: { limitedUntil: tme.limitedUntil > Date.now() ? new Date(tme.limitedUntil).toISOString() : null, limitedCount: tme.limitedCount, lastStatus: tme.lastStatus || null },
     account: { enabled: accountEnabled(), connectedAt: accountStats.connectedAt, error: accountStats.lastError },
     reader: { ai: aiEnabled(), model: aiStats.model || null, quota: aiQuota(), readers: readersInfo(), saved: { ...saved, batch: Math.max(0, batchStats.posts - batchStats.requests) }, golden: { ...(await lastGolden()), running: goldenRun.running, done: goldenRun.done, total: goldenRun.total }, aiCalls: aiStats.calls, aiFailed: aiStats.failed, aiError: aiStats.lastError,
@@ -217,6 +242,13 @@ tg.get('/admin/tg-posts/matches', requireAuth, requireAdmin, async (c) => {
 });
 
 /** POST /api/admin/tg-posts/:handle/:postId — the admin's decision: «Не прогноз» or the tip (match, market, pick, odds); «remember» adds a channel rule. */
+/** POST /api/admin/tg-posts/reread-doubtful — every «Сумнівно» post read again, in the background. */
+tg.post('/admin/tg-posts/reread-doubtful', requireAuth, requireAdmin, async (c) => {
+  void rereadDoubtful().catch((e) => console.warn('[tg] doubtful:', (e as Error).message));
+  audit(c.get('user'), 'POST', '/admin/tg-posts/reread-doubtful', {});
+  return c.json({ ok: true });
+});
+
 /** POST /api/admin/tg-posts/bulk {items: [{handle, postId}], reason?} — several posts at once made «Інфо» (or a repeat, a poll…). */
 tg.post('/admin/tg-posts/bulk', requireAuth, requireAdmin, async (c) => {
   const actor = c.get('user');

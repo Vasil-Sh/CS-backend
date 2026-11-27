@@ -627,7 +627,47 @@ export async function tgCycle(): Promise<void> {
       await new Promise((ok) => setTimeout(ok, GAP_MS * (tme.limitedCount ? 3 : 1))); // after a limit, slower between channels
     }
     await settleTgTips().catch(() => {});
+    await recordClosingOdds().catch((e) => console.warn('[tg] closing odds:', (e as Error).message));
+    await tidyOld().catch(() => {});
   } finally { running = false; await closeOcr(); }
+}
+
+/** The closing odds of a tip's match: while the match is still ahead, the feed's current price for the pick is kept (each pass);
+ *  once it starts, the last one stays — the price just before the start, for CLV. Match winner only (the feed has its odds). */
+export async function recordClosingOdds(): Promise<number> {
+  const ahead = feedMatches().filter((m) => m.status === 'upcoming' && (m.coeff1 || m.coeff2) && Date.parse(m.start) - Date.now() < 36 * 3_600_000);
+  if (!ahead.length) return 0;
+  const { rows } = await pool.query<{ handle: string; post_id: number; match_id: string; pick: string | null }>(
+    `SELECT handle, post_id, match_id, pick FROM tg_posts WHERE kind = 'bet' AND market = 'Match Winner' AND match_id = ANY($1::text[])`, [ahead.map((m) => m.id)]);
+  let n = 0;
+  for (const r of rows) {
+    const m = ahead.find((x) => x.id === r.match_id);
+    const c = m && r.pick ? (sameName(r.pick, m.team1) ? m.coeff1 : sameName(r.pick, m.team2) ? m.coeff2 : null) : null;
+    if (!c || c <= 1) continue;
+    await pool.query('UPDATE tg_posts SET closing_odds = $3 WHERE handle = $1 AND post_id = $2', [r.handle, r.post_id, c]);
+    n++;
+  }
+  return n;
+}
+
+/** Once a day: the OCR text and the reader's raw answer of posts older than 60 days dropped (what was read stays: the tip, its result, its money). */
+let tidiedAt = 0;
+async function tidyOld(): Promise<void> {
+  if (Date.now() - tidiedAt < 86_400_000) return;
+  tidiedAt = Date.now();
+  await pool.query(`UPDATE tg_posts SET ocr = NULL, ai_raw = NULL WHERE posted_at < now() - interval '60 days' AND (ocr IS NOT NULL OR ai_raw IS NOT NULL)`);
+  await pool.query(`DELETE FROM tg_candidates WHERE dismissed AND last_at < now() - interval '90 days'`);
+}
+
+/** «Перечитати сумнівні»: every doubtful post not sorted by the admin read again (up to 30, one by one, in the background). */
+export const doubtRun = { running: false, done: 0, total: 0 };
+export async function rereadDoubtful(): Promise<void> {
+  if (doubtRun.running) return;
+  const { rows } = await pool.query<{ handle: string; post_id: number }>(`SELECT handle, COALESCE(part_of, post_id) AS post_id FROM tg_posts WHERE doubt IS NOT NULL AND fixed_by IS NULL ORDER BY posted_at DESC LIMIT 30`);
+  const uniq = [...new Map(rows.map((r) => [`${r.handle}/${r.post_id}`, r])).values()];
+  doubtRun.running = true; doubtRun.done = 0; doubtRun.total = uniq.length;
+  try { for (const r of uniq) { await rereadPost(r.handle, r.post_id).catch(() => false); doubtRun.done++; } }
+  finally { doubtRun.running = false; }
 }
 
 let timer: ReturnType<typeof setTimeout> | null = null;
