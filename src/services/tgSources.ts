@@ -15,7 +15,7 @@ import { feedMatches, placedLive, sameName, verifyTips, type FeedMatch, type Leg
 import { recordServerError } from './serverErrors';
 import { abbreviations } from '../utils/teamAbbrev';
 import { aiLine, aiReadBatch, aiReadPost, currencyCode, loadImages, readerReady, type AiRead, type AiTip } from './tgAi';
-import { slipBet } from './tgSlip';
+import { bookmakerOf, slipBet } from './tgSlip';
 import { channelExamples, countTemplate, marketToAi, fullTip, loadReaderAccuracy, sameTip, surelyNotTip, templateTrusted, type Template } from './tgLearn';
 import { normalizeTeam } from '../utils/matchUtils';
 import { accountEnabled, fetchPrivatePage, inviteHash, inviteInfo, privateHandle, privateId } from './tgAccount';
@@ -31,13 +31,25 @@ export function publicHandle(link: string | null | undefined): string | null {
   return validHandle(h) ? h : null;
 }
 
+/** t.me's mood: when it limits us (429 / a captcha), the pause until, how many times since the start. */
+export const tme = { limitedUntil: 0, fails: 0, limitedCount: 0, lastStatus: 0, lastAt: null as string | null };
+
 /** The channel's page: its last ~20 posts, or the ~20 before post `before` (the archive). */
 export async function fetchChannelPage(handle: string, before?: number) {
   const pid = privateId(handle);
   if (pid) return fetchPrivatePage(pid, before); // a private channel: through our Telegram account
+  if (tme.limitedUntil > Date.now()) throw new Error(`t.me обмежив запити — пауза до ${new Date(tme.limitedUntil).toISOString().slice(11, 16)} UTC`);
   const res = await fetch(`https://t.me/s/${handle}${before ? `?before=${before}` : ''}`, { headers: { 'user-agent': 'Mozilla/5.0 (compatible; MatchIQ/1.0)', 'accept-language': 'en' }, signal: AbortSignal.timeout(10_000), redirect: 'follow' });
+  tme.lastStatus = res.status; tme.lastAt = new Date().toISOString();
+  const body = res.ok ? await res.text() : '';
+  // too many requests / a captcha page instead of the channel: a pause that doubles each time (5 min → 1 h), the next pass waits it out
+  if (res.status === 429 || res.status === 403 || (/captcha|too many requests|flood/i.test(body.slice(0, 3000)) && !/tgme_widget_message/.test(body))) {
+    tme.fails++; tme.limitedUntil = Date.now() + Math.min(60, 5 * 2 ** (tme.fails - 1)) * 60_000; tme.limitedCount++;
+    throw new Error(`t.me обмежив запити (${res.status})`);
+  }
   if (!res.ok) throw new Error(`t.me відповів ${res.status}`);
-  return parseTgPage(await res.text());
+  tme.fails = 0;
+  return parseTgPage(body);
 }
 
 /** Matches a post can be about: the feed caches (today and on) + finished ones of the last 3 days, with team aliases. */
@@ -78,7 +90,7 @@ type PagePost = { id: number; at: string; text: string; photos: string[]; poll?:
 export interface Slip { status: NonNullable<AiTip['status']>; stake: number | null; currency: string | null; payout: number | null; /** payout ÷ stake as the slip shows it — the true odds of the bet */ odds?: number | null }
 const STATUS_UA: Record<string, string> = { won: 'виграш', lost: 'програш', pending: 'очікується', cashout: 'продано', void: 'повернення' };
 
-type Read = { ocr: string; full: string; ai?: boolean; slip?: Slip | null; tip?: AiRead; readBy: 'ai' | 'rules' | 'template' | 'cache' | 'ocr' | 'slip' | 'caption'; hash?: string | null; parsed?: TgParsed; ocrBy?: Map<string, string> };
+type Read = { ocr: string; full: string; ai?: boolean; slip?: Slip | null; tip?: AiRead; readBy: 'ai' | 'rules' | 'template' | 'cache' | 'ocr' | 'slip' | 'caption'; hash?: string | null; parsed?: TgParsed; ocrBy?: Map<string, string>; ocrRaw?: string };
 /** What one post says, the cheapest way that is still right:
  *  surely not a tip by plain rules → no request; a channel whose text template the parser knows → no request;
  *  the same screenshot read before → its answer; else the reader (with the channel's corrected examples) — or OCR when no reader answers. */
@@ -125,15 +137,17 @@ async function readPost(ctx: Ctx, post: PagePost): Promise<Read> {
     const line = aiLine(ai);
     const st0 = ai.status || 'pending', so = ai.stake && ai.payout && ai.payout > ai.stake && st0 !== 'cashout' && st0 !== 'void' ? Math.round((ai.payout / ai.stake) * 100) / 100 : null;
     let slip: Slip | null = ai.status || (ai.isTip && ai.stake) ? { status: st0, stake: ai.stake && ai.stake > 0 ? ai.stake : null, currency: currencyCode(ai.currency), payout: ai.payout && ai.payout > 0 ? ai.payout : null, odds: so && so <= 50 ? so : null } : null;
-    // a tip with a screenshot whose money the reader missed (a weaker reader, «Сумма ставки 350,00 USDT» on the slip): the money from OCR
-    if (ai.isTip && post.photos.length && !(slip?.stake && slip.currency)) {
-      const o = ocrSlip(await ocrAll());
-      if (o?.stake && o.currency) slip = { ...o, status: slip?.status && slip.status !== 'pending' ? slip.status : o.status };
+    // a tip with a screenshot: OCR reads it too — the money the reader missed (a weaker reader), and a second opinion (the «Сумнівно» check)
+    let ocrRaw = '';
+    if (ai.isTip && post.photos.length) {
+      ocrRaw = await ocrAll();
+      const o = ocrSlip(ocrRaw);
+      if (!(slip?.stake && slip.currency) && o?.stake && o.currency) slip = { ...o, status: slip?.status && slip.status !== 'pending' ? slip.status : o.status };
     }
     const money = slip ? ` · квиток: ${STATUS_UA[slip.status]}${slip.stake ? `, ставка ${slip.stake}${slip.currency ? ` ${slip.currency}` : ''}` : ''}${slip.payout ? `, виплата ${slip.payout}` : ''}` : '';
     const legsTxt = ai.market === 'express' && ai.legs?.length ? ` · ${ai.legs.map((l) => `${l.team1} — ${l.team2}: ${l.pick || ''}${l.odds ? ` @${l.odds}` : ''}`).join('; ')}` : '';
     const who = ai.by ? ` (${ai.by})` : '', doubt = ai.doubt ? ` · РОЗБІЖНІСТЬ: ${ai.doubt}` : '';
-    return { ocr: `ШІ${who}: ${line ? line.replace(/\n/g, ' · ') : 'не прогноз'}${legsTxt}${money}${doubt}`, full: line, ai: true, slip, tip: ai, readBy, hash, ocrBy };
+    return { ocr: `ШІ${who}: ${line ? line.replace(/\n/g, ' · ') : 'не прогноз'}${legsTxt}${money}${doubt}`, full: line, ai: true, slip, tip: ai, readBy, hash, ocrBy, ocrRaw };
   }
   // no reader answered: what OCR read, with the slip's money (the AI reads it again when a reader is back — readerReady in the cycle)
   const ocr = await ocrAll();
@@ -145,6 +159,39 @@ async function readPost(ctx: Ctx, post: PagePost): Promise<Read> {
 }
 /** Requests not spent since the start: posts sorted by rules, by a channel's template, slips read before (shown in the admin). */
 export const saved = { rules: 0, template: 0, cache: 0, slip: 0, caption: 0, since: new Date().toISOString() };
+
+/** Channels a post points to (t.me/<name>, @name): candidates to add, counted. Bots, the channel itself and channels already added are skipped. */
+export function linkedHandles(text: string, own: string): string[] {
+  const out = new Set<string>();
+  for (const m of (text || '').matchAll(/(?:t(?:elegram)?\.me\/(?:s\/)?|(?<![\w.])@)([a-z][\w]{4,31})(?![\w\/]*\?start)/gi)) {
+    const h = m[1].toLowerCase();
+    if (h === own || /bot$/.test(h) || ['joinchat', 'share', 'addstickers', 'proxy', 'iv', 'c'].includes(h)) continue;
+    out.add(h);
+  }
+  return [...out];
+}
+async function noteCandidates(own: string, text: string): Promise<void> {
+  const hs = linkedHandles(text, own);
+  if (!hs.length) return;
+  await pool.query(`INSERT INTO tg_candidates(handle, seen_in, mentions, last_at)
+      SELECT h, ARRAY[$2::text], 1, now() FROM unnest($1::text[]) AS h WHERE NOT EXISTS (SELECT 1 FROM tg_channels c WHERE c.handle = h)
+      ON CONFLICT (handle) DO UPDATE SET mentions = tg_candidates.mentions + 1, last_at = now(),
+        seen_in = CASE WHEN $2 = ANY(tg_candidates.seen_in) THEN tg_candidates.seen_in ELSE (tg_candidates.seen_in || $2::text)[1:10] END`, [hs, own]);
+}
+
+/** Why a saved tip is doubtful, or null: the caption, the slip read by OCR or the money say something else than what was saved. */
+export function doubtOf(saved: Extract<TgParsed, { kind: 'bet' }>, cap: TgParsed, slipB: Extract<TgParsed, { kind: 'bet' }> | null, ai: AiTip | null, ocrMoney: { stake: number; currency: string | null } | null): string | null {
+  const show = (b: Extract<TgParsed, { kind: 'bet' }>) => `${b.market}${b.pick ? ` · ${b.pick}` : ''}`;
+  const same = (a: Extract<TgParsed, { kind: 'bet' }>, b: Extract<TgParsed, { kind: 'bet' }>) => a.market === b.market && (!a.pick || !b.pick || sameName(a.pick, b.pick));
+  const out: string[] = [];
+  // the caption names a full tip on this match, another bet
+  if (cap.kind === 'bet' && cap.match.id === saved.match.id && (cap.pick || /Total/.test(cap.market)) && !same(cap, saved)) out.push(`у підписі ${show(cap)}`);
+  // the slip OCR reads in full shows another bet on this match
+  if (slipB && slipB.match.id === saved.match.id && !same(slipB, saved)) out.push(`на квитку ${show(slipB)}`);
+  // the reader's stake and OCR's differ (more than 2 %)
+  if (ai?.stake && ocrMoney?.stake && Math.abs(ai.stake - ocrMoney.stake) > Math.max(1, ocrMoney.stake * 0.02)) out.push(`сума: ШІ ${ai.stake}, OCR ${ocrMoney.stake}`);
+  return out.length ? `Записано ${show(saved)}, а ${out.join('; ')}` : null;
+}
 
 /** The second, third … bet of one post: an album of slips (each OCR reads in full) or several bet lines in the caption («1 карта NAVI 1.8, 2 карта Spirit 2.1»).
  *  Each is a row of its own (post id × 1000 + n, part_of = the post), counted and settled like any tip; rebuilt when the post is read again. */
@@ -441,12 +488,21 @@ async function handlePost(ctx: Ctx, post: PagePost, backfill: boolean): Promise<
         '{bookmakers}', COALESCE(profile->'bookmakers', '{}'::jsonb) || CASE WHEN $3::text IS NULL THEN '{}'::jsonb ELSE jsonb_build_object($3::text, COALESCE((profile->'bookmakers'->>$3)::int, 0) + 1) END) WHERE handle = $1`,
       [handle, mk, tip?.bookmaker ? tip.bookmaker.trim().slice(0, 30) : null]).catch(() => {});
   }
+  await noteCandidates(handle, post.text).catch(() => {});
   if (post.replyTo) await pool.query('UPDATE tg_posts SET reply_to = $3 WHERE handle = $1 AND post_id = $2', [handle, post.id, post.replyTo]);
   if (parsed.kind === 'other' && parsed.reason === 'Результат' && post.replyTo && parsed.repeatOf === post.replyTo) {
     if (slip && slip.status !== 'pending') await applySlip(handle, post.replyTo, slip, true, true);
     else if (replyMark) await pool.query(`UPDATE tg_posts SET result = $3 WHERE handle = $1 AND post_id = $2 AND kind = 'bet' AND fixed_by IS NULL`, [handle, post.replyTo, replyMark]);
   }
   if (editMark && parsed.kind === 'bet') await pool.query(`UPDATE tg_posts SET result = $3 WHERE handle = $1 AND post_id = $2 AND fixed_by IS NULL`, [handle, post.id, editMark]);
+  if (parsed.kind === 'bet') {
+    // what else read this tip: the caption alone, the slip by OCR, the money — a disagreement makes it «Сумнівно» (it shows in the queue)
+    const ocrText = rd.ocrRaw || (rd.readBy === 'ocr' || rd.readBy === 'slip' || rd.readBy === 'caption' ? [...(rd.ocrBy?.values() || [])].join('\n') : '');
+    const doubt = doubtOf(parsed, parseTgPost(post.text, post.at, list, ch.rules || {}), ocrText ? slipBet(ocrText, post.at, list) : null, tip ?? null, ocrText ? slipFromOcr(ocrText) : null);
+    const book = (tip?.bookmaker && tip.bookmaker.trim().slice(0, 30)) || bookmakerOf(`${ocrText}\n${post.text}`);
+    await pool.query('UPDATE tg_posts SET doubt = $3, bookmaker = $4 WHERE handle = $1 AND post_id = $2 AND fixed_by IS NULL', [handle, post.id, doubt, book]);
+    if (book && !tip?.bookmaker) await pool.query(`UPDATE tg_channels SET profile = jsonb_set(profile, '{bookmakers}', COALESCE(profile->'bookmakers', '{}'::jsonb) || jsonb_build_object($2::text, COALESCE((profile->'bookmakers'->>$2)::int, 0) + 1)) WHERE handle = $1`, [handle, book]).catch(() => {});
+  }
   if (parsed.kind === 'bet' && !post.poll) await saveExtras(ctx, post, parsed, rd.ocrBy).catch((e) => console.warn('[tg] extras:', (e as Error).message));
   if (slip && parsed.kind === 'bet') await applySlip(handle, post.id, slip);
   // «Результат»: the post shows its own slip (won / lost), the tip and its money stay counted once — on the first post
@@ -565,7 +621,11 @@ export async function tgCycle(): Promise<void> {
       `SELECT c.handle FROM tg_channels c WHERE NOT c.paused AND NOT EXISTS (
          SELECT 1 FROM telegram_groups g WHERE g.moderation_status = 'rejected' AND lower(g.link) LIKE '%' || c.handle || '%') ORDER BY c.checked_at NULLS FIRST`);
     const cands = rows.length ? await tgCandidates() : [];
-    for (const r of rows) { await collectChannel(r.handle, cands).catch((e) => console.warn(`[tg] ${r.handle}:`, (e as Error).message)); await new Promise((ok) => setTimeout(ok, GAP_MS)); }
+    for (const r of rows) {
+      if (tme.limitedUntil > Date.now()) break; // t.me limits us: the rest wait for the next pass
+      await collectChannel(r.handle, cands).catch((e) => console.warn(`[tg] ${r.handle}:`, (e as Error).message));
+      await new Promise((ok) => setTimeout(ok, GAP_MS * (tme.limitedCount ? 3 : 1))); // after a limit, slower between channels
+    }
     await settleTgTips().catch(() => {});
   } finally { running = false; await closeOcr(); }
 }

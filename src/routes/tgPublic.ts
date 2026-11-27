@@ -2,6 +2,7 @@
  * For the app's users: Telegram channels we checked ourselves (honest results, a positive ROI by our scores) and what they pick on a match.
  * Test channels and blocked ones never show. The app screens that use these are not built yet.
  */
+import { honestyOf } from '../services/tgHonesty';
 import { Hono } from 'hono';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/client';
@@ -13,16 +14,19 @@ const VERIFIED = `
          count(*) FILTER (WHERE p.kind = 'bet' AND COALESCE(p.our_result, p.result) = 'Win') AS won,
          count(*) FILTER (WHERE p.kind = 'bet' AND p.settled_by = 'slip' AND p.our_result IS NOT NULL AND NOT p.mismatch) AS confirmed,
          count(*) FILTER (WHERE p.kind = 'bet' AND p.mismatch) AS mismatches,
+         count(*) FILTER (WHERE p.kind = 'bet' AND p.deleted_at IS NOT NULL AND COALESCE(p.our_result, p.result) = 'Loss') AS deleted_lost,
+         count(*) FILTER (WHERE p.kind = 'bet' AND p.is_live AND COALESCE(p.our_result, p.result) = 'Win') AS live_won,
          sum(CASE WHEN p.kind = 'bet' AND p.odds IS NOT NULL THEN CASE COALESCE(p.our_result, p.result) WHEN 'Win' THEN (p.odds - 1) * 100 WHEN 'Loss' THEN -100 END END) AS profit,
          count(*) FILTER (WHERE p.kind = 'bet' AND p.odds IS NOT NULL AND COALESCE(p.our_result, p.result) IN ('Win', 'Loss')) AS priced
     FROM tg_channels c JOIN tg_posts p ON p.handle = c.handle
    WHERE NOT c.is_test AND c.private_id IS NULL AND NOT EXISTS (SELECT 1 FROM telegram_groups g WHERE g.moderation_status = 'rejected' AND lower(g.link) LIKE '%' || c.handle || '%')
    GROUP BY c.handle, c.title, c.subscribers`;
-type Row = { handle: string; title: string | null; subscribers: number | null; settled: string; won: string; confirmed: string; mismatches: string; profit: string | null; priced: string };
+type Row = { handle: string; title: string | null; subscribers: number | null; settled: string; won: string; confirmed: string; mismatches: string; deleted_lost: string; live_won: string; profit: string | null; priced: string };
 const verified = (rows: Row[]) => rows.map((r) => {
-  const n = (x: string | null) => Number(x || 0), honest = n(r.confirmed) + n(r.mismatches);
+  const n = (x: string | null) => Number(x || 0);
   return { handle: r.handle, title: r.title, subscribers: r.subscribers, settled: n(r.settled), winrate: n(r.settled) ? Math.round((n(r.won) / n(r.settled)) * 100) : null,
-    roi: n(r.priced) ? Math.round(n(r.profit) / n(r.priced)) : null, honesty: honest ? Math.round((n(r.confirmed) / honest) * 100) : null };
+    roi: n(r.priced) ? Math.round(n(r.profit) / n(r.priced)) : null, honesty: honestyOf({ settled: n(r.settled), mismatches: n(r.mismatches), deletedLost: n(r.deleted_lost), liveWon: n(r.live_won) }),
+    deletedLost: n(r.deleted_lost), liveWon: n(r.live_won) };
 }).filter((c) => c.settled >= 10 && (c.honesty == null || c.honesty >= 90) && (c.roi ?? 0) > 0).sort((a, b) => (b.roi ?? 0) - (a.roi ?? 0));
 
 /** GET /api/tg/verified-channels — channels with ≥ 10 settled tips, honesty ≥ 90 % and a positive ROI by our check. */

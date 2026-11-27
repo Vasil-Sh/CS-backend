@@ -22,6 +22,10 @@ function betLine(text: string): { map: number | null; kind: 'win' | 'hcp' | 'tot
     const odds = (() => { const m = new RegExp(`${ODD}\\s*$`).exec(tail); return m ? Number(m[1].replace(',', '.')) : null; })();
     const body = tail.replace(new RegExp(`\\s*${ODD}\\s*$`), '');
     let m: RegExpExecArray | null;
+    // Fonbet / 1xBet / Pari shorthand: «Ф1(-1.5)», «Фора 2 (+1.5)», «ТБ(2.5)», «ТМ 2.5», «П1»
+    if ((m = /^(?:ф|фора)\s*([12])\s*\(?\s*([+\-−–]?\s?\d+[.,]5)\s*\)?/i.exec(body))) return { map, kind: 'hcp', rest: `П${m[1]}`, line: Number(m[2].replace(/[−–]/, '-').replace(/\s/g, '').replace(',', '.')), odds };
+    if ((m = /^т\s*([бм])\s*\(?\s*(\d+[.,]5)\s*\)?/i.exec(body))) return { map, kind: 'total', rest: '', over: /б/i.test(m[1]), line: Number(m[2].replace(',', '.')), odds };
+    if ((m = /^п\s?([12])(?![\d.,])/i.exec(body))) return { map, kind: 'win', rest: `П${m[1]}`, odds };
     if ((m = /^(?:победитель|переможець|победа|перемога|исход|winner|match winner)(?:\s+матча|\s+матчу)?(?![а-яіїєa-z])[\s,:—–-]*(.*)$/i.exec(body))) return { map, kind: 'win', rest: m[1], odds };
     if ((m = /^(?:фора|handicap)(?![а-яіїєa-z])[\s,:—–-]*(.*?)\s*\(?([+\-−–]?\s?\d+[.,]5)\)?$/i.exec(body))) return { map, kind: 'hcp', rest: m[1], line: Number(m[2].replace(/[−–]/, '-').replace(/\s/g, '').replace(',', '.')), odds };
     if ((m = /^(?:тотал(?:\s+карт)?|total(?:\s+maps)?)(?![а-яіїєa-z])[\s,:—–-]*(больше|меньше|більше|менше|over|under|бол\.?|мен\.?)\s*\(?(\d+[.,]5)\)?/i.exec(body))) return { map, kind: 'total', rest: '', over: /больш|більш|over|бол/i.test(m[1]), line: Number(m[2].replace(',', '.')), odds };
@@ -52,7 +56,7 @@ export function slipBet(ocr: string, postedAt: string, cands: TgCandidate[]): Ex
     if (b.map) return { kind: 'bet', match, market: `Map ${b.map} Total ${b.over ? 'Over' : 'Under'} ${b.line}`, pick: '', odds }; // rounds on a map
     return { kind: 'bet', match, market: `Total Maps ${b.over ? 'Over' : 'Under'} ${b.line}`, pick: '', odds };
   }
-  const s = side(b.rest.replace(/^(?:п|w|p)\s?([12])$/i, (_x, d: string) => (d === '1' ? match.team1 : match.team2)));
+  const s = side(b.rest.replace(/^(?:п|w|p)\s?([12])$/iu, (_x, d: string) => (d === '1' ? match.team1 : match.team2)));
   if (!s) return null;
   const pick = s === 1 ? match.team1 : match.team2;
   if (b.kind === 'win') return { kind: 'bet', match, market: b.map ? `Map ${b.map} Winner` : 'Match Winner', pick, odds };
@@ -61,4 +65,15 @@ export function slipBet(ocr: string, postedAt: string, cands: TgCandidate[]): Ex
   if (b.map) return { kind: 'bet', match, market: `Map ${b.map} Handicap ${b.line < 0 ? '-' : '+'}${Math.abs(b.line)}`, pick, odds };
   if (Math.abs(b.line) > 2.5) return null;
   return { kind: 'bet', match, market: `Handicap ${b.line > 0 ? '+' : ''}${b.line}`, pick, odds };
+}
+
+/** The bookmaker a slip comes from, by its marks in the OCR / AI text (logo text, its own words). */
+const BOOKS: [string, RegExp][] = [
+  ['1win', /(?<![\da-z])1\s?win(?![a-z])|продать за \d/i], ['BC.Game', /bc\.?\s?game/i], ['1xBet', /1\s?x\s?bet|1хбет/i], ['Fonbet', /fon\s?bet|фонбет/i],
+  ['Pari', /(?<![\p{L}])(pari|пари)(?:\.ru)?(?![\p{L}])(?!vision)/iu], ['Winline', /winline|винлайн/i], ['Melbet', /melbet|мелбет/i], ['GGBet', /gg\.?bet/i],
+  ['BetBoom', /betboom|бетбум/i], ['Leon', /(?<![\p{L}])leon(?:bets)?(?![\p{L}])|леон(?![\p{L}])/iu], ['Stake', /stake\.com/i], ['Parimatch', /parimatch|париматч/i], ['Favbet', /favbet|фавбет/i], ['Bet365', /bet\s?365/i],
+];
+export function bookmakerOf(text: string): string | null {
+  for (const [name, re] of BOOKS) if (re.test(text || '')) return name;
+  return null;
 }

@@ -1,12 +1,13 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { pool } from '../db/client';
-import { rereadPost, moneyFromOcr, collectArchive, collectChannel, fetchChannelPage, rereadChannel, firstRead, progress, previewChannel, publicHandle, saved, settleTgTips, tgCandidates, tgCycle, tgNextAt } from '../services/tgSources';
+import { tme, rereadPost, moneyFromOcr, collectArchive, collectChannel, fetchChannelPage, rereadChannel, firstRead, progress, previewChannel, publicHandle, saved, settleTgTips, tgCandidates, tgCycle, tgNextAt } from '../services/tgSources';
 import { isNight } from '../services/nightMode';
 import { ocrStats } from '../services/tgOcr';
 import { aiEnabled, aiQuota, aiStats, batchStats, readersInfo } from '../services/tgAi';
 import { accountEnabled, accountMedia, accountStats, inviteHash, joinInvite, mediaLink, mediaSig, privateHandle } from '../services/tgAccount';
 import { toUsd } from '../services/fxRates';
+import { honestyOf } from '../services/tgHonesty';
 import { goldenRun, lastGolden, learnFromFix, runGolden } from '../services/tgLearn';
 import { diag, explainTip, feedMatches, verifyErrors, verifyTips } from '../services/tgVerify';
 
@@ -109,7 +110,8 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
         profit: pricedAll ? profitAll : null, roi: pricedAll ? Math.round(profitAll / pricedAll) : null, firstAt: a?.first_at ?? null,
         // our check: ROI by our scores, how honest the channel's results are (confirmed / (confirmed + disproved))
         ours: { won: n(a?.o_won), lost: n(a?.o_lost), roi: n(a?.o_priced) ? Math.round(n(a?.o_profit) / n(a?.o_priced)) : null, onlyOurs: n(a?.ours_only) },
-        confirmed: n(a?.confirmed), mismatches: n(a?.mismatches), honesty: n(a?.confirmed) + n(a?.mismatches) ? Math.round((n(a?.confirmed) / (n(a?.confirmed) + n(a?.mismatches))) * 100) : null,
+        // honesty: of the settled tips, those not suspect (a disproved claim, a deleted loss, a tip posted live that won — half)
+        confirmed: n(a?.confirmed), mismatches: n(a?.mismatches), honesty: honestyOf({ settled: wonAll + lostAll, mismatches: n(a?.mismatches), deletedLost: n(a?.deleted_lost), liveWon: n(a?.live_won) }),
         live: n(a?.live), liveWon: n(a?.live_won), liveLost: n(a?.live_lost), deleted: n(a?.deleted), edited: n(a?.edited), deletedLost: n(a?.deleted_lost), oddsHigh: n(a?.odds_high),
         week: { won: n(a?.w_won), lost: n(a?.w_lost), roi: n(a?.w_priced) ? Math.round(n(a?.w_profit) / n(a?.w_priced)) : null } },
       days: days.map((d) => wk.filter((p) => kyivDay(Date.parse(p.posted_at)) === d).length),
@@ -127,6 +129,7 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
     // the channel of the week: the best ROI (ours where we checked) of the last 7 days, at least 3 settled tips
     best: (() => { const c = channels.filter((x: any) => x.all.week.won + x.all.week.lost >= 3 && x.all.week.roi != null).sort((x: any, y: any) => y.all.week.roi - x.all.week.roi)[0]; return c ? { handle: c.handle, title: c.title, roi: c.all.week.roi, won: c.all.week.won, lost: c.all.week.lost } : null; })(),
     alerts: { unknown: all.rows.reduce((x, r) => x + Number(r.unknown || 0), 0), mismatches: all.rows.reduce((x, r) => x + Number(r.mismatches || 0), 0) },
+    tme: { limitedUntil: tme.limitedUntil > Date.now() ? new Date(tme.limitedUntil).toISOString() : null, limitedCount: tme.limitedCount, lastStatus: tme.lastStatus || null },
     account: { enabled: accountEnabled(), connectedAt: accountStats.connectedAt, error: accountStats.lastError },
     reader: { ai: aiEnabled(), model: aiStats.model || null, quota: aiQuota(), readers: readersInfo(), saved: { ...saved, batch: Math.max(0, batchStats.posts - batchStats.requests) }, golden: { ...(await lastGolden()), running: goldenRun.running, done: goldenRun.done, total: goldenRun.total }, aiCalls: aiStats.calls, aiFailed: aiStats.failed, aiError: aiStats.lastError,
       ocrImages: ocrStats.images, ocrFailed: ocrStats.failed, ocrAvgMs: ocrStats.images ? Math.round(ocrStats.ms / ocrStats.images) : null, ocrError: ocrStats.lastError },
@@ -134,7 +137,7 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
   });
 });
 
-const postCols = `handle, post_id AS "postId", posted_at AS "postedAt", text, kind, reason, game, match_id AS "matchId", team1, team2, market, pick, odds::float AS odds, result, score, fixed_by AS "fixedBy", COALESCE(photos, '{}') AS photos, ocr, slip, stake::float AS stake, currency, payout::float AS payout, our_odds::float AS "ourOdds", odds_high AS "oddsHigh", claim, our_result AS "ourResult", settled_by AS "settledBy", mismatch, is_live AS "isLive", deleted_at AS "deletedAt", edited_at AS "editedAt", legs, read_by AS "readBy", part_of AS "partOf", reply_to AS "replyTo"`;
+const postCols = `handle, post_id AS "postId", posted_at AS "postedAt", text, kind, reason, game, match_id AS "matchId", team1, team2, market, pick, odds::float AS odds, result, score, fixed_by AS "fixedBy", COALESCE(photos, '{}') AS photos, ocr, slip, stake::float AS stake, currency, payout::float AS payout, our_odds::float AS "ourOdds", odds_high AS "oddsHigh", claim, our_result AS "ourResult", settled_by AS "settledBy", mismatch, is_live AS "isLive", deleted_at AS "deletedAt", edited_at AS "editedAt", legs, read_by AS "readBy", part_of AS "partOf", reply_to AS "replyTo", doubt, bookmaker`;
 /** A tip on a match of our feed that is on now / ahead: its live state and score. */
 /** Screenshots of private channels («tgacc://…») as signed links to /api/tg-media (the admin's browser opens them). */
 const media = (c: { req: { url: string; header: (k: string) => string | undefined } }) => {
@@ -155,6 +158,18 @@ function withLive<T extends { matchId?: string | null; kind?: string }>(rows: T[
   const feed = feedMatches();
   return rows.map((r) => { const m = r.kind === 'bet' && r.matchId ? feed.find((x) => x.id === r.matchId) : undefined; return m ? { ...r, live: { status: m.status, score1: m.score1, score2: m.score2, start: m.start } } : r; });
 }
+
+/** GET /api/admin/tg-sources/candidates — channels our channels point to (links, @mentions), most mentioned first: candidates to add. */
+tg.get('/admin/tg-sources/candidates', requireAuth, requireAdmin, async (c) => {
+  const { rows } = await pool.query(`SELECT handle, seen_in AS "seenIn", mentions, last_at AS "lastAt" FROM tg_candidates t
+      WHERE NOT dismissed AND NOT EXISTS (SELECT 1 FROM tg_channels c WHERE c.handle = t.handle) ORDER BY mentions DESC, last_at DESC LIMIT 20`);
+  return c.json({ candidates: rows });
+});
+/** DELETE /api/admin/tg-sources/candidates/:handle — not interesting: hidden from the list. */
+tg.delete('/admin/tg-sources/candidates/:handle', requireAuth, requireAdmin, async (c) => {
+  await pool.query('UPDATE tg_candidates SET dismissed = true WHERE handle = $1', [c.req.param('handle')]);
+  return c.json({ ok: true });
+});
 
 /** GET /api/admin/tg-sources/:handle/slips — every post with money on a slip: what it shows and whether it is in «Гроші каналу» (a tip, once). */
 tg.get('/admin/tg-sources/:handle/slips', requireAuth, requireAdmin, async (c) => {
@@ -184,7 +199,7 @@ tg.get('/admin/tg-sources/:handle/posts', requireAuth, requireAdmin, async (c) =
 tg.get('/admin/tg-posts/unrecognized', requireAuth, requireAdmin, async (c) => {
   // the post columns in a subquery, the channel's title joined outside — no column name clashes («game», «handle»)
   const { rows } = await pool.query(
-    `SELECT x.*, ch.title FROM (SELECT ${postCols} FROM tg_posts WHERE (kind = 'unknown' AND fixed_by IS NULL) OR (kind = 'bet' AND mismatch)) x
+    `SELECT x.*, ch.title FROM (SELECT ${postCols} FROM tg_posts WHERE (kind = 'unknown' AND fixed_by IS NULL) OR (kind = 'bet' AND mismatch) OR (kind = 'bet' AND doubt IS NOT NULL AND fixed_by IS NULL)) x
        LEFT JOIN tg_channels ch ON ch.handle = x.handle ORDER BY x.mismatch DESC, x."postedAt" DESC LIMIT 100`);
   return c.json({ posts: rows.map(media(c)) });
 });
