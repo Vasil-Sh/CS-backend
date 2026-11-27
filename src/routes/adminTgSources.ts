@@ -182,9 +182,10 @@ tg.get('/admin/tg-sources/:handle/posts', requireAuth, requireAdmin, async (c) =
 
 /** GET /api/admin/tg-posts/unrecognized — posts that look like tips but were not understood (not sorted yet, newest 100). */
 tg.get('/admin/tg-posts/unrecognized', requireAuth, requireAdmin, async (c) => {
+  // the post columns in a subquery, the channel's title joined outside — no column name clashes («game», «handle»)
   const { rows } = await pool.query(
-    `SELECT ${postCols.replace(/(^|, )(?!COALESCE)(\w+)/g, '$1p.$2').replace('COALESCE(photos', 'COALESCE(p.photos').replace(/(^|, )(our_result|settled_by|is_live|deleted_at|edited_at|our_odds|odds_high)/g, '$1p.$2')}, ch.title FROM tg_posts p LEFT JOIN tg_channels ch ON ch.handle = p.handle
-     WHERE (p.kind = 'unknown' AND p.fixed_by IS NULL) OR (p.kind = 'bet' AND p.mismatch) ORDER BY p.mismatch DESC, p.posted_at DESC LIMIT 100`);
+    `SELECT x.*, ch.title FROM (SELECT ${postCols} FROM tg_posts WHERE (kind = 'unknown' AND fixed_by IS NULL) OR (kind = 'bet' AND mismatch)) x
+       LEFT JOIN tg_channels ch ON ch.handle = x.handle ORDER BY x.mismatch DESC, x."postedAt" DESC LIMIT 100`);
   return c.json({ posts: rows.map(media(c)) });
 });
 
@@ -397,8 +398,9 @@ tg.get('/admin/tg-sources/:handle/stats', requireAuth, requireAdmin, async (c) =
     `SELECT posted_at, claim, text FROM tg_posts WHERE handle = $1 AND claim IS NOT NULL ORDER BY posted_at DESC LIMIT 10`, [handle])).rows;
   const summaries = [];
   for (const cl of claims) {
-    const day = new Date(Date.parse(cl.posted_at) - 86_400_000 + 2 * 3_600_000).toISOString().slice(0, 10);
-    const ours = rows.filter((r) => r.day === day || r.day === cl.posted_at.slice(0, 10)).map((r) => r.our_result ?? r.result).filter((x) => x === 'Win' || x === 'Loss');
+    const at = new Date(cl.posted_at).getTime(); // pg gives a Date here, not a string
+    const day = new Date(at - 86_400_000 + 2 * 3_600_000).toISOString().slice(0, 10), own = new Date(at).toISOString().slice(0, 10);
+    const ours = rows.filter((r) => r.day === day || r.day === own).map((r) => r.our_result ?? r.result).filter((x) => x === 'Win' || x === 'Loss');
     summaries.push({ at: cl.posted_at, period: cl.claim.period || null, claimed: { won: cl.claim.won ?? null, total: cl.claim.total ?? null }, ours: { won: ours.filter((x) => x === 'Win').length, total: ours.length } });
   }
   // the channel's money slip by slip (its main currency): the balance after each settled slip
