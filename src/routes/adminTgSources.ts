@@ -280,7 +280,7 @@ tg.get('/admin/tg-posts/sample', requireAuth, requireAdmin, async (c) => {
     `SELECT x.*, ch.title FROM (SELECT ${postCols} FROM tg_posts WHERE read_by IS NOT NULL AND part_of IS NULL AND read_wrong IS NULL AND fixed_by IS NULL
         AND kind IN ('bet', 'other') AND deleted_at IS NULL AND posted_at > now() - interval '7 days' ORDER BY random() LIMIT 10) x
       LEFT JOIN tg_channels ch ON ch.handle = x.handle ORDER BY x."postedAt" DESC`);
-  return c.json(rows);
+  return c.json({ posts: rows });
 });
 
 /** POST /api/admin/tg-posts/:handle/:postId/check {ok} — the admin says the post was read right or wrong. */
