@@ -328,7 +328,10 @@ async function applySlip(handle: string, postId: number, slip: Slip, keepMoney =
   await pool.query(
     `UPDATE tg_posts SET slip = CASE WHEN $9 AND slip IS NOT NULL THEN slip ELSE $3 END, -- a post keeps what its own slip shows («очікується»); the result comes from the later one
         stake = CASE WHEN $7 AND stake IS NOT NULL THEN stake ELSE COALESCE($4, stake) END,
-        currency = CASE WHEN $7 AND currency IS NOT NULL THEN currency ELSE COALESCE($5, currency) END,
+        currency = CASE WHEN $7 AND currency IS NOT NULL THEN currency ELSE COALESCE($5, currency,
+          -- the slip's sum came without its sign (OCR lost «₽»): the channel's one currency, when it always uses one
+          CASE WHEN COALESCE($4, stake) IS NOT NULL THEN (SELECT c.currency FROM tg_posts c WHERE c.handle = $1 AND c.currency IS NOT NULL
+            GROUP BY c.currency HAVING count(*) >= 3 AND count(*) >= 0.9 * (SELECT count(*) FROM tg_posts a WHERE a.handle = $1 AND a.currency IS NOT NULL)) END) END,
         payout = COALESCE($6, payout),
         -- the slip's payout ÷ stake is the bet's real odds: a number read elsewhere («+4.5» of a handicap) gives way to it
         odds = CASE WHEN fixed_by IS NULL AND $10::numeric IS NOT NULL AND (odds IS NULL OR abs(odds - $10::numeric) > 0.05) THEN $10::numeric ELSE odds END,
