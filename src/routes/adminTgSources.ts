@@ -8,7 +8,7 @@ import { ocrStats } from '../services/tgOcr';
 import { aiEnabled, aiQuota, aiStats, batchStats, readersInfo } from '../services/tgAi';
 import { accountEnabled, accountMedia, accountStats, inviteHash, joinInvite, mediaLink, mediaSig, privateHandle } from '../services/tgAccount';
 import { toUsd } from '../services/fxRates';
-import { chaseOf, honestyOf } from '../services/tgHonesty';
+import { chaseOf, honestyOf, stakeRiskOf } from '../services/tgHonesty';
 import { goldenRun, lastGolden, learnFromFix, runGolden } from '../services/tgLearn';
 import { diag, explainTip, feedMatches, verifyErrors, verifyTips } from '../services/tgVerify';
 
@@ -87,12 +87,18 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
          FROM tg_posts GROUP BY handle`),
     pool.query<{ handle: string; n: string }>(`SELECT handle, count(*) AS n FROM tg_posts WHERE photos IS NULL GROUP BY handle`),
     // real money from the slips (the slip's currency): won → paid − staked, lost → −staked
-    pool.query<{ handle: string; currency: string; profit: string; staked: string; n: string; won: string | null; lost: string | null; wins: string; losses: string; open: string | null; open_n: string }>(
+    pool.query<{ handle: string; currency: string; profit: string; staked: string; n: string; won: string | null; lost: string | null; wins: string; losses: string; open: string | null; open_n: string; won_stake: string | null; big: string | null; w_profit: string | null; w_staked: string | null; w_n: string }>(
       `SELECT handle, currency, sum(CASE WHEN result = 'Win' THEN COALESCE(payout - stake, stake * (odds - 1)) WHEN result = 'Loss' THEN -stake ELSE 0 END) AS profit,
               sum(stake) FILTER (WHERE result IN ('Win', 'Loss')) AS staked, count(*) FILTER (WHERE result IN ('Win', 'Loss')) AS n,
               sum(COALESCE(payout - stake, stake * (odds - 1))) FILTER (WHERE result = 'Win') AS won, sum(stake) FILTER (WHERE result = 'Loss') AS lost,
               count(*) FILTER (WHERE result = 'Win') AS wins, count(*) FILTER (WHERE result = 'Loss') AS losses,
-              sum(stake) FILTER (WHERE result IS NULL) AS open, count(*) FILTER (WHERE result IS NULL) AS open_n
+              sum(stake) FILTER (WHERE result IS NULL) AS open, count(*) FILTER (WHERE result IS NULL) AS open_n,
+              -- «вінрейт у грошах»: the stakes that won, of all the stakes settled; the biggest stake
+              sum(stake) FILTER (WHERE result = 'Win') AS won_stake, max(stake) FILTER (WHERE result IN ('Win', 'Loss')) AS big,
+              -- the last 7 days (the channel of the week by money)
+              sum(CASE WHEN result = 'Win' THEN COALESCE(payout - stake, stake * (odds - 1)) WHEN result = 'Loss' THEN -stake ELSE 0 END) FILTER (WHERE posted_at > now() - interval '7 days') AS w_profit,
+              sum(stake) FILTER (WHERE result IN ('Win', 'Loss') AND posted_at > now() - interval '7 days') AS w_staked,
+              count(*) FILTER (WHERE result IN ('Win', 'Loss') AND posted_at > now() - interval '7 days') AS w_n
          FROM tg_posts WHERE kind = 'bet' AND stake IS NOT NULL AND currency IS NOT NULL GROUP BY handle, currency`),
     // 7 days by kind, for the day sheet
     pool.query<{ handle: string; day: string; kind: string; reason: string | null; n: string }>(
@@ -128,8 +134,16 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
     .map((r) => ({ currency: r.currency, profit: r2(r.profit), staked: r2(r.staked), bets: Number(r.n), won: r2(r.won), lost: r2(r.lost), wins: Number(r.wins), losses: Number(r.losses), open: r2(r.open), openBets: Number(r.open_n),
       profitUsd: toUsd(r2(r.profit), r.currency), stakedUsd: toUsd(r2(r.staked), r.currency),
       // payoff of the money: profit on what was staked — big stakes weigh more than small ones
-      roi: Number(r.staked) > 0 ? Math.round((Number(r.profit) / Number(r.staked)) * 100) : null }))
+      roi: Number(r.staked) > 0 ? Math.round((Number(r.profit) / Number(r.staked)) * 100) : null,
+      // «вінрейт у грошах»: what share of the money staked won — a big lost stake pulls it down, the count of wins does not
+      moneyWinrate: Number(r.staked) > 0 ? Math.round((Number(r.won_stake || 0) / Number(r.staked)) * 100) : null, biggest: r2(r.big),
+      week: { profit: r2(r.w_profit), staked: r2(r.w_staked), n: Number(r.w_n), profitUsd: toUsd(r2(r.w_profit), r.currency), stakedUsd: toUsd(r2(r.w_staked), r.currency) } }))
     .sort((a, b) => Math.abs(b.profit) - Math.abs(a.profit));
+  // the money's ROI over the last 7 days, all currencies in dollars — with 3+ settled slips, else null
+  const weekMoneyRoi = (h: string) => {
+    const ms = moneyOf(h), nW = ms.reduce((x, m) => x + m.week.n, 0), st = ms.reduce((x, m) => x + (m.week.stakedUsd ?? 0), 0);
+    return nW >= 3 && st > 0 ? Math.round((ms.reduce((x, m) => x + (m.week.profitUsd ?? 0), 0) / st) * 100) : null;
+  };
   const dayOf = (h: string, d: string) => {
     const rs = byDay.rows.filter((r) => r.handle === h && r.day === d), cnt = (f: (r: typeof rs[number]) => boolean) => rs.filter(f).reduce((x, r) => x + Number(r.n), 0);
     return { tips: cnt((r) => r.kind === 'bet'), unknown: cnt((r) => r.kind === 'unknown'), info: cnt((r) => r.kind === 'other' && r.reason !== 'Повтор' && r.reason !== 'Результат'), repeats: cnt((r) => r.kind === 'other' && (r.reason === 'Повтор' || r.reason === 'Результат')) };
@@ -168,8 +182,11 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
         // honesty: of the settled tips, those not suspect (a disproved claim, a deleted loss, a tip posted live that won — half)
         confirmed: n(a?.confirmed), mismatches: n(a?.mismatches), honesty: honestyOf({ settled: wonAll + lostAll, mismatches: n(a?.mismatches), deletedLost: n(a?.deleted_lost), liveWon: n(a?.live_won) }),
         live: n(a?.live), liveWon: n(a?.live_won), liveLost: n(a?.live_lost), deleted: n(a?.deleted), edited: n(a?.edited), deletedLost: n(a?.deleted_lost), oddsHigh: n(a?.odds_high),
-        week: { won: n(a?.w_won), lost: n(a?.w_lost), roi: n(a?.w_priced) ? Math.round(n(a?.w_profit) / n(a?.w_priced)) : null } },
+        week: { won: n(a?.w_won), lost: n(a?.w_lost), roi: n(a?.w_priced) ? Math.round(n(a?.w_profit) / n(a?.w_priced)) : null, moneyRoi: weekMoneyRoi(ch.handle) } },
       days: days.map((d) => wk.filter((p) => kyivDay(Date.parse(p.posted_at)) === d).length),
+      // a high winrate while the money (all currencies, in $) is in the red: big stakes lost
+      moneyWarn: (() => { const ms = moneyOf(ch.handle), usd = ms.reduce((x, m) => x + (m.profitUsd ?? 0), 0), wr = wonAll + lostAll ? Math.round((wonAll / (wonAll + lostAll)) * 100) : null;
+        const m = ms[0]; return wr != null && wr >= 55 && ms.some((x) => x.bets > 0) && usd < 0 ? { winrate: wr, profitUsd: Math.round(usd), currency: m?.currency, profit: m?.profit, biggest: m?.biggest, moneyWinrate: m?.moneyWinrate } : null; })(),
     };
   });
   const p24 = posts.rows.filter((p) => now - Date.parse(p.posted_at) < DAY);
@@ -182,7 +199,8 @@ tg.get('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
       recognized: tips7 + unk7 ? Math.round((tips7 / (tips7 + unk7)) * 100) : null, unknown7d: unk7, queue: all.rows.reduce((x, r) => x + Number(r.unknown || 0), 0), settled30d: settled.length,
       winrate30d: settled.length ? Math.round((settled.filter((p) => p.result === 'Win').length / settled.length) * 100) : null, pending: posts.rows.filter((p) => p.kind === 'bet' && !p.result).length },
     // the channel of the week: the best ROI (ours where we checked) of the last 7 days, at least 3 settled tips
-    best: (() => { const c = channels.filter((x: any) => x.all.week.won + x.all.week.lost >= 3 && x.all.week.roi != null).sort((x: any, y: any) => y.all.week.roi - x.all.week.roi)[0]; return c ? { handle: c.handle, title: c.title, roi: c.all.week.roi, won: c.all.week.won, lost: c.all.week.lost } : null; })(),
+    // with 3+ settled slips this week, the money decides (a big lost stake is not hidden by many small wins)
+    best: (() => { const c = channels.filter((x: any) => x.all.week.won + x.all.week.lost >= 3 && (x.all.week.moneyRoi != null || x.all.week.roi != null)).sort((x: any, y: any) => (y.all.week.moneyRoi ?? y.all.week.roi) - (x.all.week.moneyRoi ?? x.all.week.roi))[0]; return c ? { handle: c.handle, title: c.title, roi: c.all.week.roi, moneyRoi: c.all.week.moneyRoi, won: c.all.week.won, lost: c.all.week.lost } : null; })(),
     alerts: { unknown: all.rows.reduce((x, r) => x + Number(r.unknown || 0), 0), mismatches: all.rows.reduce((x, r) => x + Number(r.mismatches || 0), 0) },
     accuracy: await readAccuracy().catch(() => null),
     doubts: { ...doubtRun, open: Number((await pool.query<{ n: string }>(`SELECT count(*) AS n FROM tg_posts WHERE doubt IS NOT NULL AND fixed_by IS NULL`)).rows[0]?.n || 0) },
@@ -526,6 +544,11 @@ tg.get('/admin/tg-sources/:handle/stats', requireAuth, requireAdmin, async (c) =
   // «Відіграш»: the stake after a lost slip against the stake after a won one (its main currency, 3+ of each)
   const cm = mrows.filter((r) => r.currency === mainCur);
   const chase = chaseOf(cm.map((r) => ({ stake: r.stake, result: r.result })));
+  // «Великі ставки», «вінрейт у грошах» and the warning: a high winrate while the money is in the red
+  const wl = rows.reduce((a, r) => { const res = r.our_result ?? r.result; if (res === 'Win') a.w++; else if (res === 'Loss') a.l++; return a; }, { w: 0, l: 0 });
+  const risk = stakeRiskOf(cm.map((r) => ({ postId: Number(r.post_id), stake: r.stake, result: r.result, profit: r.result === 'Win' ? (r.payout ?? r.stake * (r.odds ?? 1)) - r.stake : r.result === 'Loss' ? -r.stake : 0 })),
+    wl.w + wl.l ? Math.round((wl.w / (wl.w + wl.l)) * 100) : null);
+  if (money && risk?.big.length) { const bigIds = new Set(risk.big.map((x) => x.postId)); for (const p of money.points as { postId: number; big?: boolean }[]) if (bigIds.has(p.postId)) p.big = true; }
   // «Порівняння місяців»: each month's tips, wins, ROI (1 unit a tip) and the slips' money in the main currency
   const mon = new Map<string, { won: number; lost: number; profit: number; priced: number; money: number; slips: number; staked: number }>();
   const mOf = (k: string) => { let x = mon.get(k); if (!x) { x = { won: 0, lost: 0, profit: 0, priced: 0, money: 0, slips: 0, staked: 0 }; mon.set(k, x); } return x; };
@@ -537,7 +560,7 @@ tg.get('/admin/tg-sources/:handle/stats', requireAuth, requireAdmin, async (c) =
   const months = [...mon.entries()].sort((a, b) => b[0].localeCompare(a[0])).map(([month, x]) => ({
     month, won: x.won, lost: x.lost, winrate: x.won + x.lost ? Math.round((x.won / (x.won + x.lost)) * 100) : null, roi: x.priced ? Math.round(x.profit / x.priced) : null,
     money: x.slips ? Math.round(x.money * 100) / 100 : null, slips: x.slips, moneyRoi: x.staked ? Math.round((x.money / x.staked) * 1000) / 10 : null }));
-  return c.json({ money, chase, months, chart, byGame: group((r) => (r.game === 'dota2' ? 'Dota 2' : 'CS2')), byMarket: group((r) => kindOf(r.market)), streaks: { best, worst, current: cur }, summaries });
+  return c.json({ money, chase, risk, months, chart, byGame: group((r) => (r.game === 'dota2' ? 'Dota 2' : 'CS2')), byMarket: group((r) => kindOf(r.market)), streaks: { best, worst, current: cur }, summaries });
 });
 
 /** POST /api/admin/tg-sources/verify — run our check now; returns how many tips it closed and its last errors / notes. */
