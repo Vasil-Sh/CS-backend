@@ -516,7 +516,18 @@ tg.get('/admin/tg-sources/:handle/stats', requireAuth, requireAdmin, async (c) =
   // «Відіграш»: the stake after a lost slip against the stake after a won one (its main currency, 3+ of each)
   const cm = mrows.filter((r) => r.currency === mainCur);
   const chase = chaseOf(cm.map((r) => ({ stake: r.stake, result: r.result })));
-  return c.json({ money, chase, chart, byGame: group((r) => (r.game === 'dota2' ? 'Dota 2' : 'CS2')), byMarket: group((r) => kindOf(r.market)), streaks: { best, worst, current: cur }, summaries });
+  // «Порівняння місяців»: each month's tips, wins, ROI (1 unit a tip) and the slips' money in the main currency
+  const mon = new Map<string, { won: number; lost: number; profit: number; priced: number; money: number; slips: number; staked: number }>();
+  const mOf = (k: string) => { let x = mon.get(k); if (!x) { x = { won: 0, lost: 0, profit: 0, priced: 0, money: 0, slips: 0, staked: 0 }; mon.set(k, x); } return x; };
+  for (const r of rows) { const res = r.our_result ?? r.result; if (res !== 'Win' && res !== 'Loss') continue; const x = mOf(r.day.slice(0, 7)); if (res === 'Win') x.won++; else x.lost++; if (r.odds) { x.profit += unit(res, r.odds); x.priced++; } }
+  const kyivMonth = (at: string) => new Date(new Date(at).getTime()).toLocaleDateString('sv-SE', { timeZone: 'Europe/Kyiv' }).slice(0, 7);
+  for (const r of mrows) { if (r.currency !== mainCur) continue; const x = mOf(kyivMonth(r.at)); x.slips++; x.staked += r.stake; x.money += r.result === 'Win' ? (r.payout ?? r.stake * (r.odds ?? 1)) - r.stake : r.result === 'Loss' ? -r.stake : 0; }
+  const nowM = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Kyiv' }).slice(0, 7);
+  mOf(nowM);
+  const months = [...mon.entries()].sort((a, b) => b[0].localeCompare(a[0])).map(([month, x]) => ({
+    month, won: x.won, lost: x.lost, winrate: x.won + x.lost ? Math.round((x.won / (x.won + x.lost)) * 100) : null, roi: x.priced ? Math.round(x.profit / x.priced) : null,
+    money: x.slips ? Math.round(x.money * 100) / 100 : null, slips: x.slips, moneyRoi: x.staked ? Math.round((x.money / x.staked) * 1000) / 10 : null }));
+  return c.json({ money, chase, months, chart, byGame: group((r) => (r.game === 'dota2' ? 'Dota 2' : 'CS2')), byMarket: group((r) => kindOf(r.market)), streaks: { best, worst, current: cur }, summaries });
 });
 
 /** POST /api/admin/tg-sources/verify — run our check now; returns how many tips it closed and its last errors / notes. */
