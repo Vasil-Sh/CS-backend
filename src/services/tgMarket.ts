@@ -8,7 +8,7 @@ import type { TipsGgMatch } from './matchTypes';
 import { pool } from '../db/client';
 
 export interface TgPrice { side1: number[]; side2: number[]; channels: number }
-let cache: { at: number; byMatch: Map<string, { picks: { pick: string; odds: number; handle: string }[]; team1: string; team2: string }> } = { at: 0, byMatch: new Map() };
+const cache: { at: number; byMatch: Map<string, { picks: { pick: string; odds: number; handle: string }[]; team1: string; team2: string }> } = { at: 0, byMatch: new Map() };
 const EVERY_MS = 5 * 60_000;
 
 /** The channels' Match Winner tips of the last 14 days with odds, by match (read at most every 5 minutes). */
