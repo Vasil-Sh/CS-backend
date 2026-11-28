@@ -5,7 +5,7 @@
  */
 import { pool } from '../db/client';
 
-export type ErrorSource = 'api' | 'process' | 'console';
+export type ErrorSource = 'api' | 'process' | 'console' | 'client';
 interface Pending { source: ErrorSource; message: string; detail: string; path: string; status: number | null; count: number; at: Date }
 
 const pending = new Map<string, Pending>();
@@ -87,6 +87,8 @@ export function severityOf(source: string, message: string, status: number | nul
     return { severity: 'critical', hint: 'Серверу забракло пам’яті — він міг перезапуститися' };
   if (source === 'process' && /^Uncaught exception/i.test(m))
     return { severity: 'critical', hint: 'Сервер упав з необробленою помилкою — Railway перезапустив його' };
+  if (source === 'client')
+    return { severity: 'critical', hint: 'Екран адмінки не відкрився в браузері — адмін бачив «Екран не вдалося показати»' };
   if (source === 'api')
     return { severity: 'critical', hint: `Користувач отримав помилку${status ? ` ${status}` : ''} замість відповіді — запит не виконався` };
   if (/liquipedia|oddspapi|opendota|parser|force refresh|feed|scores|odds/i.test(m))

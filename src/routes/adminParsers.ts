@@ -8,7 +8,7 @@ import { pandascoreDiag, pandascoreEnabled, refreshPandaScore } from '../service
 import { citoDiag, citoEnabled, refreshCito } from '../services/citoFeed';
 import { polymarketDiag, polymarketEnabled, refreshPolymarket } from '../services/polymarketFeed';
 import { forceLiquipedia, liquipediaAskedAt, liquipediaPagesInfo, setPagesMode } from '../services/liquipediaFeed';
-import { listServerErrors, resolveServerError } from '../services/serverErrors';
+import { listServerErrors, recordServerError, resolveServerError } from '../services/serverErrors';
 import { weekReport } from '../services/feedStats';
 import { touchActivity } from '../services/activityTracker';
 import { isNight, nightWindow } from '../services/nightMode';
@@ -95,6 +95,15 @@ parsers.get('/admin/parsers', requireAuth, requireAdmin, async (c) => {
     };
   });
   return c.json({ parsers: merged, night: { ...nightWindow(), active: isNight() }, scoreIssues: await scoreIssues().catch(() => []) });
+});
+
+/** A screen of the admin panel that crashed in the browser: kept with the server errors (source «client»). */
+parsers.post('/admin/client-errors', requireAuth, requireAdmin, async (c) => {
+  const b = await c.req.json().catch(() => ({})) as { message?: unknown; stack?: unknown; path?: unknown };
+  const message = String(b.message ?? '').trim().slice(0, 500);
+  if (!message) return c.json({ error: 'message required' }, 400);
+  recordServerError('client', `Екран адмінки: ${message}`, String(b.stack ?? '').slice(0, 4000), String(b.path ?? '').slice(0, 300));
+  return c.json({ ok: true });
 });
 
 /** Server errors kept for the admin («Налаштування → Помилки сервера»). */
