@@ -294,6 +294,29 @@ export async function moneyFromOcr(): Promise<number> {
   return n;
 }
 
+/** A tip the admin sorted (made a tip, or set its result) whose slip money was never read — a reader skipped it, or it was «Інфо» first:
+ *  OCR reads its screenshots now and the money goes in (the admin's result and odds stay). Each post is tried once a run. */
+const moneyTried = new Set<string>();
+export async function fillSortedMoney(handle?: string, postId?: number): Promise<number> {
+  const { rows } = await pool.query<{ handle: string; post_id: number; photos: string[] }>(
+    `SELECT handle, post_id, photos FROM tg_posts WHERE kind = 'bet' AND stake IS NULL AND photos IS NOT NULL AND cardinality(photos) > 0 AND part_of IS NULL
+       AND ${handle ? 'handle = $1 AND post_id = $2' : "fixed_by IS NOT NULL AND posted_at > now() - interval '14 days'"} ORDER BY posted_at DESC LIMIT 5`, handle ? [handle, postId] : []);
+  let n = 0;
+  for (const r of rows) {
+    const key = `${r.handle}/${r.post_id}`;
+    if (!handle && moneyTried.has(key)) continue;
+    moneyTried.add(key);
+    for (const url of r.photos.slice(0, 2)) {
+      const s0 = slipFromOcr(await ocrImage(url).catch(() => ''));
+      if (!s0?.stake) continue;
+      await applySlip(r.handle, r.post_id, { status: s0.status, stake: s0.stake, currency: s0.currency, payout: s0.payout, odds: s0.odds }, true);
+      n++;
+      break;
+    }
+  }
+  return n;
+}
+
 /** One post read again from what is saved (its text and screenshots), the admin's sorting dropped. */
 export async function rereadPost(handle: string, postId: number): Promise<boolean> {
   const r = (await pool.query<{ posted_at: string; text: string | null; photos: string[] | null; reply_to: number | null; part_of: number | null }>('SELECT posted_at, text, photos, reply_to, part_of FROM tg_posts WHERE handle = $1 AND post_id = $2', [handle, postId])).rows[0];
@@ -633,6 +656,7 @@ export async function tgCycle(): Promise<void> {
     await pauseSilent().catch(() => 0);
     await loadReaderAccuracy();
     await moneyFromOcr().catch(() => 0);
+    await fillSortedMoney().catch(() => 0);
     // posts read by OCR while every reader rested (3 days back): read again by the AI now that one is back
     if (readerReady()) await pool.query(`UPDATE tg_posts SET photos = NULL WHERE (handle, post_id) IN (SELECT handle, post_id FROM tg_posts
         WHERE read_by = 'ocr' AND fixed_by IS NULL AND photos IS NOT NULL AND posted_at > now() - interval '3 days'

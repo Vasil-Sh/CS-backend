@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { pool } from '../db/client';
 import { normalizeTeam } from '../utils/matchUtils';
-import { doubtRun, rereadDoubtful, tme, rereadPost, moneyFromOcr, collectArchive, collectChannel, fetchChannelPage, rereadChannel, firstRead, progress, previewChannel, publicHandle, saved, settleTgTips, tgCandidates, tgCycle, tgNextAt } from '../services/tgSources';
+import { doubtRun, rereadDoubtful, tme, rereadPost, moneyFromOcr, fillSortedMoney, collectArchive, collectChannel, fetchChannelPage, rereadChannel, firstRead, progress, previewChannel, publicHandle, saved, settleTgTips, tgCandidates, tgCycle, tgNextAt } from '../services/tgSources';
 import { isNight } from '../services/nightMode';
 import { ocrStats } from '../services/tgOcr';
 import { aiEnabled, aiQuota, aiStats, batchStats, readersInfo } from '../services/tgAi';
@@ -238,7 +238,7 @@ tg.get('/admin/tg-sources/:handle/slips', requireAuth, requireAdmin, async (c) =
     const stake = Number(r.stake), payout = r.payout != null ? Number(r.payout) : null, odds = r.odds != null ? Number(r.odds) : null;
     const counted = r.kind === 'bet' && !!r.currency;
     const profit = !counted ? null : r.result === 'Win' ? Math.round(((payout ?? stake * (odds ?? 1)) - stake) * 100) / 100 : r.result === 'Loss' ? -stake : r.result === 'Void' ? 0 : null;
-    const why = counted ? null : !r.currency ? 'не прочитано валюту' : r.reason === 'Результат' ? 'квиток з результатом — гроші на першому пості' : r.reason === 'Повтор' ? 'повтор — рахуємо раз' : r.kind === 'unknown' ? 'пост не розпізнано' : 'пост не прогноз';
+    const why = counted ? null : !r.currency ? 'не прочитано валюту' : r.reason === 'Результат' ? 'квиток з результатом — гроші на першому пості' : r.reason === 'Повтор' ? 'повтор — рахуємо раз' : r.reason === 'Повернення' ? 'ставку повернули — без прибутку' : r.kind === 'unknown' ? 'пост не розпізнано' : 'пост не прогноз';
     return { ...r, stake, payout, odds, counted, profit, why };
   }) });
 });
@@ -305,7 +305,7 @@ tg.post('/admin/tg-posts/bulk', requireAuth, requireAdmin, async (c) => {
   const b = await c.req.json().catch(() => null) as { items?: { handle: string; postId: number }[]; reason?: string | null } | null;
   const items = (b?.items || []).filter((x) => x && typeof x.handle === 'string' && Number(x.postId) > 0).slice(0, 200);
   if (!items.length) return c.json({ error: 'Немає постів' }, 400);
-  const reason = ['Повтор', 'Опитування', 'Підсумок'].includes(String(b?.reason)) ? String(b!.reason) : null;
+  const reason = ['Повтор', 'Опитування', 'Підсумок', 'Повернення'].includes(String(b?.reason)) ? String(b!.reason) : null;
   for (const x of items) {
     await markRead(x.handle, Number(x.postId), { kind: 'other' }, actor.username).catch(() => {});
     await pool.query(`UPDATE tg_posts SET kind = 'other', reason = $4, result = NULL, our_result = NULL, mismatch = false, settled_by = NULL, fixed_by = $3 WHERE handle = $1 AND post_id = $2`, [x.handle, Number(x.postId), actor.username, reason]);
@@ -331,7 +331,7 @@ tg.post('/admin/tg-posts/:handle/:postId', requireAuth, requireAdmin, async (c) 
   if (!b || !postId) return c.json({ error: 'Invalid body' }, 400);
   if (b.kind === 'other') {
     // the admin's status for a post that is not a tip: info, a repeat, a poll, a results summary
-    const reason = ['Повтор', 'Опитування', 'Підсумок', 'Результат'].includes(String(b.reason)) ? String(b.reason) : null;
+    const reason = ['Повтор', 'Опитування', 'Підсумок', 'Результат', 'Повернення'].includes(String(b.reason)) ? String(b.reason) : null;
     await markRead(handle, postId, { kind: 'other' }, actor.username).catch(() => {});
     await pool.query(`UPDATE tg_posts SET kind = 'other', reason = $4, result = NULL, our_result = NULL, mismatch = false, settled_by = NULL, fixed_by = $3 WHERE handle = $1 AND post_id = $2`, [handle, postId, actor.username, reason]);
     await learnFromFix(handle, postId, { kind: 'other' }, actor.username).catch(() => {});
@@ -365,6 +365,8 @@ tg.post('/admin/tg-posts/:handle/:postId', requireAuth, requireAdmin, async (c) 
     [handle, postId, m.game, m.id, m.team1, m.team2, market, pick, odds, actor.username, ['Win', 'Loss', 'Void', 'pending'].includes(String(b.result)) ? 'set' : 'auto', ['Win', 'Loss', 'Void'].includes(String(b.result)) ? String(b.result) : null]);
   await learnFromFix(handle, postId, { kind: 'bet', game: m.game, team1: m.team1, team2: m.team2, market, pick: pick || null, odds }, actor.username).catch(() => {});
   if (b.remember && mk === 'Match Winner') await pool.query(`UPDATE tg_channels SET rules = rules || jsonb_build_object('oddsOnly', $2::text) WHERE handle = $1`, [handle, b.side === 2 ? 'p2' : 'p1']);
+  // a tip with a slip whose money was never read: OCR reads it now, so it is in «Квитки зі ставками»
+  await fillSortedMoney(handle, postId).catch(() => 0);
   void settleTgTips().catch(() => {});
   audit(actor, 'POST', `/admin/tg-posts/${handle}/${postId}`, { kind: 'bet', match: `${m.team1} — ${m.team2}`, market, pick, odds, remember: !!b.remember });
   return c.json({ ok: true });
