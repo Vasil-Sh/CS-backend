@@ -2,11 +2,11 @@ import { db } from '../db/client';
 import { matchesHistory, type NewMatchHistory, type MatchHistory } from '../db/schema';
 import { eq, and, gte, desc, sql } from 'drizzle-orm';
 
-const CAMEL: Record<string, string> = { start_at: 'startAt', rank1: 'rank1', rank2: 'rank2', coeff1: 'coeff1', coeff2: 'coeff2', open_coeff1: 'openCoeff1', open_coeff2: 'openCoeff2', close_coeff1: 'closeCoeff1', close_coeff2: 'closeCoeff2', best_coeff1: 'bestCoeff1', best_coeff2: 'bestCoeff2', best_book1: 'bestBook1', best_book2: 'bestBook2', tier: 'tier', maps: 'maps' };
+const CAMEL: Record<string, string> = { start_at: 'startAt', rank1: 'rank1', rank2: 'rank2', coeff1: 'coeff1', coeff2: 'coeff2', open_coeff1: 'openCoeff1', open_coeff2: 'openCoeff2', close_coeff1: 'closeCoeff1', close_coeff2: 'closeCoeff2', best_coeff1: 'bestCoeff1', best_coeff2: 'bestCoeff2', best_book1: 'bestBook1', best_book2: 'bestBook2', tier: 'tier', maps: 'maps', pm_coeff1: 'pmCoeff1', pm_coeff2: 'pmCoeff2', pm_close1: 'pmClose1', pm_close2: 'pmClose2' };
 /** `col = COALESCE(the new value, the saved one)` for each column. */
 const keep = (...cols: string[]) => Object.fromEntries(cols.map((c) => [CAMEL[c], sql.raw(`COALESCE(excluded.${c}, matches_history.${c})`)]));
 /** The predictor fields of a feed match: start, rankings, odds, tier, maps. */
-export function historyExtras(m: { startDate?: string | null; positionTeam1?: number | null; positionTeam2?: number | null; coeff1?: number | null; coeff2?: number | null; openCoeff1?: number | null; openCoeff2?: number | null; closeCoeff1?: number | null; closeCoeff2?: number | null; bestCoeff1?: number | null; bestCoeff2?: number | null; bestBook1?: string | null; bestBook2?: string | null; tier?: string | null; maps?: unknown[] | null }) {
+export function historyExtras(m: { startDate?: string | null; positionTeam1?: number | null; positionTeam2?: number | null; coeff1?: number | null; coeff2?: number | null; openCoeff1?: number | null; openCoeff2?: number | null; closeCoeff1?: number | null; closeCoeff2?: number | null; bestCoeff1?: number | null; bestCoeff2?: number | null; bestBook1?: string | null; bestBook2?: string | null; tier?: string | null; maps?: unknown[] | null; pmCoeff1?: number | null; pmCoeff2?: number | null; pmClose1?: number | null; pmClose2?: number | null }) {
   const n = (v: number | null | undefined) => (v != null && Number.isFinite(v) && v > 1 ? String(v) : null);
   const at = m.startDate ? new Date(m.startDate) : null;
   return {
@@ -15,6 +15,7 @@ export function historyExtras(m: { startDate?: string | null; positionTeam1?: nu
     coeff1: n(m.coeff1), coeff2: n(m.coeff2), openCoeff1: n(m.openCoeff1), openCoeff2: n(m.openCoeff2),
     closeCoeff1: n(m.closeCoeff1), closeCoeff2: n(m.closeCoeff2), bestCoeff1: n(m.bestCoeff1), bestCoeff2: n(m.bestCoeff2),
     bestBook1: m.bestBook1 ?? null, bestBook2: m.bestBook2 ?? null, tier: m.tier ?? null, maps: m.maps?.length ? m.maps : null,
+    pmCoeff1: n(m.pmCoeff1), pmCoeff2: n(m.pmCoeff2), pmClose1: n(m.pmClose1), pmClose2: n(m.pmClose2),
   };
 }
 
@@ -40,7 +41,7 @@ export async function upsertMatchHistory(match: NewMatchHistory): Promise<void> 
           logoTeam2: match.logoTeam2,
           tournamentLogo: match.tournamentLogo,
           // what a predictor needs: a value once known is never wiped by a later copy without it
-          ...keep('start_at', 'rank1', 'rank2', 'coeff1', 'coeff2', 'open_coeff1', 'open_coeff2', 'close_coeff1', 'close_coeff2', 'best_coeff1', 'best_coeff2', 'best_book1', 'best_book2', 'tier', 'maps'),
+          ...keep('start_at', 'rank1', 'rank2', 'coeff1', 'coeff2', 'open_coeff1', 'open_coeff2', 'close_coeff1', 'close_coeff2', 'best_coeff1', 'best_coeff2', 'best_book1', 'best_book2', 'tier', 'maps', 'pm_coeff1', 'pm_coeff2', 'pm_close1', 'pm_close2'),
           updatedAt: new Date(),
         },
       });

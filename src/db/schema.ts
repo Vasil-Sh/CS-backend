@@ -356,6 +356,11 @@ export const matchesHistory = pgTable(
     bestBook2: varchar('best_book2', { length: 100 }),
     tier: varchar('tier', { length: 2 }),
     maps: jsonb('maps'),
+    // 0055: Polymarket — last prices and the closing line
+    pmCoeff1: numeric('pm_coeff1', { precision: 8, scale: 3 }),
+    pmCoeff2: numeric('pm_coeff2', { precision: 8, scale: 3 }),
+    pmClose1: numeric('pm_close1', { precision: 8, scale: 3 }),
+    pmClose2: numeric('pm_close2', { precision: 8, scale: 3 }),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at')
       .defaultNow()

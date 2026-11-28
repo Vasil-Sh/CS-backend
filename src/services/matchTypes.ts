@@ -39,6 +39,11 @@ export interface TipsGgMatch {
   bestCoeff2?: number | null;
   bestBook1?: string | null;
   bestBook2?: string | null;
+  /** Polymarket's prices now (a prediction market, almost no margin) and its last ones before the start. */
+  pmCoeff1?: number | null;
+  pmCoeff2?: number | null;
+  pmClose1?: number | null;
+  pmClose2?: number | null;
   /** OddsPapi fixture matched to this match (for its score lookup). */
   oddsFixtureId?: string;
   /** Liquipedia tier: S (1) … D (5); null when the page does not say. */

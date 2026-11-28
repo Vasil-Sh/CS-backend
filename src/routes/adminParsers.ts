@@ -6,6 +6,7 @@ import { forceOddsPapi, oddsRefreshCost, oddspapiDiag, oddspapiEnabled } from '.
 import { citoAdded, fallbackCount, oddsMatched, oddsMisses, pandascoreAdded } from '../services/matchFeed';
 import { pandascoreDiag, pandascoreEnabled, refreshPandaScore } from '../services/pandascoreFeed';
 import { citoDiag, citoEnabled, refreshCito } from '../services/citoFeed';
+import { polymarketDiag, polymarketEnabled, refreshPolymarket } from '../services/polymarketFeed';
 import { forceLiquipedia, liquipediaAskedAt, liquipediaPagesInfo, setPagesMode } from '../services/liquipediaFeed';
 import { listServerErrors, resolveServerError } from '../services/serverErrors';
 import { weekReport } from '../services/feedStats';
@@ -14,7 +15,7 @@ import { isNight, nightWindow } from '../services/nightMode';
 import { resolveScoreIssue, scoreIssues } from '../services/scoreCheck';
 
 /** Parsers shown on the admin screen: Liquipedia + OddsPapi + OpenDota (tips.gg and HLTV removed 23.11.2026). */
-export const knownParsers = () => ['liquipedia', ...(pandascoreEnabled() ? ['pandascore'] : []), ...(citoEnabled() ? ['cito'] : []), ...(oddspapiEnabled() ? ['oddspapi'] : []), 'opendota'];
+export const knownParsers = () => ['liquipedia', ...(pandascoreEnabled() ? ['pandascore'] : []), ...(citoEnabled() ? ['cito'] : []), ...(oddspapiEnabled() ? ['oddspapi'] : []), ...(polymarketEnabled() ? ['polymarket'] : []), 'opendota'];
 
 const parsers = new Hono();
 
@@ -65,7 +66,7 @@ parsers.get('/admin/parsers', requireAuth, requireAdmin, async (c) => {
 
   // Merge known parser sources even if they never failed.
   const known = knownParsers();
-  const [psDiag, ctDiag] = await Promise.all([pandascoreEnabled() ? pandascoreDiag() : null, citoEnabled() ? citoDiag() : null]);
+  const [psDiag, ctDiag, pmDiag] = await Promise.all([pandascoreEnabled() ? pandascoreDiag() : null, citoEnabled() ? citoDiag() : null, polymarketEnabled() ? polymarketDiag() : null]);
   const merged = known.map((name) => {
     const circuit = circuits.find((x) => x.name === name);
     const fail = failureMap.get(name);
@@ -87,6 +88,8 @@ parsers.get('/admin/parsers', requireAuth, requireAdmin, async (c) => {
       // Cito: second CS2 schedule — how many matches it added and how much of the month's 500 is left
       ...(name === 'pandascore' ? { pandascore: { ...psDiag!, added: pandascoreAdded() } } : {}),
       ...(name === 'cito' ? { cito: { ...ctDiag!, added: citoAdded() } } : {}),
+      // Polymarket: prices next to the bookmakers' — matches it lists, with prices, and how many reached ours
+      ...(name === 'polymarket' && pmDiag ? { polymarket: pmDiag } : {}),
       // OddsPapi only adds prices: show what it holds and how much of it reached our matches
       ...(name === 'oddspapi' ? { odds: (() => { const d = oddspapiDiag(), m = oddsMatched(); return { ...d, matched: m.cs2 + m.dota2, refreshCost: oddsRefreshCost(), fallback: fallbackCount(), unmatched: oddsMisses().slice(0, 40), fixturesAt: d.fixturesAt ? new Date(d.fixturesAt).toISOString() : '', oddsAt: d.oddsAt ? new Date(d.oddsAt).toISOString() : '', nextOddsAt: d.nextOddsAt ? new Date(d.nextOddsAt).toISOString() : '' }; })() } : {}),
     };
@@ -135,7 +138,7 @@ parsers.post('/admin/parsers/:name/rerun', requireAuth, requireAdmin, async (c) 
   return c.json({ success: true });
 });
 
-const KNOWN = new Set(['oddspapi', 'opendota', 'liquipedia', 'cito', 'pandascore']);
+const KNOWN = new Set(['oddspapi', 'opendota', 'liquipedia', 'cito', 'pandascore', 'polymarket']);
 function audit(actor: { userId: number; username: string }, action: string, target: string, details: Record<string, unknown>): void {
   void pool
     .query(`INSERT INTO admin_audit_log(actor_id, actor_name, action, target, details, status) VALUES($1,$2,$3,$4,$5,'success')`,
@@ -167,6 +170,10 @@ parsers.post('/admin/parsers/:name/refresh', requireAuth, requireAdmin, async (c
     if (!citoEnabled()) return c.json({ error: 'Cito вимкнено: немає ключа' }, 409);
     cost = 2;
     void refreshCito(true).catch(() => {});
+  }
+  if (name === 'polymarket') {
+    if (!polymarketEnabled()) return c.json({ error: 'Polymarket вимкнено' }, 409);
+    void refreshPolymarket(true).catch(() => {});
   }
   if (name === 'oddspapi') {
     if (!oddspapiEnabled()) return c.json({ error: 'OddsPapi вимкнено: немає ключа' }, 409);

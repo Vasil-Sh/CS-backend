@@ -19,6 +19,7 @@ import { isNight } from './nightMode';
 import { noteTeamNames } from './teamNames';
 import { checkScores, loadScoreCheck, type Report } from './scoreCheck';
 import { pandascoreEnabled, pandascoreMatches, refreshPandaScore } from './pandascoreFeed';
+import { addPolymarket, polymarketEnabled, polymarketMatches, refreshPolymarket } from './polymarketFeed';
 import { pool } from '../db/client';
 
 /** Kept for callers: the Liquipedia feed is the only one now. */
@@ -224,6 +225,8 @@ async function newFeed(game: 'cs2' | 'dota2', spendOddsPapi: boolean): Promise<T
   if (reports.size) { await loadScoreCheck(); checkScores(game, list, reports); }
   if (lp.length && odds.length) { const miss: OddsMiss[] = []; matched[game] = addOdds(list, odds, await aliasResolver(game), miss, game); misses[game] = miss; }
   else if (lp.length) { matched[game] = 0; misses[game] = []; }
+  // Polymarket's prices next to the bookmakers' (they replace none of them)
+  if (polymarketEnabled()) { const resolve = await aliasResolver(game); addPolymarket(list, polymarketMatches(game), (a, b) => sameOrShort(a, b, resolve), game); }
   // still «—:—» 6 h after the start, and Liquipedia's tournament page did not help: ask OddsPapi (≤ 5 a day)
   const noScore = list.filter((m) => m.status === 'finished' && (m.score1 == null || m.score2 == null) && m.oddsFixtureId && Date.parse(m.startDate) < Date.now() - 6 * 3_600_000);
   if (noScore.length) void requestScores(noScore.map((m) => m.oddsFixtureId!)).catch(() => {});
@@ -245,6 +248,7 @@ export async function fetchTodayMatches(game: 'dota2' | 'cs2'): Promise<TipsGgMa
   if (oddspapiEnabled() && !isNight()) void refreshOddsPapi().catch(() => {}); // no-op unless its schedule is due
   if (game === 'cs2' && citoEnabled()) void refreshCito().catch(() => {}); // no-op unless its share of the month is due
   if (pandascoreEnabled()) void refreshPandaScore().catch(() => {}); // no-op unless 10 min have passed
+  if (polymarketEnabled()) void refreshPolymarket().catch(() => {}); // no-op unless 15 min have passed
   const today = new Date().toISOString().slice(0, 10);
   const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
   return (await newFeed(game, false)).filter((m) => m.date === today || m.date === yesterday);
