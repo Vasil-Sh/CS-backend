@@ -44,6 +44,10 @@ export interface TipsGgMatch {
   pmCoeff2?: number | null;
   pmClose1?: number | null;
   pmClose2?: number | null;
+  /** «Ринок Telegram»: the channels' median price on each team (pre-match Match Winner tips) and how many channels priced it. */
+  tgCoeff1?: number | null;
+  tgCoeff2?: number | null;
+  tgChannels?: number;
   /** OddsPapi fixture matched to this match (for its score lookup). */
   oddsFixtureId?: string;
   /** Liquipedia tier: S (1) … D (5); null when the page does not say. */

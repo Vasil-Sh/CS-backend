@@ -361,6 +361,10 @@ export const matchesHistory = pgTable(
     pmCoeff2: numeric('pm_coeff2', { precision: 8, scale: 3 }),
     pmClose1: numeric('pm_close1', { precision: 8, scale: 3 }),
     pmClose2: numeric('pm_close2', { precision: 8, scale: 3 }),
+    // 0056: «Ринок Telegram» — the channels' median prices and how many channels priced it
+    tgCoeff1: numeric('tg_coeff1', { precision: 8, scale: 3 }),
+    tgCoeff2: numeric('tg_coeff2', { precision: 8, scale: 3 }),
+    tgChannels: integer('tg_channels'),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at')
       .defaultNow()

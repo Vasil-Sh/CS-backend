@@ -20,6 +20,7 @@ import { noteTeamNames } from './teamNames';
 import { checkScores, loadScoreCheck, type Report } from './scoreCheck';
 import { pandascoreEnabled, pandascoreMatches, refreshPandaScore } from './pandascoreFeed';
 import { addPolymarket, polymarketEnabled, polymarketMatches, refreshPolymarket } from './polymarketFeed';
+import { addTgMarket } from './tgMarket';
 import { pool } from '../db/client';
 
 /** Kept for callers: the Liquipedia feed is the only one now. */
@@ -227,6 +228,8 @@ async function newFeed(game: 'cs2' | 'dota2', spendOddsPapi: boolean): Promise<T
   else if (lp.length) { matched[game] = 0; misses[game] = []; }
   // Polymarket's prices next to the bookmakers' (they replace none of them)
   if (polymarketEnabled()) { const resolve = await aliasResolver(game); addPolymarket(list, polymarketMatches(game), (a, b) => sameOrShort(a, b, resolve), game); }
+  // the Telegram channels' prices from their tips (read from posts and slips)
+  { const resolve = await aliasResolver(game); await addTgMarket(list, (a, b) => sameOrShort(a, b, resolve)).catch(() => 0); }
   // still «—:—» 6 h after the start, and Liquipedia's tournament page did not help: ask OddsPapi (≤ 5 a day)
   const noScore = list.filter((m) => m.status === 'finished' && (m.score1 == null || m.score2 == null) && m.oddsFixtureId && Date.parse(m.startDate) < Date.now() - 6 * 3_600_000);
   if (noScore.length) void requestScores(noScore.map((m) => m.oddsFixtureId!)).catch(() => {});
