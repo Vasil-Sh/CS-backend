@@ -408,6 +408,16 @@ tg.post('/admin/tg-sources', requireAuth, requireAdmin, async (c) => {
   return c.json({ ok: true, handle, started: true });
 });
 
+/** POST /api/admin/tg-sources/:handle/public {shown} — «Показувати користувачам»: a test channel (only the admin sees it) or one in the app. */
+tg.post('/admin/tg-sources/:handle/public', requireAuth, requireAdmin, async (c) => {
+  const actor = c.get('user'), handle = c.req.param('handle') || '';
+  const b = await c.req.json().catch(() => ({})) as { shown?: boolean };
+  const { rowCount } = await pool.query('UPDATE tg_channels SET is_test = $2 WHERE handle = $1', [handle, !b.shown]);
+  if (!rowCount) return c.json({ error: 'Канал не знайдено' }, 404);
+  audit(actor, 'POST', `/admin/tg-sources/${handle}/public`, { shown: !!b.shown });
+  return c.json({ ok: true });
+});
+
 /** POST /api/admin/tg-sources/:handle/pause {paused} — stop / start reading. */
 tg.post('/admin/tg-sources/:handle/pause', requireAuth, requireAdmin, async (c) => {
   const actor = c.get('user'), handle = c.req.param('handle') || '';

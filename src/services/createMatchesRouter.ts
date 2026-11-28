@@ -12,7 +12,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, renameS
 import { join } from 'node:path';
 import { recordFailure } from '../services/circuitBreaker';
 import type { ILiveScoresStore } from '../services/liveScoresStore';
-import { upsertMatchHistoryBatch } from '../services/matchHistoryService';
+import { historyExtras, upsertMatchHistoryBatch } from '../services/matchHistoryService';
 import { batchComputeTeamForms } from './teamFormService';
 import { lookupLocalLogo, lookupLocalLogoRank, lookupDota2LocalLogoRank, getLocalLogoDir, lookupTipsggLogo, lookupDota2LocalLogo, getDota2LogoDir } from '../services/logoStore';
 import { touchActivity } from './activityTracker';
@@ -279,6 +279,7 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
       matchType: m.type,
       logoTeam1: m.logoTeam1,
       logoTeam2: m.logoTeam2,
+      ...historyExtras(m),
     }));
     upsertMatchHistoryBatch(entries).catch((e) =>
       console.error(`[${prefix}Matches] History persist failed:`, (e as Error).message),
@@ -302,6 +303,7 @@ export function createMatchesRouter(cfg: MatchRouterConfig): Hono {
         matchType: m.type,
         logoTeam1: m.logoTeam1,
         logoTeam2: m.logoTeam2,
+        ...historyExtras(m),
       }));
     if (finished.length > 0) {
       upsertMatchHistoryBatch(finished).catch(e =>

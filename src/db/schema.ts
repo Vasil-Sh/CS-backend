@@ -340,6 +340,22 @@ export const matchesHistory = pgTable(
     logoTeam1: varchar('logo_team1', { length: 500 }),
     logoTeam2: varchar('logo_team2', { length: 500 }),
     tournamentLogo: varchar('tournament_logo', { length: 500 }),
+    // 0054: for a predictor — when it started, both teams' ranking then, the odds (last, opening, closing, best) and the maps
+    startAt: timestamp('start_at', { withTimezone: true }),
+    rank1: integer('rank1'),
+    rank2: integer('rank2'),
+    coeff1: numeric('coeff1', { precision: 8, scale: 3 }),
+    coeff2: numeric('coeff2', { precision: 8, scale: 3 }),
+    openCoeff1: numeric('open_coeff1', { precision: 8, scale: 3 }),
+    openCoeff2: numeric('open_coeff2', { precision: 8, scale: 3 }),
+    closeCoeff1: numeric('close_coeff1', { precision: 8, scale: 3 }),
+    closeCoeff2: numeric('close_coeff2', { precision: 8, scale: 3 }),
+    bestCoeff1: numeric('best_coeff1', { precision: 8, scale: 3 }),
+    bestCoeff2: numeric('best_coeff2', { precision: 8, scale: 3 }),
+    bestBook1: varchar('best_book1', { length: 100 }),
+    bestBook2: varchar('best_book2', { length: 100 }),
+    tier: varchar('tier', { length: 2 }),
+    maps: jsonb('maps'),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at')
       .defaultNow()
